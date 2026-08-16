@@ -58,6 +58,16 @@ runs get the command and continue with the key-shape pass only.
 Already installed? Preflight detects it (engine marker + pattern file) and
 frames the run as a health check: findings are at-rest residue that masking
 does not remove — rotate or delete them.
+
+**Privacy & credential handling:** preflight is safe-by-construction —
+values are masked before they leave the machine, never echoed, and the scan
+only reads local files. It is fully **agent-runnable by design** (via your
+agent, or directly in a terminal — in a terminal nothing ever leaves the
+machine). One consideration: like any tool output, the findings — key
+names, file paths, and masked fragments — transit whatever LLM provider the
+agent session uses. If you run a local + public provider mix, run preflight
+and the follow-up conversation on your local model; that keeps the entire
+decide-step off the public wire.
 Clean → no leaks found at rest today — a solid baseline; install turns that
 baseline into prevention (masking before values ever reach logs).
 Findings → each candidate is a value at rest that *looks* like a secret:
