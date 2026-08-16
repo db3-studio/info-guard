@@ -94,8 +94,36 @@ check("short value: fully masked", redact(SHORT_LIT) == "***",
 # 2. key patterns (KEY= / KEY: / JSON forms)
 check("KEY=value form", redact("IG_PROBE_PIN=1234") == "IG_PROBE_PIN=***",
       f"got {redact('IG_PROBE_PIN=1234')!r}")
-check("KEY: value form", redact("IG_PROBE_PIN: 1234") == "IG_PROBE_PIN:***",
+check("KEY: value form", redact("IG_PROBE_PIN: 1234") == "IG_PROBE_PIN: ***",
       f"got {redact('IG_PROBE_PIN: 1234')!r}")
+# 2b. external-audit F1 regressions: JSON key forms + quoted multi-word values
+# (separate file — must not clobber the shared pfile that tests 1–3 use)
+pfile2 = os.path.join(tmp, "patterns2.json")
+write(pfile2, {
+    "mask": {"head": 2, "tail": 2, "floor": 12},
+    "literals": [],
+    "key_patterns": {"ig_probe_passphrase": True},
+})
+_json_dq = '{"ig_probe_passphrase": "auditprobe12345"}'
+_json_sq = "'ig_probe_passphrase': 'auditprobe12345'"
+_mw = 'ig_probe_passphrase="audit probe words 123"'
+_ws = "ig_probe_passphrase = 1234"
+_ev = 'ig_probe_passphrase=""'
+check("JSON double-quote key form",
+      redact(_json_dq, patterns=pfile2) == '{"ig_probe_passphrase": "au...45"}',
+      f"got {redact(_json_dq, patterns=pfile2)!r}")
+check("JSON single-quote key form",
+      redact(_json_sq, patterns=pfile2) == "'ig_probe_passphrase': 'au...45'",
+      f"got {redact(_json_sq, patterns=pfile2)!r}")
+check("quoted multi-word value",
+      redact(_mw, patterns=pfile2) == 'ig_probe_passphrase="au...23"',
+      f"got {redact(_mw, patterns=pfile2)!r}")
+check("separator whitespace preserved",
+      redact(_ws, patterns=pfile2) == "ig_probe_passphrase = ***",
+      f"got {redact(_ws, patterns=pfile2)!r}")
+check("empty value passthrough",
+      redact(_ev, patterns=pfile2) == _ev,
+      f"got {redact(_ev, patterns=pfile2)!r}")
 
 # 3. file_read sentinel: masked value must be a non-reusable sentinel, never
 #    the original or a reconstructible fragment
@@ -152,6 +180,31 @@ proc = subprocess.run([sys.executable, "-c", code], env=env,
 check("fresh HERMES_HOME: default path resolved, value masked",
       proc.returncode == 0 and proc.stdout.strip() == "ig...bc",
       f"rc={proc.returncode} out={proc.stdout.strip()!r} err={proc.stderr.strip()[-200:]!r}")
+
+# 7. external-audit F2 regression: the setup wizard must register
+#    gitleaks-only findings (not drop them as "value too short")
+setup_home = os.path.join(tmp, "setup-home")
+os.makedirs(os.path.join(setup_home, "sessions"), exist_ok=True)
+with open(os.path.join(setup_home, "sessions", "d.json"), "w") as f:
+    # runtime-constructed (push protection: even the canonical fake webhook
+    # URL trips GitHub's secret scanner as a literal)
+    f.write('{"hook":"' + "https://hooks.slack.com/services/" + "T00000000/B00000000/" + "X" * 24 + '"}\n')
+env2 = dict(os.environ)
+env2["HERMES_HOME"] = setup_home
+setup = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "setup", "--all"],
+    env=env2, capture_output=True, text=True, timeout=300)
+cl = os.path.join(setup_home, "state", "info-guard", "custom_literals.json")
+reg = False
+if os.path.exists(cl):
+    data = json.load(open(cl))
+    for l in data.get("literals", []):
+        v = l if isinstance(l, str) else l.get("value", "")
+        if "hooks.slack.com" in v:
+            reg = True
+check("setup registers gitleaks-only finding (audit F2)",
+      reg and "too short" not in setup.stdout + setup.stderr,
+      f"rc={setup.returncode} registered={reg}")
 
 print(f"\n[test] {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

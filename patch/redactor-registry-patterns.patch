@@ -1,8 +1,8 @@
 diff --git a/agent/redact.py b/agent/redact.py
-index 7fa3c11e1..940665291 100644
+index 7fa3c11e..99dc805d 100644
 --- a/agent/redact.py
 +++ b/agent/redact.py
-@@ -1006,6 +1006,172 @@ def redact_sensitive_text(
+@@ -1006,6 +1006,187 @@ def redact_sensitive_text(
              return phone[:4] + "****" + phone[-4:]
          text = _SIGNAL_PHONE_RE.sub(_redact_phone, text)
  
@@ -21,8 +21,8 @@ index 7fa3c11e1..940665291 100644
 +    return text
 +
 +
-+_PATTERNS_CACHE: dict = {"mtime": None, "lit_re": None, "key_re": None,
-+                         "lit_masks": {}, "default_mask": None,
++_PATTERNS_CACHE: dict = {"mtime": None, "path": None, "lit_re": None,
++                         "key_re": None, "lit_masks": {}, "default_mask": None,
 +                         "broken": False}
 +
 +
@@ -109,12 +109,14 @@ index 7fa3c11e1..940665291 100644
 +        mtime = path.stat().st_mtime_ns
 +    except OSError:
 +        _PATTERNS_CACHE["mtime"] = None
++        _PATTERNS_CACHE["path"] = None
 +        _PATTERNS_CACHE["lit_re"] = None
 +        _PATTERNS_CACHE["key_re"] = None
 +        _PATTERNS_CACHE["lit_masks"] = {}
 +        _PATTERNS_CACHE["broken"] = False
 +        return text
 +    if not (_PATTERNS_CACHE.get("mtime") == mtime
++            and _PATTERNS_CACHE.get("path") == str(path)
 +            and (_PATTERNS_CACHE.get("lit_re") is not None
 +                 or _PATTERNS_CACHE.get("broken"))):
 +        try:
@@ -123,6 +125,7 @@ index 7fa3c11e1..940665291 100644
 +            # stat worked but read failed — keep the last-good set active and
 +            # retry on the next mtime change (same fail-safe as broken JSON).
 +            _PATTERNS_CACHE["mtime"] = mtime
++            _PATTERNS_CACHE["path"] = str(path)
 +            _PATTERNS_CACHE["broken"] = True
 +        except ValueError:
 +            # Broken file: keep the last-good pattern set ACTIVE (never unmask
@@ -130,6 +133,7 @@ index 7fa3c11e1..940665291 100644
 +            # don't re-parse it on every call. A repaired file has a new mtime
 +            # and reloads automatically.
 +            _PATTERNS_CACHE["mtime"] = mtime
++            _PATTERNS_CACHE["path"] = str(path)
 +            _PATTERNS_CACHE["broken"] = True
 +        else:
 +            lit_masks = {}
@@ -153,12 +157,14 @@ index 7fa3c11e1..940665291 100644
 +                if lit_values else None)
 +            _PATTERNS_CACHE["key_re"] = (
 +                re.compile(r"(?i)\b(" + "|".join(re.escape(k) for k in keys)
-+                           + r")\s*([=:])\s*([\"']?)([^\s\"',;}{]+)")
++                           + r")(['\"]?)(\s*)([=:])(\s*)"
++                           + r"(?:\"([^\"\n]*)\"|'([^'\n]*)'|([^\s\"',;}{}\])]+))")
 +                if keys else None)
 +            _PATTERNS_CACHE["lit_masks"] = lit_masks
 +            _PATTERNS_CACHE["default_mask"] = data.get("mask")
 +            _PATTERNS_CACHE["broken"] = False
 +            _PATTERNS_CACHE["mtime"] = mtime
++            _PATTERNS_CACHE["path"] = str(path)
 +    if _PATTERNS_CACHE["lit_re"] is not None:
 +        def _lit(m):
 +            spec = _PATTERNS_CACHE["lit_masks"].get(m.group(0))
@@ -168,18 +174,27 @@ index 7fa3c11e1..940665291 100644
 +        text = _PATTERNS_CACHE["lit_re"].sub(_lit, text)
 +    if _PATTERNS_CACHE["key_re"] is not None:
 +        def _k(m):
-+            val = m.group(4)
-+            return (m.group(1) + m.group(2) + m.group(3)
-+                    + _apply_mask(val, _PATTERNS_CACHE["default_mask"], file_read))
++            if m.group(6) is not None:
++                q, val = '"', m.group(6)
++            elif m.group(7) is not None:
++                q, val = "'", m.group(7)
++            else:
++                q, val = "", m.group(8) or ""
++            if not val:
++                return m.group(0)      # empty value — nothing to mask
++            return (m.group(1) + (m.group(2) or "") + m.group(3) + m.group(4)
++                    + m.group(5) + q
++                    + _apply_mask(val, _PATTERNS_CACHE["default_mask"], file_read)
++                    + q)
 +        text = _PATTERNS_CACHE["key_re"].sub(_k, text)
      return text
  
  
 diff --git a/cli.py b/cli.py
-index 5b737212d..b32f1ea9f 100644
+index 8b9661f0..1797a361 100644
 --- a/cli.py
 +++ b/cli.py
-@@ -772,6 +772,9 @@ def load_cli_config() -> Dict[str, Any]:
+@@ -770,6 +770,9 @@ def load_cli_config() -> Dict[str, Any]:
          redact = security_config.get("redact_secrets")
          if redact is not None:
              os.environ["HERMES_REDACT_SECRETS"] = str(redact).lower()
@@ -190,10 +205,10 @@ index 5b737212d..b32f1ea9f 100644
      # Session-search index knobs (hermes_state reads the env carriers).
      sessions_config = defaults.get("sessions", {})
 diff --git a/gateway/run.py b/gateway/run.py
-index a4fcde2d4..fb6870501 100644
+index a3485ccb..52bcbe1f 100644
 --- a/gateway/run.py
 +++ b/gateway/run.py
-@@ -2379,6 +2379,9 @@ if _config_path.exists():
+@@ -2326,6 +2326,9 @@ if _config_path.exists():
              _redact = _security_cfg.get("redact_secrets")
              if _redact is not None:
                  os.environ["HERMES_REDACT_SECRETS"] = str(_redact).lower()
@@ -204,10 +219,10 @@ index a4fcde2d4..fb6870501 100644
          _gateway_cfg = _cfg.get("gateway", {})
          if isinstance(_gateway_cfg, dict):
 diff --git a/hermes_cli/config.py b/hermes_cli/config.py
-index cd226a92a..cd39b458d 100644
+index bca802d0..f3c3a987 100644
 --- a/hermes_cli/config.py
 +++ b/hermes_cli/config.py
-@@ -3658,12 +3658,16 @@ _SECURITY_COMMENT = """
+@@ -3657,12 +3657,16 @@ _SECURITY_COMMENT = """
  # tokens, and passwords are masked in tool output, logs, and chat
  # responses before the model or user ever sees them. Set redact_secrets
  # to false to disable (e.g. when developing the redactor itself).
@@ -224,7 +239,7 @@ index cd226a92a..cd39b458d 100644
  #   tirith_enabled: true
  #   tirith_path: "tirith"
  #   tirith_timeout: 5
-@@ -3702,6 +3706,7 @@ _COMMENTED_SECTIONS = """
+@@ -3701,6 +3705,7 @@ _COMMENTED_SECTIONS = """
  #
  # security:
  #   redact_secrets: true
@@ -233,10 +248,10 @@ index cd226a92a..cd39b458d 100644
  # ── Fallback Model ────────────────────────────────────────────────────
  # Automatic provider failover when primary is unavailable.
 diff --git a/hermes_cli/main.py b/hermes_cli/main.py
-index ed9fe973a..75568ad3b 100644
+index e0371049..bf58f108 100644
 --- a/hermes_cli/main.py
 +++ b/hermes_cli/main.py
-@@ -711,9 +711,11 @@ load_hermes_dotenv(
+@@ -701,9 +701,11 @@ from hermes_cli.env_loader import load_hermes_dotenv
  
 -# Bridge security.redact_secrets from config.yaml → HERMES_REDACT_SECRETS env
 -# var BEFORE hermes_logging imports agent.redact (which snapshots the flag at
@@ -253,7 +268,7 @@ index ed9fe973a..75568ad3b 100644
  #
  # We also read network.force_ipv4 from the same yaml load to avoid two
  # separate config.yaml reads (saves ~17ms on every CLI startup — the second
-@@ -744,6 +746,12 @@ try:
+@@ -735,6 +737,12 @@ try:
                  _early_redact = _early_sec_cfg.get("redact_secrets")
                  if _early_redact is not None:
                      os.environ["HERMES_REDACT_SECRETS"] = str(_early_redact).lower()

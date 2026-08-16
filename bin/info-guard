@@ -515,9 +515,14 @@ def cmd_preflight(args):
     return 1
 
 
-def _collect_hits(dirs):
+def _collect_hits(dirs, redact=True):
     """Shared scan used by preflight and setup. Returns (all_hits,
-    gitleaks_ok) with 7-tuples (cls, rule, rel, line, value, masked, ctx)."""
+    gitleaks_ok) with 7-tuples (cls, rule, rel, line, value, masked, ctx).
+
+    redact=False is for the setup wizard ONLY: gitleaks findings must
+    carry their real value so the user can register it (the wizard never
+    echoes it — it goes straight into custom_literals.json). Preflight
+    stays redact=True (read-only, values blanked)."""
     all_hits, gitleaks_ok = [], True
     for d in dirs:
         for p in sorted(d.rglob("*")):
@@ -525,7 +530,7 @@ def _collect_hits(dirs):
                 continue
             for hit in _key_scan(p):
                 all_hits.append((hit[0], hit[1], str(p.relative_to(_HERMES_HOME)), *hit[2:]))
-        ghits, ok = _gitleaks_scan(d)
+        ghits, ok = _gitleaks_scan(d, redact=redact)
         gitleaks_ok = gitleaks_ok and ok
         for cls, rule, fname, line, value, masked, ctx in ghits:
             rel = os.path.relpath(fname, str(_HERMES_HOME)) if fname else str(d)
@@ -600,7 +605,7 @@ def cmd_setup(args):
     _ensure_gitleaks()
     print(f"[info-guard] setup — scanning {len(dirs)} dirs under {_HERMES_HOME} "
           f"(read-only scan; only your confirmed choices write anything)")
-    all_hits, gitleaks_ok = _collect_hits(dirs)
+    all_hits, gitleaks_ok = _collect_hits(dirs, redact=False)
     if not gitleaks_ok:
         print("[info-guard] setup: ⚠ gitleaks not found on PATH — key-shape pass only")
     from collections import OrderedDict
