@@ -33,11 +33,23 @@ After:   "the token is 7f...3c and the PIN is ***"
   collisions are the only over-redaction surface, and the curated key list
   is the only global one.
 
+**The honest boundary.** The pattern file lives *inside* Hermes' trust
+envelope — same OS user, same filesystem. `chmod 600` protects it from
+other OS users, and this package never intentionally passes it to model
+context — but nothing in-process can protect it from Hermes itself or
+from anything running as your user. Hermes' own security model puts the
+hard boundary at OS isolation (sandboxes/containers/VMs); in-process
+filtering is heuristic. If your threat model requires the registry to be
+unreadable by the agent, that is the daemon architecture (a separate
+process exposing only a register/unregister/sanitize API) — on the
+roadmap as v2.
+
 ## Install (any of these)
 
 Requires Hermes Agent **v0.20.0+** — the patch is apply-checked and the
-test suite passes 15/15 against v0.20.0, v0.20.1, and v0.20.2 (one
-version-tolerant patch). Takes about two minutes.
+upstream test suite passes 20/20 against v0.20.0, v0.20.1, and v0.20.2
+(one version-tolerant patch; `test.sh` is the package's own 17-check
+battery, separate from the upstream suite). Takes about two minutes.
 
 **Step 0 — preflight (optional but recommended):** before deciding, check
 whether you're *already* leaking without knowing it — Hermes' own transcripts

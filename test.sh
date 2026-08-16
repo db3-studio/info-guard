@@ -206,6 +206,38 @@ check("setup registers gitleaks-only finding (audit F2)",
       reg and "too short" not in setup.stdout + setup.stderr,
       f"rc={setup.returncode} registered={reg}")
 
+# 8. external-audit C5 adversarial batch (boundary/format fuzz)
+write(pfile, {
+    "mask": {"head": 2, "tail": 2, "floor": 12},
+    "literals": ["ig-probe-default-12345", "ig-pröbe-12345"],
+    "key_patterns": {"ig_probe_passphrase": True, "IG_PROBE_PIN": True},
+})
+g_close = redact("IG_PROBE_PIN=1234}")
+check("delimiter: } terminates value", g_close == "IG_PROBE_PIN=***}",
+      f"got {g_close!r}")
+g_comma = redact("IG_PROBE_PIN=1234,OTHER=1")
+check("delimiter: , terminates value",
+      g_comma == "IG_PROBE_PIN=***,OTHER=1", f"got {g_comma!r}")
+g_q = redact('IG_PROBE_PIN="1234"')
+check("quoted value", g_q == 'IG_PROBE_PIN="***"', f"got {g_q!r}")
+g_ws = redact("IG_PROBE_PIN = 1234")
+check("separator whitespace preserved", g_ws == "IG_PROBE_PIN = ***",
+      f"got {g_ws!r}")
+g_var = redact("ig_probe_passphrase=${IG_PROBE_PIN}")
+check("variable-ref masks first token",
+      g_var == "ig_probe_passphrase=***{IG_PROBE_PIN}", f"got {g_var!r}")
+g_xml = redact("<ApiKey>ig-probe-default-12345</ApiKey>")
+check("literal masks inside XML", g_xml == "<ApiKey>ig...45</ApiKey>",
+      f"got {g_xml!r}")
+g_xmlgap = redact("<PIN>4321</PIN>")
+check("XML key form NOT masked (documented gap)",
+      g_xmlgap == "<PIN>4321</PIN>", f"got {g_xmlgap!r}")
+g_once = redact("IG_PROBE_PIN=1234")
+check("idempotent re-masking", redact(g_once) == g_once, f"got {redact(g_once)!r}")
+g_uni = redact("ig-pröbe-12345")
+check("unicode literal", g_uni == "ig...45", f"got {g_uni!r}")
+
+
 print(f"\n[test] {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
 PYEOF

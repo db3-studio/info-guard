@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  matrix:
+    name: hermes-agent @ ${{ matrix.ref }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # release commits: v0.20.0 (2026.8.3), v0.20.1 (2026.8.13),
+        # v0.20.2 (2026.8.16) — the patch is apply-checked against all three
+        # plus current main; a future release that drifts is caught by
+        # install.sh's fail-loud apply-check (not by this matrix).
+        ref: [3c27eb623, 720f0443a, df4b65147]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install gitleaks (pinned 8.30.1)
+        run: |
+          curl -sSfL -o /tmp/gl.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          tar -xzf /tmp/gl.tar.gz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: Clone hermes-agent @ ${{ matrix.ref }}
+        run: |
+          git clone --quiet --filter=blob:none https://github.com/NousResearch/hermes-agent.git /tmp/hermes
+          git -C /tmp/hermes fetch --quiet --depth 1 origin ${{ matrix.ref }}
+          git -C /tmp/hermes checkout --quiet FETCH_HEAD
+
+      - name: Apply patch (apply-check first — fail loud on drift)
+        run: |
+          git -C /tmp/hermes apply --check "$GITHUB_WORKSPACE/patch/redactor-registry-patterns.patch"
+          git -C /tmp/hermes apply "$GITHUB_WORKSPACE/patch/redactor-registry-patterns.patch"
+
+      - name: Copy test suite
+        run: |
+          mkdir -p /tmp/hermes/tests/hermes_cli
+          cp "$GITHUB_WORKSPACE/tests/agent/test_redact_registry_patterns.py" /tmp/hermes/tests/agent/
+          cp "$GITHUB_WORKSPACE/tests/hermes_cli/test_redact_patterns_bridge.py" /tmp/hermes/tests/hermes_cli/
+
+      - name: Install test dependencies
+        run: pip install --quiet pytest pyyaml python-dotenv
+
+      - name: Upstream suite (20 tests)
+        run: cd /tmp/hermes && python -m pytest tests/agent/test_redact_registry_patterns.py tests/hermes_cli/test_redact_patterns_bridge.py -q
+
+      - name: Package battery (26 checks)
+        run: bash "$GITHUB_WORKSPACE/test.sh" --checkout /tmp/hermes
+
+      - name: Repo secret scan
+        run: gitleaks dir "$GITHUB_WORKSPACE" --redact=8 --no-banner --exit-code=1

@@ -98,6 +98,31 @@ masking those values was pure information loss.
 - **Per-instance**: the default path resolves under `$HERMES_HOME`, so
   profiles and relocated installs each get their own file (no cross-instance
   leakage, no silent no-op under a remapped home).
+- **Boundary (honest)**: the pattern file is *inside* the agent's trust
+  envelope — 0600 protects it from other OS users; nothing in-process can
+  protect it from the agent itself (OS isolation is the hard boundary per
+  Hermes' own model; a SANITIZE-only daemon is the v2 direction).
+- **Coverage gap (documented)**: `key_patterns` masks `KEY=`, `KEY:`, and
+  JSON key forms. XML-style tags (`<ApiKey>value</ApiKey>`) are NOT covered
+  by key patterns — register those values as exact literals instead
+  (literals mask anywhere, including inside XML).
+
+## The `.env` grammar (what `info-guard build` parses)
+
+Lines are `KEY=value`; anything after the first `=` is the value:
+
+- keys must match `[A-Za-z_][A-Za-z0-9_]*` (other lines are skipped)
+- surrounding single or double quotes are stripped from the value
+- trailing `# comments` are stripped only when preceded by whitespace
+  (a `#` inside the value is part of the value)
+- `export KEY=...` prefixes are not supported
+- non-secret keys (hosts, URLs, usernames, flags, schedules, ports, …) are
+  excluded via a curated list (the matcher's `_is_non_secret_key`);
+  secret-shaped keys become key patterns, and values ≥ 8 chars become
+  exact literals
+- values shorter than 8 chars are not registered as literals (precision
+  floor), but their KEY still becomes a key pattern — so `PIN=1234` masks
+  even though the value is unregistered
 
 ## Custom literals (the PII workflow)
 
@@ -113,7 +138,7 @@ Edit it, then run `info-guard build` — live within seconds, no restarts.
 ## Version notes
 
 - Requires Hermes Agent **v0.20.0+**. One version-tolerant patch: apply-checked
-  and 15/15 test suite against v0.20.0 (2026.8.3), v0.20.1 (2026.8.13), and
+  and 20/20 test suite against v0.20.0 (2026.8.3), v0.20.1 (2026.8.13), and
   v0.20.2 (2026.8.16) — 0.20.2 drifted `hermes_cli/main.py` (dotenv loading
   rework) and the patch context was rebased to cover all three.
 - `install.sh` / `uninstall.sh` fail loudly if the patch doesn't apply after
