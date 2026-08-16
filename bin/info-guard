@@ -12,6 +12,11 @@ Usage:
                                     Extra ENV_FILE args add more sources
                                     (e.g. docker compose .env files).
   info-guard status                 Show a summary of the current pattern file.
+  info-guard preflight [DIR ...]    Zero-config leak scan of Hermes' own data
+                                    (default: <home>/sessions, <home>/logs,
+                                    <home>/cron/output) — run BEFORE deciding
+                                    whether to install. Read-only, output
+                                    masked, nothing written.
 
 Sources merged by `build`:
   1. Every KEY=value pair from the env files, except:
@@ -36,7 +41,10 @@ leak detection, rotation, watchdogs — is documented in docs/full-stack.md.
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -181,6 +189,178 @@ def cmd_status():
     return 0
 
 
+# ── preflight: zero-config leak scan of Hermes' own data ───────────────────
+# Run BEFORE installing: answers "am I already leaking without knowing it?"
+# No registry, no state, nothing written. Two detection passes over the
+# transcript/log dirs: (a) key-shape regexes (KEY=value with secret-family
+# keys, known token prefixes), (b) gitleaks' already-tuned ruleset
+# (--redact=8, same invocation the full-stack detector uses).
+_PREFLIGHT_DIRS = ["sessions", "logs", "cron/output"]
+
+_KEY_FAMILY_RE = re.compile(
+    r"(?:api[ _.\-]?key|token|secret|passwd|password|credential|auth|pass|pw|pin)\b",
+    re.IGNORECASE)
+_KEY_FORM_RE = re.compile(
+    r"\b([A-Za-z0-9_.\-]*" + _KEY_FAMILY_RE.pattern + r"[A-Za-z0-9_.\-]*)\s*[=:]\s*(\S+)",
+    re.IGNORECASE)
+_TOKEN_PREFIX_RE = re.compile(
+    r"\b(sk-[A-Za-z0-9_\-]{10,}|key_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|"
+    r"github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9\-]{10,}|AKIA[A-Za-z0-9]{16}|"
+    r"AC[a-z0-9]{32}|whsec_[A-Za-z0-9]{16,}|glpat-[A-Za-z0-9_\-]{10,}|"
+    r"xr[a-z0-9_\-]{10,})\b")
+_TRIVIAL_VALUES = {"true", "false", "null", "none", "yes", "no", "0", "1", "undefined", "auto"}
+# Hard-mask for gitleaks Match context: any 16+ char run (token-shaped
+# fragments survive gitleaks' own --redact in the Match field)
+_HARD_MASK_RE = re.compile(r"[A-Za-z0-9_\-./+=]{16,}")
+
+
+def _mask_value(v: str) -> str:
+    if len(v) <= 10:
+        return "***"
+    return v[:2] + "..." + v[-2:]
+
+
+def _key_scan(path: Path):
+    """Key-shape + token-prefix pass over one file. Returns list of
+    (cls, rule, line_no, masked_repr, context)."""
+    hits = []
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return hits
+    for lineno, line in enumerate(text.splitlines(), 1):
+        line = line.rstrip("\n")
+        for m in _KEY_FORM_RE.finditer(line):
+            key, val = m.group(1), m.group(2)
+            if val.lower() in _TRIVIAL_VALUES or re.fullmatch(r"\d{1,6}", val):
+                continue
+            if len(val) > 64:                       # giant json blob, not a value
+                continue
+            ctx = line[: m.end()] + line[m.end():][:80]
+            ctx = re.sub(re.escape(val), "***", ctx, count=1)
+            hits.append(("KEY-SHAPE", f"key-family:{key[:40]}", lineno,
+                         f"{key}={_mask_value(val)}", ctx))
+        for m in _TOKEN_PREFIX_RE.finditer(line):
+            tok = m.group(1)
+            ctx = line[: m.end()] + line[m.end():][:80]
+            ctx = re.sub(re.escape(tok), "***", ctx, count=1)
+            hits.append(("TOKEN-SHAPE", "known-prefix", lineno,
+                         _mask_value(tok), ctx))
+    return hits
+
+
+def _gitleaks_scan(root: Path):
+    """gitleaks dir over one directory tree (already-tuned ruleset).
+    Returns (hits, available) — available=False when gitleaks is missing.
+    NEVER prints the raw Secret field; the Match line is hard-masked (all
+    16+ char runs replaced) before it can reach the terminal."""
+    if not shutil.which("gitleaks"):
+        return [], False
+    report = tempfile.mktemp(suffix=".json")
+    hits = []
+    try:
+        subprocess.run(
+            ["gitleaks", "dir", str(root), "--redact=8", "--no-banner",
+             "--report-format=json", f"--report-path={report}"],
+            capture_output=True, timeout=600)
+        try:
+            findings = json.loads(Path(report).read_text())
+        except (OSError, json.JSONDecodeError):
+            findings = []
+        for f in findings:
+            rule = f.get("RuleID", "?")
+            cls = "SUSPICIOUS" if rule == "generic-api-key" else "HIGH-CONFIDENCE"
+            secret = f.get("Secret", "") or ""
+            match = f.get("Match", "") or ""
+            # Hard-mask: gitleaks' Match may keep long visible fragments
+            # (--redact=8 applies to Secret, not always to Match context).
+            match = _HARD_MASK_RE.sub("***", match)
+            # Also scrub the (redacted) secret form itself from the context
+            if secret and len(secret) >= 4:
+                match = match.replace(secret, "***")
+            hits.append((cls, rule, f.get("File", "?"), f.get("StartLine", 0),
+                         "***", match.strip()[:140]))
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    finally:
+        try:
+            os.unlink(report)
+        except OSError:
+            pass
+    return hits, True
+
+
+def cmd_preflight(args):
+    dirs = []
+    for name in args or _PREFLIGHT_DIRS:
+        p = _HERMES_HOME / name
+        if p.is_dir():
+            dirs.append(p)
+    if not dirs:
+        print(f"[info-guard] preflight: no scan targets under {_HERMES_HOME} "
+              f"({', '.join(_PREFLIGHT_DIRS)}) — nothing to scan")
+        return 0
+    total = 0
+    for d in dirs:
+        total += sum(1 for _ in d.rglob("*") if _.is_file())
+    print(f"[info-guard] preflight — scanning {len(dirs)} dirs / ~{total} files "
+          f"under {_HERMES_HOME} (read-only, nothing written)")
+    all_hits, gitleaks_ok = [], True
+    for d in dirs:
+        for p in sorted(d.rglob("*")):
+            if not p.is_file():
+                continue
+            for hit in _key_scan(p):
+                all_hits.append((hit[0], hit[1], str(p.relative_to(_HERMES_HOME)), *hit[2:]))
+        ghits, ok = _gitleaks_scan(d)
+        gitleaks_ok = gitleaks_ok and ok
+        for cls, rule, fname, line, masked, ctx in ghits:
+            rel = os.path.relpath(fname, str(_HERMES_HOME)) if fname else str(d)
+            all_hits.append((cls, rule, rel, line, masked, ctx))
+    if not gitleaks_ok:
+        print("[info-guard] preflight: ⚠ gitleaks not found on PATH — ran "
+              "key-shape pass only (install gitleaks for the tuned-ruleset pass)")
+    all_hits.sort(key=lambda h: (h[2], h[3]))
+    print()
+    if not all_hits:
+        print("[info-guard] ✓ preflight CLEAN — no key-shaped values, token "
+              "prefixes, or gitleaks rule hits in Hermes' transcripts/logs.\n"
+              "  Safe to proceed with install.")
+        return 0
+    print(f"[info-guard] ✗ preflight FINDINGS — {len(all_hits)} candidate(s) in "
+          f"Hermes' own data. Each is a value that LOOKS like a secret at rest:")
+    from collections import Counter, OrderedDict
+    tier = Counter(h[0] for h in all_hits)
+    print(f"    tiers: {', '.join(f'{k} {v}' for k, v in tier.most_common())}")
+    # dedup identical (cls, rule, file, line, value) → ×N display
+    deduped = OrderedDict()
+    for h in all_hits:
+        key = (h[0], h[1], h[2], h[3], h[4])
+        count, _ = deduped.get(key, (0, None))
+        deduped[key] = (count + 1, h)
+    print()
+    shown = 0
+    for key, (n, h) in deduped.items():
+        if shown >= 50:
+            break
+        cls, rule, rel, line, masked, ctx = h
+        print(f"  [{cls}] {rule}" + (f" (×{n} files/lines)" if n > 1 else ""))
+        print(f"      {rel}:{line}  value={masked}")
+        if ctx:
+            print(f"      …{ctx}…")
+        print()
+        shown += 1
+    if len(deduped) > 50:
+        print(f"  …and {len(deduped) - 50} more unique candidates (first 50 shown)")
+    print("  What this means: a secret at rest in transcripts/logs is already\n"
+          "  compromised (anyone with file access can read it). Review the list;\n"
+          "  for anything you confirm is a real secret: ROTATE it, then install\n"
+          "  Info Guard so future occurrences are masked at the source.\n"
+          "  Known false-positive classes: code identifiers (password_hash =),\n"
+          "  config examples in docs, harmless IDs matching token prefixes.")
+    return 1
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
@@ -191,6 +371,8 @@ def main(argv):
         return 0
     if cmd == "status":
         return cmd_status()
+    if cmd == "preflight":
+        return cmd_preflight(rest)
     print(f"[info-guard] unknown command: {cmd} (try `info-guard --help`)")
     return 2
 

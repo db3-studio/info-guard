@@ -37,6 +37,21 @@ After:   "the token is 7f...3c and the PIN is ***"
 
 Requires Hermes Agent **v0.20.1+**. Takes about two minutes.
 
+**Step 0 — preflight (optional but recommended):** before deciding, check
+whether you're *already* leaking without knowing it — Hermes' own transcripts
+and logs may hold secrets that predate redaction:
+
+```bash
+./bin/info-guard preflight
+```
+
+Zero-config, read-only, nothing written, output fully masked. Scans
+`<home>/sessions`, `<home>/logs`, and `<home>/cron/output` with two passes:
+key-shape regexes (`KEY=value` with secret-family keys, known token prefixes)
+and gitleaks' already-tuned ruleset. Clean → install with confidence.
+Findings → each candidate is a value at rest that *looks* like a secret:
+review the list, rotate anything you confirm, then install.
+
 **You (terminal):**
 
 ```bash
