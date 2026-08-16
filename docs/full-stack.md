@@ -79,7 +79,7 @@ Scheduled, silent-when-clean scanners. The reference deployment runs:
 
 | Scanner | Schedule | What it does |
 |---|---|---|
-| **Preflight (`info-guard preflight`)** | on demand, before install | Zero-config leak scan of Hermes' own transcripts/logs — key-shape regexes + gitleaks tuned ruleset; the same two passes the scheduled scanner runs, without needing a registry. This is the entry point: run it first, schedule it after |
+| **Preflight (`info-guard preflight`)** | on demand, before install | Zero-config leak scan of Hermes' own transcripts/logs — key-shape regexes + gitleaks tuned ruleset; the same two passes the scheduled scanner runs, without needing a registry. This is the entry point: run it first, schedule it after. gitleaks is optional (preflight checks first and offers to install it); without it, key-shape + token-prefix passes still run |
 | Leak scan | every 6h | Scans transcripts, logs, and request dumps for registry values, key-shaped secrets, and token-shaped values |
 | HIBP exposed check | weekly | Compares registry hashes against haveibeenpwned's exposed-password API |
 | gitleaks discovery | nightly | Scans new app configs/repos for unregistered secrets |

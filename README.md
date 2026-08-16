@@ -48,7 +48,12 @@ and logs may hold secrets that predate redaction:
 Zero-config, read-only, nothing written, output fully masked. Scans
 `<home>/sessions`, `<home>/logs`, and `<home>/cron/output` with two passes:
 key-shape regexes (`KEY=value` with secret-family keys, known token prefixes)
-and gitleaks' already-tuned ruleset. Clean → install with confidence.
+and gitleaks' already-tuned ruleset. **gitleaks is optional** — the core
+product never needs it — but it powers this scan's provider-format tier. If
+it's missing, preflight explains the benefit and offers to install it
+(`go install` or the GitHub release binary into `~/.local/bin`); non-tty
+runs get the command and continue with the key-shape pass only.
+Clean → install with confidence.
 Findings → each candidate is a value at rest that *looks* like a secret:
 review the list, rotate anything you confirm, then install.
 

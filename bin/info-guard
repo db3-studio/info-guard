@@ -218,6 +218,7 @@ _TRIVIAL_VALUES = {"true", "false", "null", "none", "yes", "no", "0", "1", "unde
 # Hard-mask for gitleaks Match context: any 16+ char run (token-shaped
 # fragments survive gitleaks' own --redact in the Match field)
 _HARD_MASK_RE = re.compile(r"[A-Za-z0-9_\-./+=]{16,}")
+_GITLEAKS_RELEASES_URL = "https://api.github.com/repos/gitleaks/gitleaks/releases/latest"
 
 
 def _mask_value(v: str) -> str:
@@ -256,6 +257,124 @@ def _key_scan(path: Path):
     return hits
 
 
+def _gitleaks_available() -> bool:
+    """gitleaks on PATH, or in the usual user-level spots (~/go/bin from
+    `go install`, ~/.local/bin from the release installer)."""
+    if shutil.which("gitleaks"):
+        return True
+    for cand in (Path.home() / "go" / "bin" / "gitleaks",
+                 Path.home() / ".local" / "bin" / "gitleaks"):
+        if cand.is_file():
+            return True
+    return False
+
+
+def _install_gitleaks() -> bool:
+    """Best-effort install: `go install` when go exists, else the GitHub
+    release binary into ~/.local/bin. Returns True on success."""
+    import io
+    import platform
+    import tarfile
+    import urllib.request
+
+    go = shutil.which("go")
+    if go:
+        print("  installing via `go install github.com/gitleaks/gitleaks/v8@latest`…")
+        try:
+            subprocess.run([go, "install", "github.com/gitleaks/gitleaks/v8@latest"],
+                           capture_output=True, timeout=600)
+            if (Path.home() / "go" / "bin" / "gitleaks").is_file():
+                print("  ✓ installed — note: ~/go/bin may need to be on PATH")
+                return True
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        print("  go install did not produce a usable binary — trying the release download…")
+    os_name = {"linux": "linux", "darwin": "darwin"}.get(sys.platform)
+    arch = {"x86_64": "x64", "amd64": "x64",
+            "aarch64": "arm64", "arm64": "arm64"}.get(platform.machine())
+    if not os_name or not arch:
+        print("  ✗ unsupported platform for auto-install — grab the binary from "
+              "https://github.com/gitleaks/gitleaks/releases")
+        return False
+    try:
+        with urllib.request.urlopen(_GITLEAKS_RELEASES_URL, timeout=30) as r:
+            release = json.load(r)
+        latest = release["tag_name"].lstrip("v")
+        # pick the asset from the API's list (names drift: x64, x86_64, …)
+        want = f"{os_name}_{arch}.tar.gz"
+        asset = next((a for a in release.get("assets", [])
+                      if a.get("name", "").endswith(want)), None)
+        if not asset:
+            print(f"  ✗ no {want} asset in the v{latest} release — "
+                  "install manually: https://github.com/gitleaks/gitleaks/releases")
+            return False
+        url = asset["browser_download_url"]
+        print(f"  downloading {asset['name']} …")
+        dest = Path.home() / ".local" / "bin"
+        dest.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(url, timeout=180) as r, \
+                tarfile.open(fileobj=io.BytesIO(r.read()), mode="r:gz") as tf:
+            member = next(m for m in tf.getmembers()
+                          if m.name == "gitleaks" or m.name.endswith("/gitleaks"))
+            data = tf.extractfile(member).read()
+        (dest / "gitleaks").write_bytes(data)
+        (dest / "gitleaks").chmod(0o755)
+        print("  ✓ installed to ~/.local/bin/gitleaks")
+        return True
+    except Exception as e:  # network / archive / missing asset
+        print(f"  ✗ auto-install failed: {e}")
+        print("  install manually: https://github.com/gitleaks/gitleaks/releases")
+        return False
+
+
+def _ensure_gitleaks() -> bool:
+    """Up-front gitleaks check for preflight/setup: when missing, explain
+    the benefit and offer to install (interactive terminals only; non-tty
+    runs get instructions and continue with the key-shape pass). Returns
+    True when gitleaks is available afterwards."""
+    if _gitleaks_available():
+        return True
+    print()
+    print("[info-guard] ⚠ gitleaks not found on PATH.")
+    print("  What it adds: the tuned-ruleset detection tier — 100+ provider-")
+    print("  specific patterns (AWS, GitHub, OpenAI, generic API keys, …).")
+    print("  Without it the scan still catches key-shaped values (KEY=value")
+    print("  with secret-family keys) and known token prefixes (sk-, ghp_, …),")
+    print("  but provider formats go unseen.")
+    print("  gitleaks is OPTIONAL for Info Guard: the redaction layer never")
+    print("  needs it — it powers this scan's second tier and the full-stack")
+    print("  detector. Small (~10 MB), open source (MIT), runs fully offline")
+    print("  once installed.")
+    if not sys.stdin.isatty():
+        print("  non-interactive run: install it separately (`go install "
+              "github.com/gitleaks/gitleaks/v8@latest` or the GitHub release),")
+        print("  then re-run — continuing with the key-shape pass only.")
+        return False
+    try:
+        ans = input("  install gitleaks now? [y/N] ").strip().lower()
+    except EOFError:
+        return False
+    if ans != "y":
+        print("  continuing with the key-shape pass only.")
+        return False
+    ok = _install_gitleaks()
+    if not ok:
+        print("  continuing with the key-shape pass only.")
+    return ok
+
+
+def _gitleaks_bin() -> str:
+    """Resolved gitleaks binary: PATH, ~/go/bin (go install), or
+    ~/.local/bin (release installer) — PATH alone misses user-level
+    installs on a scrubbed PATH."""
+    for cand in (shutil.which("gitleaks"),
+                 str(Path.home() / "go" / "bin" / "gitleaks"),
+                 str(Path.home() / ".local" / "bin" / "gitleaks")):
+        if cand and Path(cand).is_file():
+            return cand
+    return ""
+
+
 def _gitleaks_scan(root: Path, redact=True):
     """gitleaks dir over one directory tree (already-tuned ruleset).
     Returns (hits, available) — available=False when gitleaks is missing.
@@ -263,12 +382,13 @@ def _gitleaks_scan(root: Path, redact=True):
     16+ char runs replaced) before it can reach the terminal. With
     redact=False the full secret is kept in memory for the setup wizard
     (written straight to custom_literals.json, never echoed)."""
-    if not shutil.which("gitleaks"):
+    binpath = _gitleaks_bin()
+    if not binpath:
         return [], False
     report = tempfile.mktemp(suffix=".json")
     hits = []
     try:
-        cmd = ["gitleaks", "dir", str(root), "--no-banner",
+        cmd = [binpath, "dir", str(root), "--no-banner",
                "--report-format=json", f"--report-path={report}"]
         if redact:
             cmd.insert(2, "--redact=8")
@@ -311,6 +431,7 @@ def cmd_preflight(args):
         print(f"[info-guard] preflight: no scan targets under {_HERMES_HOME} "
               f"({', '.join(_PREFLIGHT_DIRS)}) — nothing to scan")
         return 0
+    _ensure_gitleaks()
     total = 0
     for d in dirs:
         total += sum(1 for _ in d.rglob("*") if _.is_file())
@@ -425,6 +546,7 @@ def cmd_setup(args):
         print(f"[info-guard] setup: no scan targets under {_HERMES_HOME} "
               f"({', '.join(_PREFLIGHT_DIRS)})")
         return 0
+    _ensure_gitleaks()
     print(f"[info-guard] setup — scanning {len(dirs)} dirs under {_HERMES_HOME} "
           f"(read-only scan; only your confirmed choices write anything)")
     all_hits, gitleaks_ok = _collect_hits(dirs)
