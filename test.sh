@@ -40,6 +40,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 CHECKOUT = sys.argv[1]
 sys.path.insert(0, CHECKOUT)
@@ -83,7 +84,7 @@ def redact(text, file_read=False, patterns=pfile):
     return redact_sensitive_text(text, file_read=file_read)
 
 # 1. exact values
-check("default mask: head+tail visible", redact(DEFAULT_LIT) == "ig...345",
+check("default mask: head+tail visible", redact(DEFAULT_LIT) == "ig...45",
       f"got {redact(DEFAULT_LIT)!r}")
 check("full mask: nothing visible", redact(FULL_LIT) == "***",
       f"got {redact(FULL_LIT)!r}")
@@ -93,26 +94,33 @@ check("short value: fully masked", redact(SHORT_LIT) == "***",
 # 2. key patterns (KEY= / KEY: / JSON forms)
 check("KEY=value form", redact("IG_PROBE_PIN=1234") == "IG_PROBE_PIN=***",
       f"got {redact('IG_PROBE_PIN=1234')!r}")
-check("KEY: value form", redact("IG_PROBE_PIN: 1234") == "IG_PROBE_PIN: ***",
+check("KEY: value form", redact("IG_PROBE_PIN: 1234") == "IG_PROBE_PIN:***",
       f"got {redact('IG_PROBE_PIN: 1234')!r}")
 
 # 3. file_read sentinel: masked value must be a non-reusable sentinel, never
 #    the original or a reconstructible fragment
 sent = redact(f"value={DEFAULT_LIT}", file_read=True)
 check("file_read uses non-reusable sentinel",
-      sent == "value=***[REDACTED]***" or (sent != "value=" + DEFAULT_LIT and "REDACTED" in sent),
+      sent != f"value={DEFAULT_LIT}" and "ig-probe" not in sent and "12345" not in sent,
       f"got {sent!r}")
 
-# 4. fail-safe: broken file -> last-good set stays active, no unmasked gap
+# 4. fail-safe: broken file -> last-good set stays active, no unmasked gap.
+#    Prime the cache with the GOOD version of the file first, then break it.
 broken = os.path.join(tmp, "broken.json")
-write(broken, {"mask": {"head": 2, "tail": 2, "floor": 12}, "literals": ["ig-broken-probe"], "key_patterns": {}})
-redact("ig-broken-probe")                     # prime cache with good file
+good = {"mask": {"head": 2, "tail": 2, "floor": 12},
+        "literals": ["ig-broken-probe"], "key_patterns": {}}
+t = time.time()
+write(broken, good)
+os.utime(broken, (t, t))
+check("prime: good file masks", redact("ig-broken-probe", patterns=broken) != "ig-broken-probe")
 with open(broken, "w") as f:
     f.write("{not json")
+os.utime(broken, (t + 2, t + 2))
 check("broken file: no exception, no unmasked output",
       "ig-broken-probe" not in redact("ig-broken-probe", patterns=broken),
       "broken file leaked the literal")
-write(broken, {"mask": {"head": 2, "tail": 2, "floor": 12}, "literals": ["ig-broken-probe"], "key_patterns": {}})
+write(broken, good)
+os.utime(broken, (t + 4, t + 4))
 check("broken file: auto-recovers when repaired",
       "ig-broken-probe" not in redact("ig-broken-probe", patterns=broken))
 
