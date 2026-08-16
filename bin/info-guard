@@ -50,6 +50,7 @@ State dir: $HERMES_HOME/state/info-guard/  (default $HERMES_HOME = ~/.hermes).
 This is the redaction layer only. The full stack — secret inventory,
 leak detection, rotation, watchdogs — is documented in docs/full-stack.md.
 """
+import hashlib
 import json
 import os
 import re
@@ -137,6 +138,36 @@ def _default_sources():
     return [p for p in candidates if p.exists()]
 
 
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """Write JSON atomically: temp file in the same directory (0600) →
+    fsync → os.replace → fsync the directory. A concurrent reader sees
+    either the old or the new file, never a partial one (external-audit
+    B1/F4)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".redact-", suffix=".json",
+                               dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        try:
+            d = os.open(str(path.parent), os.O_RDONLY)
+            os.fsync(d)
+            os.close(d)
+        except OSError:
+            pass
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def cmd_build(env_files):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     sources = [Path(p) for p in env_files] if env_files else _default_sources()
@@ -175,12 +206,12 @@ def cmd_build(env_files):
     literals = []
     for v in sorted(set(raw_lits), key=len, reverse=True):
         literals.append({"value": v, "mask": val_masks[v]} if v in val_masks else v)
-    MATCHER.write_text(json.dumps({
+    _atomic_write_json(MATCHER, {
         "mask": {"head": 2, "tail": 2, "floor": 12},
         "literals": literals,
         "key_patterns": key_patterns,
         "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    }, indent=2))
+    })
     os.chmod(MATCHER, 0o600)
     n_full = sum(1 for l in literals if isinstance(l, dict))
     print(f"[info-guard] matcher: {len(literals)} literals ({n_full} full-mask), "
@@ -224,7 +255,11 @@ _TRIVIAL_VALUES = {"true", "false", "null", "none", "yes", "no", "0", "1", "unde
 # Hard-mask for gitleaks Match context: any 16+ char run (token-shaped
 # fragments survive gitleaks' own --redact in the Match field)
 _HARD_MASK_RE = re.compile(r"[A-Za-z0-9_\-./+=]{16,}")
-_GITLEAKS_RELEASES_URL = "https://api.github.com/repos/gitleaks/gitleaks/releases/latest"
+# Pinned, not floating: the release download verifies SHA256 against the
+# release's own checksums file (external-audit B4/F7). Bump after testing a
+# newer release — `info-guard preflight` refuses to install unverified versions.
+_GITLEAKS_VERSION = "8.30.1"
+_GITLEAKS_RELEASES_URL = f"https://api.github.com/repos/gitleaks/gitleaks/releases/tags/v{_GITLEAKS_VERSION}"
 
 
 def _mask_value(v: str) -> str:
@@ -285,9 +320,10 @@ def _install_gitleaks() -> bool:
 
     go = shutil.which("go")
     if go:
-        print("  installing via `go install github.com/gitleaks/gitleaks/v8@latest`…")
+        print(f"  installing via `go install github.com/gitleaks/gitleaks/v8@v{_GITLEAKS_VERSION}`…")
         try:
-            subprocess.run([go, "install", "github.com/gitleaks/gitleaks/v8@latest"],
+            subprocess.run([go, "install",
+                            f"github.com/gitleaks/gitleaks/v8@v{_GITLEAKS_VERSION}"],
                            capture_output=True, timeout=600)
             if (Path.home() / "go" / "bin" / "gitleaks").is_file():
                 print("  ✓ installed — note: ~/go/bin may need to be on PATH")
@@ -305,27 +341,52 @@ def _install_gitleaks() -> bool:
     try:
         with urllib.request.urlopen(_GITLEAKS_RELEASES_URL, timeout=30) as r:
             release = json.load(r)
-        latest = release["tag_name"].lstrip("v")
+        tag = release["tag_name"]
+        if tag != f"v{_GITLEAKS_VERSION}":
+            print(f"  ✗ expected v{_GITLEAKS_VERSION} but the API returned {tag} — "
+                  "refusing to install (pinned version, never floats)")
+            return False
         # pick the asset from the API's list (names drift: x64, x86_64, …)
         want = f"{os_name}_{arch}.tar.gz"
         asset = next((a for a in release.get("assets", [])
                       if a.get("name", "").endswith(want)), None)
         if not asset:
-            print(f"  ✗ no {want} asset in the v{latest} release — "
+            print(f"  ✗ no {want} asset in the v{_GITLEAKS_VERSION} release — "
                   "install manually: https://github.com/gitleaks/gitleaks/releases")
             return False
-        url = asset["browser_download_url"]
+        # SHA256 against the release's own checksums file
+        sum_name = f"gitleaks_{_GITLEAKS_VERSION}_checksums.txt"
+        sum_asset = next((a for a in release.get("assets", [])
+                          if a.get("name") == sum_name), None)
+        if not sum_asset:
+            print(f"  ✗ {sum_name} missing from the release — refusing an "
+                  "unverifiable install")
+            return False
+        with urllib.request.urlopen(sum_asset["browser_download_url"],
+                                    timeout=60) as r:
+            checksums = r.read().decode()
+        expected = next((ln.split()[0].lower() for ln in checksums.splitlines()
+                         if asset["name"] in ln), None)
+        if not expected:
+            print(f"  ✗ no checksum entry for {asset['name']} — refusing install")
+            return False
         print(f"  downloading {asset['name']} …")
+        with urllib.request.urlopen(asset["browser_download_url"], timeout=180) as r:
+            tarball = r.read()
+        actual = hashlib.sha256(tarball).hexdigest()
+        if actual != expected:
+            print(f"  ✗ SHA256 mismatch ({actual[:12]}… ≠ {expected[:12]}…) — "
+                  "refusing to install (supply-chain guard)")
+            return False
         dest = Path.home() / ".local" / "bin"
         dest.mkdir(parents=True, exist_ok=True)
-        with urllib.request.urlopen(url, timeout=180) as r, \
-                tarfile.open(fileobj=io.BytesIO(r.read()), mode="r:gz") as tf:
+        with tarfile.open(fileobj=io.BytesIO(tarball), mode="r:gz") as tf:
             member = next(m for m in tf.getmembers()
                           if m.name == "gitleaks" or m.name.endswith("/gitleaks"))
             data = tf.extractfile(member).read()
         (dest / "gitleaks").write_bytes(data)
         (dest / "gitleaks").chmod(0o755)
-        print("  ✓ installed to ~/.local/bin/gitleaks")
+        print("  ✓ installed to ~/.local/bin/gitleaks (SHA256 verified)")
         return True
     except Exception as e:  # network / archive / missing asset
         print(f"  ✗ auto-install failed: {e}")
@@ -353,7 +414,7 @@ def _ensure_gitleaks() -> bool:
     print("  once installed.")
     if not sys.stdin.isatty():
         print("  non-interactive run: install it separately (`go install "
-              "github.com/gitleaks/gitleaks/v8@latest` or the GitHub release),")
+              "github.com/gitleaks/gitleaks/v8@v8.30.1` or the GitHub release),")
         print("  then re-run — continuing with the key-shape pass only.")
         return False
     try:
@@ -391,7 +452,8 @@ def _gitleaks_scan(root: Path, redact=True):
     binpath = _gitleaks_bin()
     if not binpath:
         return [], False
-    report = tempfile.mktemp(suffix=".json")
+    report_fd, report = tempfile.mkstemp(suffix=".json")
+    os.close(report_fd)
     hits = []
     try:
         cmd = [binpath, "dir", str(root), "--no-banner",
@@ -538,30 +600,57 @@ def _collect_hits(dirs, redact=True):
     return all_hits, gitleaks_ok
 
 
+# The 5 files the patch touches, with a marker per file. All present =
+# ACTIVE; some = PARTIAL (a failed `hermes update` half-reverted the patch);
+# none = MISSING. Single-marker greps miss partial reversion (external-audit
+# B2/F5).
+_ENGINE_MARKERS = {
+    "agent/redact.py": "_redact_registry_patterns",
+    "hermes_cli/config.py": "redact_patterns",
+    "hermes_cli/main.py": "HERMES_REDACT_PATTERNS",
+    "cli.py": "HERMES_REDACT_PATTERNS",
+    "gateway/run.py": "HERMES_REDACT_PATTERNS",
+}
+
+
 def _installation_status():
-    """Best-effort detection of an existing Info Guard install: the engine
-    marker in the checkout's redact.py, plus the state artifacts that only
+    """Best-effort detection of an existing Info Guard install: engine
+    markers across all 5 patched files + the state artifacts that only
     install/build create."""
-    engine = False
-    checkout = _HERMES_HOME / "hermes-agent" / "agent" / "redact.py"
-    if checkout.is_file():
-        try:
-            engine = "_redact_registry_patterns" in checkout.read_text(errors="replace")
-        except OSError:
-            pass
-    return {"engine": engine, "patterns": MATCHER.exists(),
-            "state_dir": STATE_DIR.is_dir()}
+    status = {"state_dir": STATE_DIR.is_dir(),
+              "patterns": MATCHER.exists(),
+              "custom": CUSTOM_LITERALS.exists(),
+              "markers": {}}
+    for rel, marker in _ENGINE_MARKERS.items():
+        p = _HERMES_HOME / "hermes-agent" / rel
+        found = False
+        if p.is_file():
+            try:
+                found = marker in p.read_text(errors="replace")
+            except OSError:
+                pass
+        status["markers"][rel] = found
+    n = sum(status["markers"].values())
+    status["engine"] = n == len(_ENGINE_MARKERS)
+    status["partial"] = 0 < n < len(_ENGINE_MARKERS)
+    return status
 
 
 def _print_install_status():
     """Frame the run: decide-step (not installed) vs. health check
     (installed — findings are residue, masking does not remove it)."""
     inst = _installation_status()
-    if inst["patterns"] or inst["engine"]:
-        parts = ["engine " + ("active" if inst["engine"] else "NOT detected"),
-                 "pattern file " + ("present" if inst["patterns"] else "missing")]
-        print(f"[info-guard] ℹ Info Guard appears INSTALLED ({', '.join(parts)}) — "
-              f"this run is a health check of at-rest residue, not a decide step.")
+    if inst["engine"]:
+        pf = "present" if inst["patterns"] else "MISSING"
+        print(f"[info-guard] ℹ Info Guard INSTALLED (engine ACTIVE, 5/5 markers, "
+              f"pattern file {pf}) — this run is a health check of at-rest "
+              f"residue, not a decide step.")
+    elif inst["partial"]:
+        missing = ", ".join(rel for rel, ok in inst["markers"].items() if not ok)
+        print(f"[info-guard] ⚠ Info Guard PARTIAL — patch markers missing in: "
+              f"{missing}. A failed `hermes update` likely half-reverted the "
+              f"patch: restore the files (`git checkout` them in the checkout) "
+              f"and re-run ./install.sh before trusting this health check.")
     else:
         print("[info-guard] ℹ Info Guard not detected — this run is the "
               "before-install decide step.")
@@ -676,8 +765,7 @@ def cmd_setup(args):
             seen.add(sig)
             merged.append(item)
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        CUSTOM_LITERALS.write_text(json.dumps({"literals": merged}, indent=2))
-        os.chmod(CUSTOM_LITERALS, 0o600)
+        _atomic_write_json(CUSTOM_LITERALS, {"literals": merged})
         print(f"[info-guard] wrote {len(added)} new literal(s) → {CUSTOM_LITERALS}")
     elif not env_sources:
         print("[info-guard] nothing new to register — no changes made")
@@ -706,11 +794,17 @@ def cmd_check(args):
     problems = 0
     inst = _installation_status()
     if inst["engine"]:
-        print("[info-guard] ✓ engine: registry-fed redaction ACTIVE "
-              "(marker present in agent/redact.py)")
+        print("[info-guard] ✓ engine: ACTIVE — all 5 patch markers present")
+    elif inst["partial"]:
+        problems += 1
+        missing = ", ".join(rel for rel, ok in inst["markers"].items() if not ok)
+        print(f"[info-guard] ✗ engine: PARTIAL — markers missing in: {missing}. "
+              f"A failed `hermes update` likely half-reverted the patch; "
+              f"restore the files (`git checkout` them in the checkout) and "
+              f"re-run ./install.sh")
     else:
         problems += 1
-        print("[info-guard] ✗ engine: marker MISSING from agent/redact.py — "
+        print("[info-guard] ✗ engine: MISSING — no patch markers found; "
               "`hermes update` likely wiped the patch; run ./install.sh "
               "(idempotent) or ./uninstall.sh if you want out")
     if inst["patterns"]:

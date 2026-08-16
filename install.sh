@@ -55,9 +55,24 @@ if command -v hermes >/dev/null 2>&1; then
     say "hermes:   $(hermes --version 2>/dev/null | head -1 || echo unknown)"
 fi
 
-# ── 2. apply patch (idempotent) ─────────────────────────────────────────
-if grep -q "_redact_registry_patterns" "$CHECKOUT/agent/redact.py"; then
-    say "patch already applied — skipping (use --force to re-apply)"
+# ── 2. engine integrity (5 markers, external-audit B2/F5) ───────────────
+# All present = ACTIVE; some = PARTIAL (half-reverted update); none = MISSING.
+_marker_count() {
+    local n=0
+    grep -q "_redact_registry_patterns" "$CHECKOUT/agent/redact.py" 2>/dev/null && n=$((n+1))
+    grep -q "redact_patterns"            "$CHECKOUT/hermes_cli/config.py" 2>/dev/null && n=$((n+1))
+    grep -q "HERMES_REDACT_PATTERNS"     "$CHECKOUT/hermes_cli/main.py" 2>/dev/null && n=$((n+1))
+    grep -q "HERMES_REDACT_PATTERNS"     "$CHECKOUT/cli.py" 2>/dev/null && n=$((n+1))
+    grep -q "HERMES_REDACT_PATTERNS"     "$CHECKOUT/gateway/run.py" 2>/dev/null && n=$((n+1))
+    echo "$n"
+}
+MARKERS=$(_marker_count)
+if [ "$MARKERS" = "5" ]; then
+    say "engine ACTIVE (5/5 markers) — patch already applied (use --force to re-apply)"
+elif [ "$MARKERS" != "0" ]; then
+    die "engine PARTIAL ($MARKERS/5 markers) — a failed hermes update likely half-reverted the patch.
+     Restore the patched files first, then re-run install.sh:
+       git -C $CHECKOUT checkout -- agent/redact.py cli.py gateway/run.py hermes_cli/config.py hermes_cli/main.py"
 elif [ "$FORCE" = "1" ]; then
     say "re-applying patch (--force)"
     git -C "$CHECKOUT" apply --check "$PATCH" \
