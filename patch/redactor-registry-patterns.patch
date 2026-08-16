@@ -1,5 +1,5 @@
 diff --git a/agent/redact.py b/agent/redact.py
-index 7fa3c11e..dd9776ae 100644
+index 7fa3c11e..94066529 100644
 --- a/agent/redact.py
 +++ b/agent/redact.py
 @@ -1006,6 +1006,172 @@ def redact_sensitive_text(
@@ -7,15 +7,15 @@ index 7fa3c11e..dd9776ae 100644
          text = _SIGNAL_PHONE_RE.sub(_redact_phone, text)
  
 +    # ──────────────────────────────────────────────────────────────────────
-+    # Registry-fed exact-value pass (Hermes-sec credential firewall; see PR
-+    # "exact-value secret redaction from user pattern file").
++    # Registry-fed exact-value pass (Info Guard).
 +    # Masks exact registered secrets and registered KEY=value / KEY: value
-+    # forms from the pattern file written by `hermes-sec matcher build`
-+    # (default ~/.hermes/state/info-guard/redact_patterns.json,
-+    # overridable via HERMES_REDACT_PATTERNS). Fail-safe: a missing or
-+    # unreadable file is a no-op — the built-in families above still run.
-+    # Sentinel: non-reusable for file content (issue #35519 semantics) so a
-+    # masked value can never be written back over the real one.
++    # forms from the user pattern file (default
++    # $HERMES_HOME/state/info-guard/redact_patterns.json — ~/.hermes
++    # fallback, overridable via security.redact_patterns / HERMES_REDACT_PATTERNS).
++    # Fail-safe: a missing or unreadable file is a no-op — the built-in
++    # families above still run. Sentinel: non-reusable for file content
++    # (issue #35519 semantics) so a masked value can never be written back
++    # over the real one.
 +    text = _redact_registry_patterns(text, file_read=file_read)
 +
 +    return text
