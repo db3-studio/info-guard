@@ -1,0 +1,6 @@
+{
+  "literals": [
+    "someone@example.com",
+    {"value": "a-string-only-you-know-is-sensitive", "mask": "full"}
+  ]
+}

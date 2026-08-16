@@ -1,0 +1,12 @@
+{
+  "mask": {"head": 2, "tail": 2, "floor": 12},
+  "literals": [
+    "an-exact-value-that-should-always-be-masked",
+    {"value": "a-top-tier-secret", "mask": "full"}
+  ],
+  "key_patterns": {
+    "MY_SERVICE_PASSWORD": true,
+    "PIN": true
+  },
+  "generated": "hand-written example — run `bin/info-guard build` to generate from your .env files"
+}

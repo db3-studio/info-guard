@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""info-guard — build the redaction pattern file for Hermes Agent.
+
+The pattern file (redact_patterns.json) is the single interface between
+your secrets and Hermes' redaction engine. Hermes reads it at every
+message boundary and masks anything it contains — exact values, or
+values appearing as KEY=value / KEY: value / KEY: "value".
+
+Usage:
+  info-guard build [ENV_FILE ...]   Build redact_patterns.json from .env
+                                    sources (default: $HERMES_HOME/.env).
+                                    Extra ENV_FILE args add more sources
+                                    (e.g. docker compose .env files).
+  info-guard status                 Show a summary of the current pattern file.
+
+Sources merged by `build`:
+  1. Every KEY=value pair from the env files, except:
+       - non-secret keys (hosts, urls, usernames, emails, ports, flags,
+         schedules, model configs, ...) — masking those values was pure
+         information loss, and hashing them made detection false-positive
+       - values shorter than 8 chars (precision floor — no false friends;
+         those keys are still covered by the key-pattern pass below)
+  2. A curated key list (PIN, x_passphrase, client_secret, ...) whose
+     values are masked regardless of length (KEY= form).
+  3. <state>/custom_literals.json — hand-edited exact values (PII, emails,
+     names, anything you decide is sensitive). Optional; survives rebuilds;
+     masking only. Entries: plain strings, or {"value": ..., "mask": "full"}
+     for full masking.
+
+Output: <state>/redact_patterns.json (chmod 600).
+State dir: $HERMES_HOME/state/info-guard/  (default $HERMES_HOME = ~/.hermes).
+
+This is the redaction layer only. The full stack — secret inventory,
+leak detection, rotation, watchdogs — is documented in docs/full-stack.md.
+"""
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+_HERMES_HOME = Path(os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"))
+STATE_DIR = _HERMES_HOME / "state" / "info-guard"
+MATCHER = STATE_DIR / "redact_patterns.json"
+CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
+
+VALID_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Keys that may appear in config/unit files but not in .env (PIN classes,
+# router config dumps, NPM meta). Key-aware masking covers these regardless
+# of value length.
+EXTRA_KEY_PATTERNS = [
+    "PIN", "WEBUI_PIN", "HERMES_WEBUI_PASSWORD", "x_passphrase", "client_secret",
+    "refresh_token", "access_token", "dns_provider_credentials",
+]
+
+# Non-secret key classes: hosts/usernames/URLs/flags/schedules/... are NOT
+# credentials — masking their values was pure information loss. The trailing
+# \b keeps prefix classes (UNIFI_SSH_PASS, NPMI_PASSWORD...) out of this
+# match; those still reach the literal pass via their values.
+NON_SECRET_KEY_RE = re.compile(
+    r"(?:host|url|user|email|path|home|dir|address|debug|_tools|proxy|browser|"
+    r"wiki|image|web|moa|vision|terminal|searxng|firecrawl|vaultwarden_agent|"
+    r"icloud|unifi|unraid|npm[ei]?|agh|hermes|model|smtp|cron|domain|timezone|"
+    r"rclone|name|mode|dialectic|dream|peer_card|embedding|summary|deriver|"
+    r"deduction|induction|overrides|structured_output|port|level|interval|"
+    r"transport|users)\b", re.IGNORECASE)
+# Exact non-secret keys whose values are emails/modes/env-var-NAMES (not
+# secrets) — mid-string markers defeat the \b rule, so explicit denylist.
+NON_SECRET_EXACT = {
+    "EMAIL_ALLOWED_USERS", "SMTP_FROM", "SMTP_SECURITY",
+    "DERIVER_MODEL_CONFIG__OVERRIDES__API_KEY_ENV",
+    "EMBEDDING_MODEL_CONFIG__OVERRIDES__API_KEY_ENV",
+    "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID",
+}
+# Boolean/config-flag keys (CACHE_ENABLED, SIGNUPS_ALLOWED, ...) — values are
+# short booleans, never credentials; they only pollute the pattern file.
+NON_SECRET_FLAG_RE = re.compile(
+    r"(?:ENABLED?|ALLOWED|PROXIES|STEALTH|SENTRY|SIGNUPS|INVITATIONS|USE_AUTH)$",
+    re.IGNORECASE)
+
+
+def _is_non_secret_key(k: str) -> bool:
+    return (NON_SECRET_KEY_RE.search(k) or k in NON_SECRET_EXACT
+            or NON_SECRET_FLAG_RE.search(k))
+
+
+def _load_env(path: Path):
+    """Parse a .env file into {KEY: value}. Errors on a path are fatal
+    (a source you named must exist); missing default sources are skipped."""
+    out = {}
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        raise SystemExit(f"[info-guard] ✗ cannot read env source: {path}")
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k = k.strip().strip('"').strip("'")
+        if not VALID_KEY_RE.match(k):
+            continue
+        v = v.strip().strip('"').strip("'")
+        # strip trailing comments (only when preceded by whitespace; a
+        # # inside the value is part of the value)
+        v = re.sub(r"\s+#.*$", "", v)
+        out[k] = v
+    return out
+
+
+def _default_sources():
+    """Default env sources: the active Hermes home's .env, plus ./ .env if
+    present in the working directory. Additional files come from argv."""
+    candidates = [_HERMES_HOME / ".env", Path.cwd() / ".env"]
+    return [p for p in candidates if p.exists()]
+
+
+def cmd_build(env_files):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    sources = [Path(p) for p in env_files] if env_files else _default_sources()
+    if not sources:
+        raise SystemExit("[info-guard] ✗ no .env sources found — pass env files "
+                         "explicitly, or run from a directory with a .env")
+    raw_lits, key_patterns, val_masks = [], {}, {}
+    for path in sources:
+        if not path.exists():
+            raise SystemExit(f"[info-guard] ✗ env source not found: {path}")
+        for k, v in _load_env(path).items():
+            if _is_non_secret_key(k):
+                continue
+            if len(v) >= 8:                    # literal floor = precision optimization
+                raw_lits.append(v)
+            key_patterns[k] = True
+    for k in EXTRA_KEY_PATTERNS:
+        key_patterns[k] = True
+    # Hand-edited custom literals (PII — emails, names, numbers, anything the
+    # user decides is sensitive). The file is a SOURCE, never clobbered by
+    # rebuilds: edit it, then `info-guard build` picks it up.
+    if CUSTOM_LITERALS.exists():
+        try:
+            for item in json.loads(CUSTOM_LITERALS.read_text()).get("literals", []) or []:
+                if isinstance(item, dict):
+                    v = item.get("value")
+                    if isinstance(v, str) and v:
+                        raw_lits.append(v)
+                        if "mask" in item:
+                            val_masks[v] = item["mask"]
+                elif isinstance(item, str) and item:
+                    raw_lits.append(item)
+        except (OSError, ValueError):
+            print(f"[info-guard] ⚠ {CUSTOM_LITERALS.name} unreadable — skipped (fail-safe)")
+    # Longest-first so overlapping literals mask deterministically
+    literals = []
+    for v in sorted(set(raw_lits), key=len, reverse=True):
+        literals.append({"value": v, "mask": val_masks[v]} if v in val_masks else v)
+    MATCHER.write_text(json.dumps({
+        "mask": {"head": 2, "tail": 2, "floor": 12},
+        "literals": literals,
+        "key_patterns": key_patterns,
+        "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }, indent=2))
+    os.chmod(MATCHER, 0o600)
+    n_full = sum(1 for l in literals if isinstance(l, dict))
+    print(f"[info-guard] matcher: {len(literals)} literals ({n_full} full-mask), "
+          f"{len(key_patterns)} key patterns → {MATCHER}")
+
+
+def cmd_status():
+    if not MATCHER.exists():
+        print(f"[info-guard] no pattern file yet — run `info-guard build`")
+        return 1
+    data = json.loads(MATCHER.read_text())
+    lits = data.get("literals", [])
+    n_full = sum(1 for l in lits if isinstance(l, dict))
+    print(f"[info-guard] {len(lits)} literals ({n_full} full-mask), "
+          f"{len(data.get('key_patterns', {}))} key patterns, "
+          f"mask default {data.get('mask')}, generated {data.get('generated')}")
+    print(f"[info-guard] file: {MATCHER} (mode {oct(MATCHER.stat().st_mode & 0o777)})")
+    return 0
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0 if argv and argv[0] in ("-h", "--help") else 1
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "build":
+        cmd_build(rest)
+        return 0
+    if cmd == "status":
+        return cmd_status()
+    print(f"[info-guard] unknown command: {cmd} (try `info-guard --help`)")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
