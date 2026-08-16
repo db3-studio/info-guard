@@ -139,6 +139,11 @@ mail, ntfy, a log line):
 0 * * * * /path/to/info-guard/bin/info-guard check || echo "info-guard: BROKEN — run install.sh"
 ```
 
+Cron's five fields are **minute, hour, day-of-month, month, day-of-week** —
+`0 * * * *` means "every hour, at minute 0". The `||` reads as "only when
+`check` fails" (non-zero exit): a healthy check stays silent, a broken one
+runs the echo — which your cron can mail, log, or pipe anywhere.
+
 ## Uninstall
 
 ```bash
@@ -181,6 +186,34 @@ Synthetic values only — no real secrets. Verifies exact-value masking
 broken-file fail-safe, and the fresh-home default-path property (the
 "second instance" test: a brand-new `HERMES_HOME` masks its own values with
 zero configuration).
+
+## The full stack (recommended)
+
+This repo ships the **redaction layer** — the transferable core: it works
+alone, installs in minutes, and immediately stops your exact values from
+reaching logs, transcripts, and tool output. But redaction is one layer of
+a five-layer lifecycle. The complete posture:
+
+| Layer | What it does | Why it matters |
+|---|---|---|
+| **1. Redaction** (this package) | Masks your exact values + key forms at every message boundary | Prevention — leaks never exist in the first place |
+| **2. Inventory** | Hashed registry of every known secret with priority tiers | You can't protect what you haven't found; feeds detection and full-mask decisions |
+| **3. Detection** | Scheduled scans (leak scan, HIBP, gitleaks discovery) over transcripts, logs, repos | Finds what slipped through — including residue that predates redaction |
+| **4. Rotation** | Per-credential rotation, vault-first, old-fails/new-passes verification | An exposed credential is only an incident while it still works |
+| **5. Watchdogs** | Env-drift, config-audit, nightly refresh, engine-marker checks | Catches drift before it becomes a leak — nothing fails silently |
+
+The doctrine: **discover → register → mask → detect → rotate.**
+
+Why the full stack is recommended: redaction alone answers "don't leak
+going forward", but a complete posture also needs "what do I even have"
+(inventory), "what's already out there" (detection), "make it dead"
+(rotation), and "keep it honest" (watchdogs). Each layer is independent
+and incremental — build them in order, and each one pays for itself.
+
+The blueprint lives in **`docs/full-stack.md`**: state-file schemas,
+scanner tiers and schedules, rotation-driver patterns, the known
+silent-fail classes, and a building order — with enough detail for any
+Hermes agent to build the remaining layers for your environment.
 
 ## Profiles & multi-instance
 
