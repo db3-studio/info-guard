@@ -205,7 +205,6 @@ shared set, or keep them isolated. Either way: no leakage between instances.
 | Pattern-file builder | `bin/info-guard` — .env → `redact_patterns.json` |
 | Verification battery | `test.sh` |
 | File format spec | `docs/format-spec.md` |
-| Full stack blueprint | `docs/full-stack.md` — inventory, detection, rotation, watchdogs |
 
 ## Next steps: the full stack
 
