@@ -107,18 +107,23 @@ The agent will read `docs/format-spec.md` for the file format and
    path — the default already matches.
 4. Restart Hermes processes.
 
-**After a `hermes update`:** re-run `./install.sh`. Hermes' updater
-autostashes and restores working-tree changes, and a release can drop the
-applied patch — or conflict with it (v0.20.2 did, before the rebase).
-install.sh is idempotent: if the patch is gone it re-applies it; if the
-codebase drifted it fails loudly with the drift message. Your pattern file
-and custom literals are never touched by either path.
+## Upgrades (`hermes update`)
 
-**Optional: schedule a health check.** `info-guard check` verifies the
-engine survived updates, the pattern file is present, and reports gitleaks
-availability — exit 0 healthy, 1 broken. No alert channel is assumed; wire
-the non-zero exit to whatever your scheduler supports (cron mail, ntfy, a
-log line):
+The updater autostashes and restores working-tree changes, so **in most
+cases the patch survives an update automatically — nothing to do.** When a
+release changes the patched code (v0.20.2 did, before the rebase), the
+patch can be dropped silently. The upgrade lifecycle:
+
+1. **`info-guard check`** — engine active? Exit 0 = healthy, done.
+2. **Broken → re-run `./install.sh`** — idempotent: re-applies the patch,
+   or fails loudly with the drift message if the codebase moved beyond the
+   supported versions (the rebased patch covers v0.20.0–v0.20.2). Your
+   pattern file and custom literals are never touched by either path.
+3. **Over it? → `./uninstall.sh`** — clean removal, state backed up.
+
+`check` is schedulable for automatic detection — no alert channel is
+assumed; wire the non-zero exit to whatever your scheduler supports (cron
+mail, ntfy, a log line):
 
 ```cron
 0 * * * * /path/to/info-guard/bin/info-guard check || echo "info-guard: BROKEN — run install.sh"
