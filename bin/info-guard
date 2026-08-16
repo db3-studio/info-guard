@@ -17,6 +17,12 @@ Usage:
                                     <home>/cron/output) — run BEFORE deciding
                                     whether to install. Read-only, output
                                     masked, nothing written.
+  info-guard setup [--all]          Interactive bootstrap: reviews preflight
+                                    candidates one by one (masked only),
+                                    registers the ones you confirm as custom
+                                    literals, picks .env sources, builds the
+                                    pattern file. --all accepts every
+                                    candidate non-interactively (agents/tests).
 
 Sources merged by `build`:
   1. Every KEY=value pair from the env files, except:
@@ -222,7 +228,8 @@ def _mask_value(v: str) -> str:
 
 def _key_scan(path: Path):
     """Key-shape + token-prefix pass over one file. Returns list of
-    (cls, rule, line_no, masked_repr, context)."""
+    (cls, rule, line_no, value, masked_repr, context). The raw value is
+    returned so the setup wizard can register it — it is NEVER printed."""
     hits = []
     try:
         text = path.read_text(errors="replace")
@@ -238,31 +245,34 @@ def _key_scan(path: Path):
                 continue
             ctx = line[: m.end()] + line[m.end():][:80]
             ctx = re.sub(re.escape(val), "***", ctx, count=1)
-            hits.append(("KEY-SHAPE", f"key-family:{key[:40]}", lineno,
+            hits.append(("KEY-SHAPE", f"key-family:{key[:40]}", lineno, val,
                          f"{key}={_mask_value(val)}", ctx))
         for m in _TOKEN_PREFIX_RE.finditer(line):
             tok = m.group(1)
             ctx = line[: m.end()] + line[m.end():][:80]
             ctx = re.sub(re.escape(tok), "***", ctx, count=1)
-            hits.append(("TOKEN-SHAPE", "known-prefix", lineno,
+            hits.append(("TOKEN-SHAPE", "known-prefix", lineno, tok,
                          _mask_value(tok), ctx))
     return hits
 
 
-def _gitleaks_scan(root: Path):
+def _gitleaks_scan(root: Path, redact=True):
     """gitleaks dir over one directory tree (already-tuned ruleset).
     Returns (hits, available) — available=False when gitleaks is missing.
     NEVER prints the raw Secret field; the Match line is hard-masked (all
-    16+ char runs replaced) before it can reach the terminal."""
+    16+ char runs replaced) before it can reach the terminal. With
+    redact=False the full secret is kept in memory for the setup wizard
+    (written straight to custom_literals.json, never echoed)."""
     if not shutil.which("gitleaks"):
         return [], False
     report = tempfile.mktemp(suffix=".json")
     hits = []
     try:
-        subprocess.run(
-            ["gitleaks", "dir", str(root), "--redact=8", "--no-banner",
-             "--report-format=json", f"--report-path={report}"],
-            capture_output=True, timeout=600)
+        cmd = ["gitleaks", "dir", str(root), "--no-banner",
+               "--report-format=json", f"--report-path={report}"]
+        if redact:
+            cmd.insert(2, "--redact=8")
+        subprocess.run(cmd, capture_output=True, timeout=600)
         try:
             findings = json.loads(Path(report).read_text())
         except (OSError, json.JSONDecodeError):
@@ -274,12 +284,13 @@ def _gitleaks_scan(root: Path):
             match = f.get("Match", "") or ""
             # Hard-mask: gitleaks' Match may keep long visible fragments
             # (--redact=8 applies to Secret, not always to Match context).
-            match = _HARD_MASK_RE.sub("***", match)
-            # Also scrub the (redacted) secret form itself from the context
-            if secret and len(secret) >= 4:
-                match = match.replace(secret, "***")
+            masked = _HARD_MASK_RE.sub("***", match)
+            if redact:
+                secret = ""
+            elif secret and len(secret) >= 4:
+                masked = masked.replace(secret, "***")
             hits.append((cls, rule, f.get("File", "?"), f.get("StartLine", 0),
-                         "***", match.strip()[:140]))
+                         secret, "***", masked.strip()[:140]))
     except (subprocess.TimeoutExpired, OSError):
         pass
     finally:
@@ -314,9 +325,9 @@ def cmd_preflight(args):
                 all_hits.append((hit[0], hit[1], str(p.relative_to(_HERMES_HOME)), *hit[2:]))
         ghits, ok = _gitleaks_scan(d)
         gitleaks_ok = gitleaks_ok and ok
-        for cls, rule, fname, line, masked, ctx in ghits:
+        for cls, rule, fname, line, value, masked, ctx in ghits:
             rel = os.path.relpath(fname, str(_HERMES_HOME)) if fname else str(d)
-            all_hits.append((cls, rule, rel, line, masked, ctx))
+            all_hits.append((cls, rule, rel, line, value, masked, ctx))
     if not gitleaks_ok:
         print("[info-guard] preflight: ⚠ gitleaks not found on PATH — ran "
               "key-shape pass only (install gitleaks for the tuned-ruleset pass)")
@@ -343,7 +354,7 @@ def cmd_preflight(args):
     for key, (n, h) in deduped.items():
         if shown >= 50:
             break
-        cls, rule, rel, line, masked, ctx = h
+        cls, rule, rel, line, value, masked, ctx = h
         print(f"  [{cls}] {rule}" + (f" (×{n} files/lines)" if n > 1 else ""))
         print(f"      {rel}:{line}  value={masked}")
         if ctx:
@@ -361,6 +372,153 @@ def cmd_preflight(args):
     return 1
 
 
+def _collect_hits(dirs):
+    """Shared scan used by preflight and setup. Returns (all_hits,
+    gitleaks_ok) with 7-tuples (cls, rule, rel, line, value, masked, ctx)."""
+    all_hits, gitleaks_ok = [], True
+    for d in dirs:
+        for p in sorted(d.rglob("*")):
+            if not p.is_file():
+                continue
+            for hit in _key_scan(p):
+                all_hits.append((hit[0], hit[1], str(p.relative_to(_HERMES_HOME)), *hit[2:]))
+        ghits, ok = _gitleaks_scan(d)
+        gitleaks_ok = gitleaks_ok and ok
+        for cls, rule, fname, line, value, masked, ctx in ghits:
+            rel = os.path.relpath(fname, str(_HERMES_HOME)) if fname else str(d)
+            all_hits.append((cls, rule, rel, line, value, masked, ctx))
+    return all_hits, gitleaks_ok
+
+
+def _scan_dirs(names=None):
+    return [p for name in (names or _PREFLIGHT_DIRS)
+            for p in [_HERMES_HOME / name] if p.is_dir()]
+
+
+def _load_custom_values():
+    """Existing custom literals as a list of values (dict entries keep their
+    mask; plain strings stay plain). Returns ([entries], ok)."""
+    if not CUSTOM_LITERALS.exists():
+        return [], True
+    try:
+        return json.loads(CUSTOM_LITERALS.read_text()).get("literals", []) or [], True
+    except (OSError, ValueError):
+        return [], False
+
+
+def cmd_setup(args):
+    """Interactive wizard: preflight scan → review candidates → register
+    the real ones → pick .env sources → build the pattern file.
+
+    Values are NEVER echoed: candidates are shown masked, and confirmed
+    values go straight from the scan into custom_literals.json.
+    `--all` accepts every candidate non-interactively (for agents/tests)."""
+    auto = "--all" in args
+    if not auto and not sys.stdin.isatty():
+        print("[info-guard] setup is interactive — run it in a terminal, or use:\n"
+              "    info-guard preflight            review candidates manually\n"
+              "    info-guard build [ENV_FILE...]  build from your .env files\n"
+              "    edit <state>/custom_literals.json, then `info-guard build`")
+        return 2
+    dirs = _scan_dirs()
+    if not dirs:
+        print(f"[info-guard] setup: no scan targets under {_HERMES_HOME} "
+              f"({', '.join(_PREFLIGHT_DIRS)})")
+        return 0
+    print(f"[info-guard] setup — scanning {len(dirs)} dirs under {_HERMES_HOME} "
+          f"(read-only scan; only your confirmed choices write anything)")
+    all_hits, gitleaks_ok = _collect_hits(dirs)
+    if not gitleaks_ok:
+        print("[info-guard] setup: ⚠ gitleaks not found on PATH — key-shape pass only")
+    from collections import OrderedDict
+    deduped = OrderedDict()
+    for h in all_hits:
+        key = (h[0], h[1], h[2], h[3], h[4])
+        count, _ = deduped.get(key, (0, None))
+        deduped[key] = (count + 1, h)
+    added = []          # (value, mask_style)
+    skipped_short = 0
+    if deduped:
+        print(f"\n[info-guard] {len(deduped)} candidate(s) found in your transcripts "
+              f"and logs. Review each: anything that is YOURS gets registered as "
+              f"an exact-value literal (values shown masked only).")
+        print()
+        for key, (n, h) in deduped.items():
+            cls, rule, rel, line, value, masked, ctx = h
+            print(f"  [{cls}] {rule} (×{n})")
+            print(f"      {rel}:{line}  value={masked}")
+            if ctx:
+                print(f"      …{ctx}…")
+            if auto:
+                ans = "y"
+            else:
+                try:
+                    ans = input("      add as literal? [y]es / [n]o / [q]uit  ").strip().lower()
+                except EOFError:
+                    ans = "q"
+            if ans == "q":
+                break
+            if ans != "y":
+                continue
+            if len(value) < 8:
+                skipped_short += 1
+                print("      (value too short for exact-value matching — it will be "
+                      "covered if its KEY is in your .env sources)")
+                continue
+            style = "full" if cls != "KEY-SHAPE" else None
+            added.append((value, style))
+            print(f"      ✓ registered (mask: {style or 'default 2+2'})")
+        print()
+    # .env sources
+    env_sources = []
+    for cand, default in [(_HERMES_HOME / ".env", True), (Path.cwd() / ".env", False)]:
+        if not cand.exists():
+            continue
+        if auto:
+            ans = "y" if default else "n"
+        else:
+            ans = input(f"  include {cand} as an env source? [Y/n] "
+                        if default else f"  include {cand} as an env source? [y/N] ").strip().lower()
+            ans = ans or ("y" if default else "n")
+        if ans == "y":
+            env_sources.append(str(cand))
+    # write custom_literals.json (merge, never clobber)
+    existing, ok = _load_custom_values()
+    if not ok:
+        print(f"[info-guard] ⚠ existing {CUSTOM_LITERALS.name} unreadable — "
+              f"will not overwrite; new values skipped")
+        added = []
+    if added:
+        seen = set()
+        merged = []
+        for item in existing + [{"value": v, "mask": m} if m else v for v, m in added]:
+            sig = item if isinstance(item, str) else item.get("value")
+            if sig in seen:
+                continue
+            seen.add(sig)
+            merged.append(item)
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        CUSTOM_LITERALS.write_text(json.dumps({"literals": merged}, indent=2))
+        os.chmod(CUSTOM_LITERALS, 0o600)
+        print(f"[info-guard] wrote {len(added)} new literal(s) → {CUSTOM_LITERALS}")
+    elif not env_sources:
+        print("[info-guard] nothing new to register — no changes made")
+        return 0
+    # build
+    if env_sources:
+        cmd_build(env_sources)
+    elif added:
+        print("[info-guard] no env sources selected — pattern file will contain "
+              "only the custom literals (add sources later with "
+              "`info-guard build ENV_FILE...`)")
+    if skipped_short:
+        print(f"[info-guard] note: {skipped_short} short value(s) skipped — their "
+              f"keys are covered if present in an env source")
+    cmd_status()
+    print("[info-guard] done. Verify with ./test.sh — masking is live immediately.")
+    return 0
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
@@ -373,6 +531,8 @@ def main(argv):
         return cmd_status()
     if cmd == "preflight":
         return cmd_preflight(rest)
+    if cmd == "setup":
+        return cmd_setup(rest)
     print(f"[info-guard] unknown command: {cmd} (try `info-guard --help`)")
     return 2
 

@@ -52,6 +52,19 @@ and gitleaks' already-tuned ruleset. Clean → install with confidence.
 Findings → each candidate is a value at rest that *looks* like a secret:
 review the list, rotate anything you confirm, then install.
 
+**Step 0b — build your config interactively (`info-guard setup`):**
+
+```bash
+./bin/info-guard setup
+```
+
+The wizard walks every preflight candidate one at a time — **values shown
+masked only, never echoed** — and asks which are yours. Confirmed values are
+registered as exact-value literals (token-shaped → full mask, key-shaped →
+default partial), your `.env` sources are added, and the pattern file is
+built and verified in one pass. `info-guard setup --all` accepts every
+candidate non-interactively (agent-assisted installs).
+
 **You (terminal):**
 
 ```bash
