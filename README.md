@@ -107,6 +107,13 @@ The agent will read `docs/format-spec.md` for the file format and
    path — the default already matches.
 4. Restart Hermes processes.
 
+**After a `hermes update`:** re-run `./install.sh`. Hermes' updater
+autostashes and restores working-tree changes, and a release can drop the
+applied patch — or conflict with it (v0.20.2 did, before the rebase).
+install.sh is idempotent: if the patch is gone it re-applies it; if the
+codebase drifted it fails loudly with the drift message. Your pattern file
+and custom literals are never touched by either path.
+
 ## Uninstall
 
 ```bash
