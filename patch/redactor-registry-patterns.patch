@@ -1,5 +1,5 @@
 diff --git a/agent/redact.py b/agent/redact.py
-index 7fa3c11e..94066529 100644
+index 7fa3c11e1..940665291 100644
 --- a/agent/redact.py
 +++ b/agent/redact.py
 @@ -1006,6 +1006,172 @@ def redact_sensitive_text(
@@ -176,10 +176,10 @@ index 7fa3c11e..94066529 100644
  
  
 diff --git a/cli.py b/cli.py
-index 8b9661f0..1797a361 100644
+index 5b737212d..b32f1ea9f 100644
 --- a/cli.py
 +++ b/cli.py
-@@ -770,6 +770,9 @@ def load_cli_config() -> Dict[str, Any]:
+@@ -772,6 +772,9 @@ def load_cli_config() -> Dict[str, Any]:
          redact = security_config.get("redact_secrets")
          if redact is not None:
              os.environ["HERMES_REDACT_SECRETS"] = str(redact).lower()
@@ -190,10 +190,10 @@ index 8b9661f0..1797a361 100644
      # Session-search index knobs (hermes_state reads the env carriers).
      sessions_config = defaults.get("sessions", {})
 diff --git a/gateway/run.py b/gateway/run.py
-index a3485ccb..52bcbe1f 100644
+index a4fcde2d4..fb6870501 100644
 --- a/gateway/run.py
 +++ b/gateway/run.py
-@@ -2326,6 +2326,9 @@ if _config_path.exists():
+@@ -2379,6 +2379,9 @@ if _config_path.exists():
              _redact = _security_cfg.get("redact_secrets")
              if _redact is not None:
                  os.environ["HERMES_REDACT_SECRETS"] = str(_redact).lower()
@@ -204,10 +204,10 @@ index a3485ccb..52bcbe1f 100644
          _gateway_cfg = _cfg.get("gateway", {})
          if isinstance(_gateway_cfg, dict):
 diff --git a/hermes_cli/config.py b/hermes_cli/config.py
-index bca802d0..f3c3a987 100644
+index cd226a92a..cd39b458d 100644
 --- a/hermes_cli/config.py
 +++ b/hermes_cli/config.py
-@@ -3657,12 +3657,16 @@ _SECURITY_COMMENT = """
+@@ -3658,12 +3658,16 @@ _SECURITY_COMMENT = """
  # tokens, and passwords are masked in tool output, logs, and chat
  # responses before the model or user ever sees them. Set redact_secrets
  # to false to disable (e.g. when developing the redactor itself).
@@ -224,7 +224,7 @@ index bca802d0..f3c3a987 100644
  #   tirith_enabled: true
  #   tirith_path: "tirith"
  #   tirith_timeout: 5
-@@ -3701,6 +3705,7 @@ _COMMENTED_SECTIONS = """
+@@ -3702,6 +3706,7 @@ _COMMENTED_SECTIONS = """
  #
  # security:
  #   redact_secrets: true
@@ -233,12 +233,10 @@ index bca802d0..f3c3a987 100644
  # ── Fallback Model ────────────────────────────────────────────────────
  # Automatic provider failover when primary is unavailable.
 diff --git a/hermes_cli/main.py b/hermes_cli/main.py
-index e0371049..bf58f108 100644
+index ed9fe973a..75568ad3b 100644
 --- a/hermes_cli/main.py
 +++ b/hermes_cli/main.py
-@@ -699,11 +699,13 @@ from hermes_cli.env_loader import load_hermes_dotenv
- 
- load_hermes_dotenv(project_env=PROJECT_ROOT / ".env")
+@@ -711,9 +711,11 @@ load_hermes_dotenv(
  
 -# Bridge security.redact_secrets from config.yaml → HERMES_REDACT_SECRETS env
 -# var BEFORE hermes_logging imports agent.redact (which snapshots the flag at
@@ -255,7 +253,7 @@ index e0371049..bf58f108 100644
  #
  # We also read network.force_ipv4 from the same yaml load to avoid two
  # separate config.yaml reads (saves ~17ms on every CLI startup — the second
-@@ -735,6 +737,12 @@ try:
+@@ -744,6 +746,12 @@ try:
                  _early_redact = _early_sec_cfg.get("redact_secrets")
                  if _early_redact is not None:
                      os.environ["HERMES_REDACT_SECRETS"] = str(_early_redact).lower()

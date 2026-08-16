@@ -35,7 +35,9 @@ After:   "the token is 7f...3c and the PIN is ***"
 
 ## Install (any of these)
 
-Requires Hermes Agent **v0.20.1+**. Takes about two minutes.
+Requires Hermes Agent **v0.20.0+** — the patch is apply-checked and the
+test suite passes 15/15 against v0.20.0, v0.20.1, and v0.20.2 (one
+version-tolerant patch). Takes about two minutes.
 
 **Step 0 — preflight (optional but recommended):** before deciding, check
 whether you're *already* leaking without knowing it — Hermes' own transcripts
@@ -104,6 +106,20 @@ The agent will read `docs/format-spec.md` for the file format and
 3. Set `security.redact_patterns` to that path, or just rely on the default
    path — the default already matches.
 4. Restart Hermes processes.
+
+## Uninstall
+
+```bash
+./uninstall.sh            # confirm prompt; --yes to skip it
+```
+
+Cleanly reverses install: reverse-applies the patch (skipped if absent),
+removes the `security.redact_patterns` config key, and moves the state dir
+(`<home>/state/info-guard/`) to `*.bak-<timestamp>` instead of deleting it
+(delete the backup once you're sure; `--keep-state` leaves it in place).
+Idempotent — safe to re-run. After uninstalling, restart Hermes processes
+so the patched code is unloaded from memory. gitleaks (if you accepted the
+optional install) is left alone — it's a standalone tool.
 
 ## Add your own secrets
 
