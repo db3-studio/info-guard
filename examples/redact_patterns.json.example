@@ -2,11 +2,19 @@
   "mask": {"head": 2, "tail": 2, "floor": 12},
   "literals": [
     "an-exact-value-that-should-always-be-masked",
-    {"value": "a-top-tier-secret", "mask": "full"}
+    {"value": "a-top-tier-secret", "mask": "full"},
+    {"value": "keep-more-visible-value", "mask": {"head": 4, "tail": 2, "floor": 10}}
   ],
   "key_patterns": {
     "MY_SERVICE_PASSWORD": true,
-    "PIN": true
+    "DATABASE_URL": true,
+    "PIN": true,
+    "WEBUI_PIN": true,
+    "x_passphrase": true,
+    "client_secret": true,
+    "access_token": true,
+    "refresh_token": true,
+    "dns_provider_credentials": true
   },
   "generated": "hand-written example — run `bin/info-guard build` to generate from your .env files"
 }

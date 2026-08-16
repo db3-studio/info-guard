@@ -1,6 +1,12 @@
 {
   "literals": [
     "someone@example.com",
-    {"value": "a-string-only-you-know-is-sensitive", "mask": "full"}
+    "+1-555-010-1234",
+    "012-34-5678",
+    "alex-rivera-example",
+    "example-provider-token-abcdefghijklmnop",
+    {"value": "a-string-only-you-know-is-sensitive", "mask": "full"},
+    {"value": "keep-more-visible-value", "mask": {"head": 4, "tail": 2, "floor": 10}},
+    {"value": "short-token-abc", "mask": {"head": 1, "tail": 1, "floor": 6}}
   ]
 }
