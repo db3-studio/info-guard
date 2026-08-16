@@ -53,10 +53,14 @@ product never needs it — but it powers this scan's provider-format tier. If
 it's missing, preflight explains the benefit and offers to install it
 (`go install` or the GitHub release binary into `~/.local/bin`); non-tty
 runs get the command and continue with the key-shape pass only.
+Already installed? Preflight detects it (engine marker + pattern file) and
+frames the run as a health check: findings are at-rest residue that masking
+does not remove — rotate or delete them.
 Clean → no leaks found at rest today — a solid baseline; install turns that
 baseline into prevention (masking before values ever reach logs).
 Findings → each candidate is a value at rest that *looks* like a secret:
-review the list, rotate anything you confirm, then install.
+review the list, rotate or delete anything you confirm. Installing never
+cleans history — it prevents the next occurrence.
 
 **Step 0b — build your config interactively (`info-guard setup`):**
 

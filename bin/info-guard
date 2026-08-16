@@ -432,6 +432,7 @@ def cmd_preflight(args):
               f"({', '.join(_PREFLIGHT_DIRS)}) — nothing to scan")
         return 0
     _ensure_gitleaks()
+    _print_install_status()
     total = 0
     for d in dirs:
         total += sum(1 for _ in d.rglob("*") if _.is_file())
@@ -465,9 +466,10 @@ def cmd_preflight(args):
         print("      exposure after this run")
         print("    • exhaustive — key-forms, known token prefixes, and gitleaks'")
         print("      ruleset; an unusual format could go unseen")
-        print("  Why install anyway: Info Guard is PREVENTION. It masks your")
-        print("  exact values before they ever reach logs/transcripts, so")
-        print("  future secrets stay protected without depending on any scan.")
+        print("  Why install anyway: Info Guard is PREVENTION, not cleanup.")
+        print("  It masks your exact values before they ever reach logs/")
+        print("  transcripts — and it NEVER removes what is already at rest:")
+        print("  anything found stays until you rotate or delete it.")
         print("  Re-run preflight anytime (it's free) — e.g. after adding a")
         print("  new service, to confirm the baseline still holds.")
         return 0
@@ -498,8 +500,10 @@ def cmd_preflight(args):
         print(f"  …and {len(deduped) - 50} more unique candidates (first 50 shown)")
     print("  What this means: a secret at rest in transcripts/logs is already\n"
           "  compromised (anyone with file access can read it). Review the list;\n"
-          "  for anything you confirm is a real secret: ROTATE it, then install\n"
-          "  Info Guard so future occurrences are masked at the source.\n"
+          "  for anything you confirm is a real secret: ROTATE or delete it.\n"
+          "  Installing Info Guard does NOT clean these up — masking is\n"
+          "  display-only; it prevents the NEXT occurrence, it never removes\n"
+          "  what is already here.\n"
           "  Known false-positive classes: code identifiers (password_hash =),\n"
           "  config examples in docs, harmless IDs matching token prefixes.")
     return 1
@@ -521,6 +525,35 @@ def _collect_hits(dirs):
             rel = os.path.relpath(fname, str(_HERMES_HOME)) if fname else str(d)
             all_hits.append((cls, rule, rel, line, value, masked, ctx))
     return all_hits, gitleaks_ok
+
+
+def _installation_status():
+    """Best-effort detection of an existing Info Guard install: the engine
+    marker in the checkout's redact.py, plus the state artifacts that only
+    install/build create."""
+    engine = False
+    checkout = _HERMES_HOME / "hermes-agent" / "agent" / "redact.py"
+    if checkout.is_file():
+        try:
+            engine = "_redact_registry_patterns" in checkout.read_text(errors="replace")
+        except OSError:
+            pass
+    return {"engine": engine, "patterns": MATCHER.exists(),
+            "state_dir": STATE_DIR.is_dir()}
+
+
+def _print_install_status():
+    """Frame the run: decide-step (not installed) vs. health check
+    (installed — findings are residue, masking does not remove it)."""
+    inst = _installation_status()
+    if inst["patterns"] or inst["engine"]:
+        parts = ["engine " + ("active" if inst["engine"] else "NOT detected"),
+                 "pattern file " + ("present" if inst["patterns"] else "missing")]
+        print(f"[info-guard] ℹ Info Guard appears INSTALLED ({', '.join(parts)}) — "
+              f"this run is a health check of at-rest residue, not a decide step.")
+    else:
+        print("[info-guard] ℹ Info Guard not detected — this run is the "
+              "before-install decide step.")
 
 
 def _scan_dirs(names=None):
