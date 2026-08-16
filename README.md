@@ -231,11 +231,11 @@ Hermes agent to build the remaining layers for your environment.
 ## Upstream
 
 The redaction engine is being upstreamed to NousResearch/hermes-agent
-(PR #85064 — "exact-value secret redaction from user pattern file"). Once
-merged, `install.sh`'s patch step disappears and this repo becomes pure
-tooling + docs. Until then, `install.sh` is marker-guarded and fails loudly
-if a `hermes update` drifts the patch context — it will never silently
-disable redaction.
+(PR #87953 — "exact-value secret redaction from user pattern file").
+Once merged, `install.sh`'s patch step disappears and this repo becomes
+pure tooling + docs. Until then, `install.sh` is marker-guarded and fails
+loudly if a `hermes update` drifts the patch context — it will never
+silently disable redaction.
 
 ## License
 
