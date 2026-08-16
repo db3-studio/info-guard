@@ -114,6 +114,16 @@ install.sh is idempotent: if the patch is gone it re-applies it; if the
 codebase drifted it fails loudly with the drift message. Your pattern file
 and custom literals are never touched by either path.
 
+**Optional: schedule a health check.** `info-guard check` verifies the
+engine survived updates, the pattern file is present, and reports gitleaks
+availability — exit 0 healthy, 1 broken. No alert channel is assumed; wire
+the non-zero exit to whatever your scheduler supports (cron mail, ntfy, a
+log line):
+
+```cron
+0 * * * * /path/to/info-guard/bin/info-guard check || echo "info-guard: BROKEN — run install.sh"
+```
+
 ## Uninstall
 
 ```bash

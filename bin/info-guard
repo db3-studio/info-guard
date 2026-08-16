@@ -23,6 +23,12 @@ Usage:
                                     literals, picks .env sources, builds the
                                     pattern file. --all accepts every
                                     candidate non-interactively (agents/tests).
+  info-guard check                  Health check / schedulable watchdog:
+                                    engine marker, pattern file, custom
+                                    literals, gitleaks. Exit 0 healthy,
+                                    1 broken (run install.sh), 2 error.
+                                    No alert channel assumed — wire the
+                                    non-zero exit to your scheduler.
 
 Sources merged by `build`:
   1. Every KEY=value pair from the env files, except:
@@ -686,6 +692,53 @@ def cmd_setup(args):
     return 0
 
 
+def cmd_check(args):
+    """Health check — the package's schedulable watchdog. Verifies the
+    engine marker survived updates, the pattern file is present, and
+    reports gitleaks availability. Exit 0 = healthy, 1 = broken,
+    2 = error. No alert channel assumed: the caller's scheduler decides
+    what to do with a non-zero exit (cron mail, ntfy, ...)."""
+    problems = 0
+    inst = _installation_status()
+    if inst["engine"]:
+        print("[info-guard] ✓ engine: registry-fed redaction ACTIVE "
+              "(marker present in agent/redact.py)")
+    else:
+        problems += 1
+        print("[info-guard] ✗ engine: marker MISSING from agent/redact.py — "
+              "`hermes update` likely wiped the patch; run ./install.sh "
+              "(idempotent) or ./uninstall.sh if you want out")
+    if inst["patterns"]:
+        try:
+            data = json.loads(MATCHER.read_text())
+            lits = data.get("literals", [])
+            n_full = sum(1 for l in lits if isinstance(l, dict))
+            print(f"[info-guard] ✓ pattern file: present ({len(lits)} literals, "
+                  f"{n_full} full-mask, {len(data.get('key_patterns', {}))} "
+                  f"key patterns)")
+        except (OSError, ValueError):
+            problems += 1
+            print(f"[info-guard] ✗ pattern file: unreadable at {MATCHER}")
+    else:
+        problems += 1
+        print(f"[info-guard] ✗ pattern file: missing — run ./install.sh then "
+              f"`info-guard build`")
+    if CUSTOM_LITERALS.exists():
+        print("[info-guard] ✓ custom literals: present (masking-only source)")
+    if _gitleaks_available():
+        print("[info-guard] ✓ gitleaks: available (preflight tuned-ruleset tier "
+              "active)")
+    else:
+        print("[info-guard] ⚠ gitleaks: absent — OPTIONAL; preflight degrades "
+              "to key-shape pass (install with `info-guard preflight`)")
+    print()
+    if problems:
+        print(f"[info-guard] ✗ check FAILED — {problems} problem(s) found")
+        return 1
+    print("[info-guard] ✓ check OK — Info Guard healthy")
+    return 0
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
@@ -700,6 +753,8 @@ def main(argv):
         return cmd_preflight(rest)
     if cmd == "setup":
         return cmd_setup(rest)
+    if cmd == "check":
+        return cmd_check(rest)
     print(f"[info-guard] unknown command: {cmd} (try `info-guard --help`)")
     return 2
 
