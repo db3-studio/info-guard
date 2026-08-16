@@ -53,7 +53,8 @@ product never needs it — but it powers this scan's provider-format tier. If
 it's missing, preflight explains the benefit and offers to install it
 (`go install` or the GitHub release binary into `~/.local/bin`); non-tty
 runs get the command and continue with the key-shape pass only.
-Clean → install with confidence.
+Clean → no leaks found at rest today — a solid baseline; install turns that
+baseline into prevention (masking before values ever reach logs).
 Findings → each candidate is a value at rest that *looks* like a secret:
 review the list, rotate anything you confirm, then install.
 

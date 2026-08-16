@@ -456,8 +456,20 @@ def cmd_preflight(args):
     print()
     if not all_hits:
         print("[info-guard] ✓ preflight CLEAN — no key-shaped values, token "
-              "prefixes, or gitleaks rule hits in Hermes' transcripts/logs.\n"
-              "  Safe to proceed with install.")
+              "prefixes, or gitleaks rule hits in Hermes' transcripts and logs.")
+        print()
+        print("  What this means: no detected leaks AT REST in the scanned dirs")
+        print("  — a solid baseline, but a snapshot of today, not a promise.")
+        print("  What it does not mean:")
+        print("    • future-proof — new services and new secrets create new")
+        print("      exposure after this run")
+        print("    • exhaustive — key-forms, known token prefixes, and gitleaks'")
+        print("      ruleset; an unusual format could go unseen")
+        print("  Why install anyway: Info Guard is PREVENTION. It masks your")
+        print("  exact values before they ever reach logs/transcripts, so")
+        print("  future secrets stay protected without depending on any scan.")
+        print("  Re-run preflight anytime (it's free) — e.g. after adding a")
+        print("  new service, to confirm the baseline still holds.")
         return 0
     print(f"[info-guard] ✗ preflight FINDINGS — {len(all_hits)} candidate(s) in "
           f"Hermes' own data. Each is a value that LOOKS like a secret at rest:")
