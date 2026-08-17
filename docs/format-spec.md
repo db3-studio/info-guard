@@ -124,6 +124,17 @@ Lines are `KEY=value`; anything after the first `=` is the value:
   floor), but their KEY still becomes a key pattern — so `PIN=1234` masks
   even though the value is unregistered
 
+## Trusted-path assumption
+
+The registry path is **fully trusted**: whatever `security.redact_patterns`
+or `HERMES_REDACT_PATTERNS` points at is loaded as-is, symlinks followed,
+with no requirement that it live under `$HERMES_HOME/state/info-guard/`.
+Configurable external registries are a feature (share one registry across
+profiles, mount it read-only, generate it elsewhere) — but the flip side
+is that anything able to write that path controls redaction. If that is
+unacceptable in your threat model, keep the registry under your own
+`$HERMES_HOME` and enforce the permissions there.
+
 ## Custom literals (the PII workflow)
 
 `<state>/custom_literals.json` — hand-edited, survives rebuilds, masking only
