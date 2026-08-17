@@ -54,7 +54,7 @@ jobs:
       - name: Upstream suite (20 tests)
         run: cd /tmp/hermes && python -m pytest tests/agent/test_redact_registry_patterns.py tests/hermes_cli/test_redact_patterns_bridge.py -q
 
-      - name: Package battery (26 checks)
+      - name: Package battery (31 checks)
         run: bash "$GITHUB_WORKSPACE/test.sh" --checkout /tmp/hermes
 
       - name: Repo secret scan

@@ -11,6 +11,8 @@
 #   5. missing pattern file = no-op (built-in redaction still works)
 #   6. default-path resolution via $HERMES_HOME (a fresh/second home gets its
 #      own pattern file automatically — no config, no env vars)
+#   7. same-process path-switch (cache identity — audit followup2 #4)
+#   8. symlinked registry path (trusted-path pin — audit followup2 #5)
 #
 # Exit 0 = all checks pass. Uses only synthetic probe values.
 set -euo pipefail
@@ -236,6 +238,42 @@ g_once = redact("IG_PROBE_PIN=1234")
 check("idempotent re-masking", redact(g_once) == g_once, f"got {redact(g_once)!r}")
 g_uni = redact("ig-pröbe-12345")
 check("unicode literal", g_uni == "ig...45", f"got {g_uni!r}")
+
+# 9. external-audit followup2 #4: same-process path-switch regression —
+#    cache identity: switching HERMES_REDACT_PATTERNS A -> B in one
+#    process must swap the active secret set (alpha masked under A only)
+sw_a = os.path.join(tmp, "switch-a.json")
+sw_b = os.path.join(tmp, "switch-b.json")
+ALPHA = "alpha-secret-123456"       # 19 chars -> 2+2 visible
+BRAVO = "bravo-secret-123456"       # 19 chars -> 2+2 visible
+write(sw_a, {"mask": {"head": 2, "tail": 2, "floor": 12},
+             "literals": [ALPHA], "key_patterns": {}})
+write(sw_b, {"mask": {"head": 2, "tail": 2, "floor": 12},
+             "literals": [BRAVO], "key_patterns": {}})
+check("path-switch: A masks its own secret",
+      redact(ALPHA, patterns=sw_a) == "al...56", f"got {redact(ALPHA, patterns=sw_a)!r}")
+check("path-switch: B masks its own secret (same process)",
+      redact(BRAVO, patterns=sw_b) == "br...56", f"got {redact(BRAVO, patterns=sw_b)!r}")
+check("path-switch: A's secret NOT masked under B (cache identity)",
+      redact(ALPHA, patterns=sw_b) == ALPHA, f"got {redact(ALPHA, patterns=sw_b)!r}")
+
+# 10. external-audit followup2 #5: symlinked registry path — the
+#     format-spec documents "path fully trusted, symlinks followed";
+#     pin the behavior: live symlink loads + masks, dangling = fail-safe
+real_p = os.path.join(tmp, "real-patterns.json")
+link_p = os.path.join(tmp, "linked-patterns.json")
+SYM = "symlink-probe-12345"         # 18 chars -> 2+2 visible
+write(real_p, {"mask": {"head": 2, "tail": 2, "floor": 12},
+               "literals": [SYM], "key_patterns": {}})
+os.symlink(real_p, link_p)
+check("symlink: registry loaded through symlink (trusted path)",
+      redact(SYM, patterns=link_p) == "sy...45",
+      f"got {redact(SYM, patterns=link_p)!r}")
+dangling = os.path.join(tmp, "dangling.json")
+os.symlink(os.path.join(tmp, "no-such-target.json"), dangling)
+check("symlink: dangling link = fail-safe no-op (like missing file)",
+      redact(SYM, patterns=dangling) == SYM,
+      f"got {redact(SYM, patterns=dangling)!r}")
 
 
 print(f"\n[test] {PASS} passed, {FAIL} failed")

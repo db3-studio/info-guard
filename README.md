@@ -48,7 +48,7 @@ roadmap as v2.
 
 Requires Hermes Agent **v0.20.0+** — the patch is apply-checked and the
 upstream test suite passes 20/20 against v0.20.0, v0.20.1, and v0.20.2
-(one version-tolerant patch; `test.sh` is the package's own 17-check
+(one version-tolerant patch; `test.sh` is the package's own 31-check
 battery, separate from the upstream suite). Takes about two minutes.
 
 **Step 0 — preflight (optional but recommended):** before deciding, check
@@ -243,7 +243,7 @@ Hermes agent to build the remaining layers for your environment.
 ## Upstream
 
 The redaction engine is being upstreamed to NousResearch/hermes-agent
-(PR #87953 — "exact-value secret redaction from user pattern file").
+(PR [NousResearch/hermes-agent#87953](https://github.com/NousResearch/hermes-agent/pull/87953) — "exact-value secret redaction from user pattern file").
 Once merged, `install.sh`'s patch step disappears and this repo becomes
 pure tooling + docs. Until then, `install.sh` is marker-guarded and fails
 loudly if a `hermes update` drifts the patch context — it will never
