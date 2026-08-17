@@ -47,9 +47,10 @@ roadmap as v2.
 ## Install (any of these)
 
 Requires Hermes Agent **v0.20.0+** — the patch is apply-checked and the
-upstream test suite passes 15/15 against v0.20.0, v0.20.1, and v0.20.2
-(one version-tolerant patch; `test.sh` is the package's own 31-check
-battery, separate from the upstream suite). Takes about two minutes.
+upstream test suite passes 15/15 against v0.20.0, v0.20.1, v0.20.2, and
+v0.20.3 (2026.8.16.2) — one version-tolerant patch; `test.sh` is the
+package's own 31-check battery, separate from the upstream suite.
+Takes about two minutes.
 
 **Step 0 — preflight (optional but recommended):** before deciding, check
 whether you're *already* leaking without knowing it — Hermes' own transcripts
@@ -139,7 +140,7 @@ patch can be dropped silently. The upgrade lifecycle:
 1. **`info-guard check`** — engine active? Exit 0 = healthy, done.
 2. **Broken → re-run `./install.sh`** — idempotent: re-applies the patch,
    or fails loudly with the drift message if the codebase moved beyond the
-   supported versions (the rebased patch covers v0.20.0–v0.20.2). Your
+   supported versions (the rebased patch covers v0.20.0–v0.20.3). Your
    pattern file and custom literals are never touched by either path.
 3. **Over it? → `./uninstall.sh`** — clean removal, state backed up.
 
