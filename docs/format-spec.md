@@ -105,7 +105,10 @@ masking those values was pure information loss.
 - **Coverage gap (documented)**: `key_patterns` masks `KEY=`, `KEY:`, and
   JSON key forms. XML-style tags (`<ApiKey>value</ApiKey>`) are NOT covered
   by key patterns — register those values as exact literals instead
-  (literals mask anywhere, including inside XML).
+  (literals mask anywhere, including inside XML). Note: token-shaped values
+  inside XML are still caught by the token-prefix pass and gitleaks;
+  identification happens at the source config, where the tag names the
+  secret.
 
 ## The `.env` grammar (what `info-guard build` parses)
 
