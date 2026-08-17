@@ -47,7 +47,7 @@ roadmap as v2.
 ## Install (any of these)
 
 Requires Hermes Agent **v0.20.0+** — the patch is apply-checked and the
-upstream test suite passes 20/20 against v0.20.0, v0.20.1, and v0.20.2
+upstream test suite passes 15/15 against v0.20.0, v0.20.1, and v0.20.2
 (one version-tolerant patch; `test.sh` is the package's own 31-check
 battery, separate from the upstream suite). Takes about two minutes.
 

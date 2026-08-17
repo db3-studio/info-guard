@@ -51,8 +51,15 @@ jobs:
       - name: Install test dependencies
         run: pip install --quiet pytest pyyaml python-dotenv
 
-      - name: Upstream suite (20 tests)
+      - name: Upstream suite (15 tests)
         run: cd /tmp/hermes && python -m pytest tests/agent/test_redact_registry_patterns.py tests/hermes_cli/test_redact_patterns_bridge.py -q
+
+      - name: Assert upstream suite count stays 15 (audit1-followup)
+        run: |
+          cd /tmp/hermes
+          COUNT=$(python -m pytest tests/agent/test_redact_registry_patterns.py tests/hermes_cli/test_redact_patterns_bridge.py --collect-only -q 2>&1 | tail -1)
+          echo "$COUNT"
+          echo "$COUNT" | grep -q '15 tests collected'
 
       - name: Package battery (31 checks)
         run: bash "$GITHUB_WORKSPACE/test.sh" --checkout /tmp/hermes

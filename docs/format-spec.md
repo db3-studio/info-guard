@@ -149,7 +149,7 @@ Edit it, then run `info-guard build` — live within seconds, no restarts.
 ## Version notes
 
 - Requires Hermes Agent **v0.20.0+**. One version-tolerant patch: apply-checked
-  and 20/20 test suite against v0.20.0 (2026.8.3), v0.20.1 (2026.8.13), and
+  and 15/15 test suite against v0.20.0 (2026.8.3), v0.20.1 (2026.8.13), and
   v0.20.2 (2026.8.16) — 0.20.2 drifted `hermes_cli/main.py` (dotenv loading
   rework) and the patch context was rebased to cover all three.
 - `install.sh` / `uninstall.sh` fail loudly if the patch doesn't apply after
