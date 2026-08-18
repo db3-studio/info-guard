@@ -383,7 +383,7 @@ pf = subprocess.run(
 pfo = pf.stdout + pf.stderr
 check("preflight: findings exit code 1", pf.returncode == 1,
       f"rc={pf.returncode} out={pfo[-300:]!r}")
-for section in ("Info Guard v0.2.2 — Preflight Report",
+for section in ("Info Guard v0.2.3 — Preflight Report",
                 "WHAT THIS IS", "BOTTOM LINE", "AREAS OF CONCERN",
                 "TOP TOKEN-FORMAT VALUES", "FAMILIES WITH REAL VALUES AT REST",
                 "TOP SECRET-FAMILY KEYS", "FILES WITH MOST FINDINGS",
@@ -401,6 +401,25 @@ check("preflight: leak pointer lists a family",
       "DISCORD_BOT_TOKEN" in pfo and "real" in pfo)
 check("preflight: key-name tier labeled NOT leaks",
       "NOT leak findings" in pfo)
+
+# 12a2. preflight --full: complete ledger replaces the sampler
+pff = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "preflight", "--full"],
+    env=env6, capture_output=True, text=True, timeout=300)
+pffo = pff.stdout + pff.stderr
+check("preflight --full: same finding exit code",
+      pff.returncode == pf.returncode and pff.returncode == 1,
+      f"rc={pff.returncode} (sampler rc={pf.returncode}) out={pffo[-200:]!r}")
+check("preflight --full: complete-ledger header, no sampler",
+      "DETAILS (complete" in pffo and "DETAILS (sample" not in pffo,
+      "expected complete ledger header")
+check("preflight --full: every family row listed, not one per family",
+      pffo.count("value=") >= pfo.count("value="),
+      "full ledger should carry at least as many rows as the sampler")
+check("preflight --full: still masked, no raw values",
+      jwt not in pffo and dsc not in pffo,
+      "a raw synthetic value appeared in the full ledger")
 
 # 12b. preflight CLEAN path: empty scan dirs -> exit 0 + header + CLEAN
 pf_clean = os.path.join(tmp, "pf-clean")
@@ -424,7 +443,7 @@ ver = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
     capture_output=True, text=True, timeout=60)
 check("--version prints the package version",
-      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.2.2",
+      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.2.3",
       f"rc={ver.returncode} out={ver.stdout.strip()!r}")
 
 

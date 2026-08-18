@@ -58,7 +58,8 @@ whether you're *already* leaking without knowing it — Hermes' own transcripts
 and logs may hold secrets that predate redaction:
 
 ```bash
-./bin/info-guard preflight
+./bin/info-guard preflight          # sample report — one example per family
+./bin/info-guard preflight --full   # complete deduplicated ledger, same masking
 ```
 
 Zero-config, read-only, nothing written, output fully masked. Scans

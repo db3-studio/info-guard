@@ -192,10 +192,19 @@ Report sections, in order:
    in the report until the files are deleted/archived. The only justified
    re-scan is right after rotating, to confirm the rotation itself didn't
    leak the new value into logs.
-10. **DETAILS** — deduplicated ledger (first 50 of N unique), each row:
-    `[cls] rule`, `file:line  value=<masked>`, trimmed context window
-    (40 chars before / 80 after the match — never the whole line, which
-    could be multi-KB).
+10. **DETAILS** — a **sample, not a ledger**: one example per secret
+    family (`[cls] rule (×N)`, `file:line  value=<masked>`, trimmed
+    context window 40/80). Families are ranked by signal (gitleaks and
+    token-format first), then by count. Two kinds of rows are count-only
+    (the total stays in BOTTOM LINE, no example line): values whose 2+2
+    mask reveals nothing (code refs `${…}`, paths `/…`, markup `<…>`,
+    fragments) and values too short to mask partially. Families whose
+    key name appears in the default `.env` sources are labeled
+    `— your .env key` (key NAMES only are read, never values). The
+    escape hatch for the full detail: **`info-guard preflight --full`**
+    prints the complete deduplicated ledger — every reviewable row, same
+    masking, no sampler, no cap (source-masked rows stay count-only in
+    both modes: there is nothing to show).
 
 Exit codes: **0 = clean** (also printed with the header), **1 = findings**,
 **2 = usage error**. gitleaks is optional: without it the scan runs the

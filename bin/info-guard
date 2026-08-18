@@ -69,7 +69,7 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.2.2"
+_PACKAGE_VERSION = "0.2.3"
 
 VALID_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -295,7 +295,7 @@ def _value_class(value: str) -> str:
       key-name       — anything else: a key-name mention, code ref, path...
     """
     v = (value or "").strip().strip('"').strip("'")
-    if not v or set(v) <= {"*"}:
+    if not v or set(v) <= {"*"} or "«redacted-secret»" in v:
         return "already-masked"
     if v.lower().startswith("your"):
         return "placeholder"
@@ -343,6 +343,31 @@ def _family_of(rule: str) -> str:
     return rule
 
 
+def _known_env_keys() -> set:
+    """Key NAMES only (never values — same rule as env-inspect.sh) from
+    the default .env sources. Used to label DETAILS families as known
+    credentials vs unknown (the interesting ones). Absent/empty .env →
+    empty set: the report stays zero-config."""
+    keys = set()
+    for p in _default_sources():
+        try:
+            keys.update(_load_env(p).keys())
+        except SystemExit:
+            continue
+    return keys
+
+
+def _displayable_value(value: str) -> bool:
+    """True when the 2+2 mask of a value shows real characters (alnum
+    head AND tail). Code refs (${...), paths (/t...), markup (<l...>),
+    and fragments (en...),) reveal nothing — they're detection
+    artifacts, not credentials, and belong count-only in the sampler."""
+    v = (value or "").strip().strip('"').strip("'")
+    if len(v) < 5:
+        return False
+    return v[0].isalnum() and v[-1].isalnum()
+
+
 def _key_scan(path: Path):
     """Key-shape + token-prefix pass over one file. Returns list of
     (cls, rule, line_no, value, masked_repr, context). The raw value is
@@ -358,7 +383,7 @@ def _key_scan(path: Path):
             key, val = m.group(1), m.group(2)
             if val.lower() in _TRIVIAL_VALUES or re.fullmatch(r"\d{1,6}", val):
                 continue
-            if len(val) > 64:                       # giant json blob, not a value
+            if len(val) > 64 and not _VALUE_TOKEN_RE.match(val.strip().strip('"').strip("'")):  # giant non-token blob, not a value (long JWTs stay)
                 continue
             # Bounded window around the match (40 before / 80 after) — the
             # old `line[:m.end()] + ...` prefix could be multi-KB when the
@@ -524,9 +549,16 @@ def _gitleaks_scan(root: Path, redact=True):
     """gitleaks dir over one directory tree (already-tuned ruleset).
     Returns (hits, available) — available=False when gitleaks is missing.
     NEVER prints the raw Secret field; the Match line is hard-masked (all
-    16+ char runs replaced) before it can reach the terminal. With
-    redact=False the full secret is kept in memory for the setup wizard
-    (written straight to custom_literals.json, never echoed)."""
+    16+ char runs replaced) before it can reach the terminal.
+
+    redact=True (preflight): the value is kept in memory only to derive a
+    head/tail mask (2+2, same as every other tier) — it is never printed.
+    The temp JSON report (mkstemp = 0600, unlinked in finally) holds the
+    value exactly like the setup wizard's redact=False path does; we do
+    NOT pass --redact to gitleaks because its redaction truncates the
+    tail (verified 2026-08-18: redact=8 keeps 92% AND destroys the real
+    last chars), which would break our 2+2 mask. redact=False keeps the
+    full value in memory for the setup wizard (never echoed)."""
     binpath = _gitleaks_bin()
     if not binpath:
         return [], False
@@ -536,8 +568,6 @@ def _gitleaks_scan(root: Path, redact=True):
     try:
         cmd = [binpath, "dir", str(root), "--no-banner",
                "--report-format=json", f"--report-path={report}"]
-        if redact:
-            cmd.insert(2, "--redact=8")
         subprocess.run(cmd, capture_output=True, timeout=600)
         try:
             findings = json.loads(Path(report).read_text())
@@ -548,15 +578,13 @@ def _gitleaks_scan(root: Path, redact=True):
             cls = "SUSPICIOUS" if rule == "generic-api-key" else "HIGH-CONFIDENCE"
             secret = f.get("Secret", "") or ""
             match = f.get("Match", "") or ""
-            # Hard-mask: gitleaks' Match may keep long visible fragments
-            # (--redact=8 applies to Secret, not always to Match context).
+            # Hard-mask: gitleaks' Match may keep long visible fragments.
             masked = _HARD_MASK_RE.sub("***", match)
-            if redact:
-                secret = ""
-            elif secret and len(secret) >= 4:
+            if not redact and secret and len(secret) >= 4:
                 masked = masked.replace(secret, "***")
+            disp = _mask_value(secret) if secret else "***"
             hits.append((cls, rule, f.get("File", "?"), f.get("StartLine", 0),
-                         secret, "***", masked.strip()[:140]))
+                         secret, disp, masked.strip()[:140]))
     except (subprocess.TimeoutExpired, OSError):
         pass
     finally:
@@ -568,8 +596,12 @@ def _gitleaks_scan(root: Path, redact=True):
 
 
 def cmd_preflight(args):
+    # --full: print the complete deduplicated ledger instead of the
+    # one-example-per-family sampler (same masking, no cap).
+    full = "--full" in (args or [])
     dirs = []
-    for name in args or _PREFLIGHT_DIRS:
+    names = [a for a in (args or []) if not a.startswith("--")]
+    for name in names or _PREFLIGHT_DIRS:
         p = _HERMES_HOME / name
         if p.is_dir():
             dirs.append(p)
@@ -624,11 +656,28 @@ def cmd_preflight(args):
         print("  new service, to confirm the baseline still holds.")
         return 0
     from collections import Counter, OrderedDict
-    # ── tier counts: token-format / key-name / already-masked ─────────
-    classes = Counter(_value_class(h[4]) for h in all_hits)
-    n_tok = classes.get("token-format", 0)
-    n_mask = classes.get("already-masked", 0)
-    n_key = len(all_hits) - n_tok - n_mask
+    # ── tier counts: token-format / gitleaks / key-name / already-masked ─
+    # gitleaks hits carry a real value in memory (option A: masked 2+2 for
+    # display, never printed raw). HIGH-CONFIDENCE = provider-format match;
+    # SUSPICIOUS (generic-api-key) is classified by value shape like the
+    # key-shape pass.
+    n_tok = n_gl = n_key = n_mask = 0
+    for h in all_hits:
+        cls = h[0]
+        if cls == "HIGH-CONFIDENCE":
+            n_gl += 1
+        elif cls == "SUSPICIOUS":
+            n_tok += 1 if _value_class(h[4]) == "token-format" else 0
+            n_key += 0 if _value_class(h[4]) == "token-format" else 1
+        else:
+            vc = _value_class(h[4])
+            if vc == "token-format":
+                n_tok += 1
+            elif vc == "already-masked":
+                n_mask += 1
+            else:
+                n_key += 1
+    n_action = n_tok + n_gl
     print(f"[info-guard] ✗ preflight FINDINGS — {len(all_hits)} candidate(s) in "
           f"Hermes' own data. Each is a value that LOOKS like a secret at rest:")
     print()
@@ -641,18 +690,26 @@ def cmd_preflight(args):
     print("BOTTOM LINE")
     print(f"  {len(all_hits)} candidates found. Of those:")
     print(f"  🔴 {n_tok} {'looks' if n_tok == 1 else 'look'} like real secrets (token-format)")
+    if n_gl:
+        print(f"  🟠 {n_gl} {'is' if n_gl == 1 else 'are'} gitleaks-confirmed — the scan's")
+        print("     provider-format rules matched a real secret at rest")
     print(f"  🟡 {n_key} {'is' if n_key == 1 else 'are'} key-name match{'es' if n_key != 1 else ''} — lines that merely mention a")
     print("     secret-sounding key. Most could be harmless (code, headers,")
     print("     config examples) — or could be pointing at a real value.")
     if n_mask:
         print(f"  ⚪ {n_mask} are already masked (\"***\") — handled by the")
-        print("     redactor or the scan itself. No action needed.")
+        print("     redactor in the source. That's the prevention layer")
+        print("     working; installing Info Guard gives you this.")
     print()
     print("AREAS OF CONCERN (highest signal first)")
     print(f"  🔴 {'TOKEN-FORMAT':<16} ({n_tok:<4}) Values that LOOK like real credentials")
     print("     (ghp_, sk-, eyJ JWTs, fc-...). Check these first — but could")
     print("     be harmless lookalikes (examples, test fixtures, already-")
     print("     rotated values).")
+    if n_gl:
+        print(f"  🟠 {'GITLEAKS':<16} ({n_gl:<4}) Provider-format matches from the optional")
+        print("     gitleaks ruleset (AWS, GitHub, Slack, OpenAI...). The rule")
+        print("     ID names the type; values are masked like all others.")
     print(f"  🟡 {'KEY-NAME':<16} ({n_key:<4}) Lines that mention secret-family keys")
     print("     (Authorization, api_key, password…). Could be harmless (code,")
     print("     headers, config examples) — or could be pointing at a real")
@@ -665,7 +722,7 @@ def cmd_preflight(args):
     tok_counter = Counter()
     tok_seen = set()
     for h in all_hits:
-        if _value_class(h[4]) != "token-format":
+        if _value_class(h[4]) != "token-format" and h[0] != "HIGH-CONFIDENCE":
             continue
         sig = (h[2], h[3], h[4])
         if sig in tok_seen:
@@ -689,11 +746,14 @@ def cmd_preflight(args):
             continue
         fam_seen.add(sig)
         fam_total[fam] += 1
-        cls = _value_class(h[4])
-        if cls == "token-format":
+        if h[0] == "HIGH-CONFIDENCE":
             fam_real[fam] += 1
-        elif cls == "already-masked":
-            fam_masked[fam] += 1
+        else:
+            cls = _value_class(h[4])
+            if cls == "token-format":
+                fam_real[fam] += 1
+            elif cls == "already-masked":
+                fam_masked[fam] += 1
     leaky = [(n, f) for f, n in fam_real.items() if n > 0]
     if leaky:
         print("FAMILIES WITH REAL VALUES AT REST (the leak pointer)")
@@ -715,43 +775,101 @@ def cmd_preflight(args):
         print(f"  {f:<60} × {n}")
     print()
     print("NEXT STEPS")
-    print("  1. Rotate every TOKEN-FORMAT value above that is still live —")
-    print("     that closes the exposure (the copy at rest becomes dead).")
-    print("     Values already superseded: ignore.")
-    print("  2. Decide prevention — the fork:")
-    print("     • Install Info Guard — masks your exact values so future")
-    print("       occurrences never land unmasked in transcripts/logs.")
-    print("       Install does NOT clean what is already at rest: rotate")
-    print("       first (step 1), then install.")
-    print("     • Don't install — accept recurrence: re-scan periodically")
-    print("       and rotate whenever a new live value appears.")
-    print("  No routine re-run needed: rows stay until the files are")
-    print("  deleted/archived. Re-scan after rotating only to confirm the")
-    print("  rotation itself didn't leak the new value into logs.")
+    print("  1. Decide: install Info Guard (prevents NEW occurrences) or not.")
+    print("     This report only finds — nothing here fixes what has leaked.")
+    print("  2. Rotate as you deem fit: any token-format value above that is")
+    print("     still live should be rotated, but the call is yours. At-rest")
+    print("     copies stay in these files either way (masking never rewrites")
+    print("     files).")
+    print("  3. If installing: skip re-running `preflight` — `info-guard setup`")
+    print("     re-scans as part of the wizard anyway, and does the work in")
+    print("     one pass: reviews candidates (masked), registers the ones that")
+    print("     are yours as exact-value literals, adds your .env sources,")
+    print("     builds the pattern file.")
+    print("  4. After install, monitoring is on you:")
+    print("     • light — a cron that re-scans periodically and alerts on")
+    print("       CHANGES (a bare preflight cron would alert on the same old")
+    print("       rows forever — rows never clear until files are deleted)")
+    print("     • proper — work toward the full stack (inventory, detection,")
+    print("       rotation, watchdogs): docs/full-stack.md")
     print()
     # ── details: dedup identical (cls, rule, file, line, value) → ×N ──
+    # Rows whose DISPLAY is fully masked bring no review value and are
+    # count-only (totals stay in BOTTOM LINE): source-masked values AND
+    # short values under the mask floor (≤10 chars → "***" display).
+    # Gitleaks rows always stay — they are findings regardless.
     deduped = OrderedDict()
     for h in all_hits:
+        if h[0] not in ("HIGH-CONFIDENCE", "SUSPICIOUS"):
+            if _value_class(h[4]) == "already-masked":
+                continue
+            if _mask_value(h[4]) == "***":
+                continue
         key = (h[0], h[1], h[2], h[3], h[4])
         count, _ = deduped.get(key, (0, None))
         deduped[key] = (count + 1, h)
-    print(f"DETAILS (first 50 of {len(deduped)} unique candidates, deduplicated)")
-    shown = 0
+    if full:
+        # COMPLETE ledger: every deduplicated reviewable row, no sampler
+        print(f"DETAILS (complete — {len(deduped)} unique candidates)")
+        print("  Values are masked: you see the first and last 2 characters")
+        print("  only. The full value exists only in the scanned file — it")
+        print("  never leaves the machine.")
+        for key, (n, h) in deduped.items():
+            cls, rule, rel, line, value, masked, ctx = h
+            print(f"  [{cls}] {rule}" + (f" (×{n} files/lines)" if n > 1 else ""))
+            print(f"      {rel}:{line}  value={masked}")
+            if ctx:
+                print(f"      …{ctx}…")
+            print()
+        return 1 if n_action > 0 else 0
+    # SAMPLER: one example per family, labeled known-vs-unknown creds,
+    # junk-display rows (code refs/paths/markup) count-only.
+    known = _known_env_keys()
+    fam_rows = OrderedDict()   # family -> [count, first_hit, displayable_hit, has_token]
     for key, (n, h) in deduped.items():
-        if shown >= 50:
-            break
+        fam = _family_of(h[1])
+        if fam not in fam_rows:
+            fam_rows[fam] = [0, None, None, False]
+        fam_rows[fam][0] += n
+        if fam_rows[fam][1] is None:
+            fam_rows[fam][1] = h
+        if fam_rows[fam][2] is None and _displayable_value(h[4]):
+            fam_rows[fam][2] = h
+        if _value_class(h[4]) == "token-format":
+            fam_rows[fam][3] = True
+    print("DETAILS (sample — one per family; `info-guard preflight --full` "
+          "for the complete ledger)")
+    print("  Values are masked: you see the first and last 2 characters")
+    print("  only. The full value exists only in the scanned file — it")
+    print("  never leaves the machine. Values too short to mask partially")
+    print("  are counted in the totals but not listed here.")
+    # families sorted by signal (gitleaks/token-format first), then count
+    def _fam_rank(item):
+        fam, (cnt, first, disp, has_token) = item
+        if first[0] in ("HIGH-CONFIDENCE", "SUSPICIOUS"):
+            rank = 0
+        elif has_token:
+            rank = 1
+        else:
+            rank = 2
+        return (rank, -cnt)
+    for fam, (cnt, first, disp, has_token) in sorted(fam_rows.items(), key=_fam_rank):
+        h = disp or first
         cls, rule, rel, line, value, masked, ctx = h
-        print(f"  [{cls}] {rule}" + (f" (×{n} files/lines)" if n > 1 else ""))
-        print(f"      {rel}:{line}  value={masked}")
-        if ctx:
-            print(f"      …{ctx}…")
+        label = " — your .env key" if fam in known else ""
+        print(f"  [{cls}] {rule} (×{cnt}){label}")
+        if disp is not None:
+            print(f"      {rel}:{line}  value={masked}")
+            if ctx:
+                print(f"      …{ctx}…")
+        else:
+            print("      (values are code refs / paths / markup — count-only)")
         print()
-        shown += 1
-    if len(deduped) > 50:
-        print(f"  …and {len(deduped) - 50} more unique candidates (first 50 shown)")
     print("  Known false-positive classes: code identifiers (password_hash =),")
     print("  config examples in docs, harmless IDs matching token prefixes.")
-    return 1
+    # Tier-aware exit: only actionable findings (real secrets) fail the
+    # scan; key-name mentions and already-masked residue alone are noise.
+    return 1 if n_action > 0 else 0
 
 
 def _collect_hits(dirs, redact=True):
