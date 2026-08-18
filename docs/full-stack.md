@@ -137,6 +137,7 @@ Small scheduled checks that catch drift before it becomes a leak:
 | Env-drift watchdog | weekly | `.env` files changed without the inventory being rebuilt (silent when clean, email on drift) |
 | Config-audit | on change | New/changed config keys in tracked files (diff-based, with an ignore list for known benign churn) |
 | Nightly refresh | daily | Rebuild inventory + pattern file, re-run discovery — the "forgot to register" safety net |
+| Release hygiene | per release | Tag + CHANGELOG entry (Keep a Changelog); micro-fixes within one workstream consolidate into the wave's latest entry — versions stay meaningful for pull-based consumers |
 
 ## Known failure modes (learned the hard way)
 
