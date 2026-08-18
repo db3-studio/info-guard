@@ -208,7 +208,7 @@ diff --git a/gateway/run.py b/gateway/run.py
 index a3485ccb..52bcbe1f 100644
 --- a/gateway/run.py
 +++ b/gateway/run.py
-@@ -2326,6 +2326,9 @@ if _config_path.exists():
+@@ -2326,4 +2326,7 @@ if _config_path.exists():
              _redact = _security_cfg.get("redact_secrets")
              if _redact is not None:
                  os.environ["HERMES_REDACT_SECRETS"] = str(_redact).lower()
@@ -216,8 +216,6 @@ index a3485ccb..52bcbe1f 100644
 +            if isinstance(_pat, str) and _pat.strip():
 +                os.environ["HERMES_REDACT_PATTERNS"] = _pat.strip()
          # Gateway settings (media delivery allowlist + recency trust + strict mode)
-         _gateway_cfg = _cfg.get("gateway", {})
-         if isinstance(_gateway_cfg, dict):
 diff --git a/hermes_cli/config.py b/hermes_cli/config.py
 index bca802d0..f3c3a987 100644
 --- a/hermes_cli/config.py
