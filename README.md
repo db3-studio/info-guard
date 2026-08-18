@@ -146,6 +146,9 @@ The agent will read `docs/format-spec.md` for the file format and
 
 **The rule: update Info Guard BEFORE Hermes, never after.**
 
+Version history: see [CHANGELOG.md](CHANGELOG.md) for what changed in each
+release.
+
 The patch is one version-tolerant artifact, verified across the tested
 range (**v0.20.0 – v0.20.4**). `hermes update` autostashes and restores
 working-tree changes, so within the tested range the patch usually rides
