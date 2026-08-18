@@ -13,6 +13,8 @@
 #      own pattern file automatically — no config, no env vars)
 #   7. same-process path-switch (cache identity — audit followup2 #4)
 #   8. symlinked registry path (trusted-path pin — audit followup2 #5)
+#   9. update-ordering: install.sh replaces a stale applied patch in
+#      place; `check` exit codes (healthy 0 / engine-missing 1)
 #
 # Exit 0 = all checks pass. Uses only synthetic probe values.
 set -euo pipefail
@@ -274,6 +276,87 @@ os.symlink(os.path.join(tmp, "no-such-target.json"), dangling)
 check("symlink: dangling link = fail-safe no-op (like missing file)",
       redact(SYM, patterns=dangling) == SYM,
       f"got {redact(SYM, patterns=dangling)!r}")
+
+# ── 11. update-ordering hardening — install.sh replaces a stale
+#     applied patch in place; `check` verifies engine + artifact probe +
+#     supported range floor ─────────────────────────────────────────────
+PATCH_PATH = os.path.join(os.getcwd(), "patch", "redactor-registry-patterns.patch")
+
+# 11a. install.sh replace-path E2E: scratch git repo with the CLEAN files
+#      from this checkout's HEAD, apply the current artifact, then tamper
+#      one marker line (markers still 5/5, but the tree no longer matches
+#      the artifact) -> install.sh must detect the mismatch and restore
+#      the exact artifact. The precondition (reverse-check FAILS on the
+#      tampered tree) is asserted so a regression in the probe itself
+#      fails the battery, not the installer.
+scratch = os.path.join(tmp, "install-scratch")
+os.makedirs(scratch, exist_ok=True)
+for rel in ("agent/redact.py", "cli.py", "gateway/run.py",
+            "hermes_cli/config.py", "hermes_cli/main.py"):
+    d = os.path.join(scratch, os.path.dirname(rel))
+    os.makedirs(d, exist_ok=True)
+    clean = subprocess.run(["git", "-C", CHECKOUT, "show", f"HEAD:{rel}"],
+                           capture_output=True, text=True, check=True).stdout
+    with open(os.path.join(scratch, rel), "w") as f:
+        f.write(clean)
+subprocess.run(["git", "-C", scratch, "init", "-q"], check=True)
+subprocess.run(["git", "-C", scratch, "add", "-A"], check=True)
+subprocess.run(["git", "-C", scratch, "-c", "user.email=ig@test",
+                "-c", "user.name=ig-test", "commit", "-q", "-m", "base"],
+               check=True)
+subprocess.run(["git", "-C", scratch, "apply", PATCH_PATH], check=True)
+tampered_f = os.path.join(scratch, "gateway", "run.py")
+tampered_src = open(tampered_f).read()
+open(tampered_f, "w").write(
+    tampered_src.replace("HERMES_REDACT_PATTERNS", "HERMES_REDACT_PATTERNS ", 1))
+stale_probe = subprocess.run(
+    ["git", "-C", scratch, "apply", "--reverse", "--check", PATCH_PATH],
+    capture_output=True)
+check("install replace: precondition — tampered tree fails reverse-check",
+      stale_probe.returncode != 0)
+ihome = os.path.join(tmp, "install-home")
+env3 = dict(os.environ)
+env3["HERMES_HOME"] = ihome
+inst = subprocess.run(
+    ["bash", os.path.join(os.getcwd(), "install.sh"), "--checkout", scratch,
+     "--no-config", "--no-test"],
+    env=env3, capture_output=True, text=True, timeout=300)
+rev_after = subprocess.run(
+    ["git", "-C", scratch, "apply", "--reverse", "--check", PATCH_PATH],
+    capture_output=True)
+check("install.sh replaces a stale applied patch in place",
+      inst.returncode == 0 and rev_after.returncode == 0,
+      f"rc={inst.returncode} rev={rev_after.returncode} "
+      f"out={inst.stdout[-250:]!r} err={inst.stderr[-250:]!r}")
+
+# 11b. `check` exits 0 on a healthy install: engine via a symlinked
+#      checkout, pattern file present, artifact probe passes
+chkhome = os.path.join(tmp, "check-home")
+os.makedirs(os.path.join(chkhome, "state", "info-guard"), exist_ok=True)
+os.symlink(CHECKOUT, os.path.join(chkhome, "hermes-agent"))
+write(os.path.join(chkhome, "state", "info-guard", "redact_patterns.json"),
+      {"mask": {"head": 2, "tail": 2, "floor": 12}, "literals": [],
+       "key_patterns": {}})
+env4 = dict(os.environ)
+env4["HERMES_HOME"] = chkhome
+chk = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "check"],
+    env=env4, capture_output=True, text=True, timeout=120)
+check("check: healthy install exits 0",
+      chk.returncode == 0,
+      f"rc={chk.returncode} out={chk.stdout[-250:]!r} err={chk.stderr[-250:]!r}")
+
+# 11c. `check` exits 1 when the engine is missing (fresh home, no checkout)
+empty = os.path.join(tmp, "empty-home")
+os.makedirs(empty, exist_ok=True)
+env5 = dict(os.environ)
+env5["HERMES_HOME"] = empty
+chk2 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "check"],
+    env=env5, capture_output=True, text=True, timeout=120)
+check("check: missing engine exits 1",
+      chk2.returncode == 1,
+      f"rc={chk2.returncode} out={chk2.stdout[-200:]!r}")
 
 
 print(f"\n[test] {PASS} passed, {FAIL} failed")

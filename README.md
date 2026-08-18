@@ -47,9 +47,10 @@ roadmap as v2.
 ## Install (any of these)
 
 Requires Hermes Agent **v0.20.0+** — the patch is apply-checked and the
-upstream test suite passes 15/15 against v0.20.0, v0.20.1, v0.20.2, and
-v0.20.3 (2026.8.16.2) — one version-tolerant patch; `test.sh` is the
-package's own 31-check battery, separate from the upstream suite.
+upstream test suite passes 15/15 against v0.20.0, v0.20.1, v0.20.2,
+v0.20.3 (2026.8.16.2), and v0.20.4 (2026.8.18) — one version-tolerant
+patch; `test.sh` is the package's own 35-check battery, separate from the
+upstream suite.
 Takes about two minutes.
 
 **Step 0 — preflight (optional but recommended):** before deciding, check
@@ -132,21 +133,37 @@ The agent will read `docs/format-spec.md` for the file format and
 
 ## Upgrades (`hermes update`)
 
-The updater autostashes and restores working-tree changes, so **in most
-cases the patch survives an update automatically — nothing to do.** When a
-release changes the patched code (v0.20.2 did, before the rebase), the
-patch can be dropped silently. The upgrade lifecycle:
+**The rule: update Info Guard BEFORE Hermes, never after.**
 
-1. **`info-guard check`** — engine active? Exit 0 = healthy, done.
-2. **Broken → re-run `./install.sh`** — idempotent: re-applies the patch,
-   or fails loudly with the drift message if the codebase moved beyond the
-   supported versions (the rebased patch covers v0.20.0–v0.20.3). Your
-   pattern file and custom literals are never touched by either path.
-3. **Over it? → `./uninstall.sh`** — clean removal, state backed up.
+The patch is one version-tolerant artifact, verified across the tested
+range (**v0.20.0 – v0.20.4**). `hermes update` autostashes and restores
+working-tree changes, so within the tested range the patch usually rides
+the update untouched — but a release that changes the patched code
+(v0.20.2 and v0.20.4 both did) can break the stash restore, and an
+untested release may not accept the patch at all. The order that never
+strands you:
 
-`check` is schedulable for automatic detection — no alert channel is
-assumed; wire the non-zero exit to whatever your scheduler supports (cron
-mail, ntfy, a log line):
+1. **Update Info Guard first** (a minute, any time):
+   `git pull` the package, then re-run `./install.sh`. Since v0.20.4
+   support (2026-08-18), install.sh detects an older applied patch and
+   **replaces it in place** — your pattern file and custom literals are
+   never touched.
+2. **`info-guard check`** — expect OK. If it exits non-zero, resolve
+   before updating Hermes.
+3. **`hermes update`** — the freshly-applied patch rides the updater's
+   stash; within the tested range it restores cleanly.
+4. **After the update: `info-guard check`** — OK means the patch
+   survived. Non-zero means the release drifted it: pull the latest Info
+   Guard and re-run `./install.sh`. If install.sh reports the patch
+   "does not apply", hold `hermes update` until this package ships a
+   rebase for that release — it never silently degrades.
+
+`check` enforces the floor: it verifies the applied patch matches this
+package's artifact **and** that your Hermes version is within the tested
+range — exit 1 with the exact next step when either fails. That makes it
+safe to run as a standing watchdog *before* `hermes update`, not just
+after. Schedulable — no alert channel is assumed; wire the non-zero exit
+to whatever your scheduler supports (cron mail, ntfy, a log line):
 
 ```cron
 0 * * * * /path/to/info-guard/bin/info-guard check || echo "info-guard: BROKEN — run install.sh"

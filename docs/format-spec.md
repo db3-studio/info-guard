@@ -153,11 +153,16 @@ Edit it, then run `info-guard build` — live within seconds, no restarts.
 
 - Requires Hermes Agent **v0.20.0+**. One version-tolerant patch: apply-checked
   and 15/15 test suite against v0.20.0 (2026.8.3), v0.20.1 (2026.8.13),
-  v0.20.2 (2026.8.16), and v0.20.3 (2026.8.16.2) — 0.20.2 drifted
-  `hermes_cli/main.py` (dotenv loading rework) and the patch context was
-  rebased to cover all four.
+  v0.20.2 (2026.8.16), v0.20.3 (2026.8.16.2), and v0.20.4 (2026.8.18) —
+  v0.20.2 drifted `hermes_cli/main.py` (dotenv loading rework) and v0.20.4
+  drifted `gateway/run.py` (media-policy module extraction); the hunk
+  contexts were rebased/trimmed to anchor on lines identical across all five.
 - `install.sh` / `uninstall.sh` fail loudly if the patch doesn't apply after
-  a `hermes update` — never silently.
+  a `hermes update` — never silently. `install.sh` also replaces an older
+  applied patch in place (update Info Guard before Hermes — see README).
+- `info-guard check` verifies the applied patch matches the package's
+  artifact and that the live Hermes is within the tested range (newer =
+  exit 1 with "update Info Guard first").
 - `security.redact_patterns` may print "not a recognized config key" on the
   CLI — it is read by the entry-point bridge anyway; the warning is cosmetic.
 - The `patterns` (regex) section is v2 (planned) — format-based redaction

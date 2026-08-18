@@ -13,11 +13,11 @@ jobs:
       fail-fast: false
       matrix:
         # release commits: v0.20.0 (2026.8.3), v0.20.1 (2026.8.13),
-        # v0.20.2 (2026.8.16), v0.20.3 (2026.8.16.2, 7339f5f) — the patch is
-        # apply-checked against all four plus current main; a future release
-        # that drifts is caught by install.sh's fail-loud apply-check (not by
-        # this matrix).
-        ref: [3c27eb623, 720f0443a, df4b65147, 7339f5f]
+        # v0.20.2 (2026.8.16), v0.20.3 (2026.8.16.2, 7339f5f), v0.20.4
+        # (2026.8.18, 9f13bbbf) — the patch is apply-checked against all
+        # five plus current main; a future release that drifts is caught
+        # by install.sh's fail-loud apply-check (not by this matrix).
+        ref: [3c27eb623, 720f0443a, df4b65147, 7339f5f, 9f13bbbf]
     steps:
       - uses: actions/checkout@v4
 
@@ -62,7 +62,7 @@ jobs:
           echo "$COUNT"
           echo "$COUNT" | grep -q '15 tests collected'
 
-      - name: Package battery (31 checks)
+      - name: Package battery (35 checks)
         run: bash "$GITHUB_WORKSPACE/test.sh" --checkout /tmp/hermes
 
       - name: Repo secret scan

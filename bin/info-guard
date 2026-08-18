@@ -25,7 +25,8 @@ Usage:
                                     candidate non-interactively (agents/tests).
   info-guard check                  Health check / schedulable watchdog:
                                     engine marker, pattern file, custom
-                                    literals, gitleaks. Exit 0 healthy,
+                                    literals, gitleaks, patch-state probe,
+                                    supported-version floor. Exit 0 healthy,
                                     1 broken (run install.sh), 2 error.
                                     No alert channel assumed — wire the
                                     non-zero exit to your scheduler.
@@ -612,6 +613,82 @@ _ENGINE_MARKERS = {
     "gateway/run.py": "HERMES_REDACT_PATTERNS",
 }
 
+# Supported Hermes release range. Bump BOTH when a rebase extends
+# the tested matrix — keep in sync with README, docs/format-spec.md and
+# .github/workflows/ci.yml. Tuples are release-tag date parts
+# (v2026.8.18 -> (2026, 8, 18)); the .2-style suffixes compare correctly
+# via zero-padding.
+_SUPPORTED_MIN = (2026, 8, 3)     # v0.20.0 (v2026.8.3)
+_SUPPORTED_MAX = (2026, 8, 18)    # v0.20.4 (v2026.8.18)
+
+
+def _fmt_version(t):
+    return "v" + ".".join(str(x) for x in t)
+
+
+def _version_tuple(text):
+    """First dotted-numeric run in text -> tuple of ints (None if absent)."""
+    m = re.search(r"\d[\d.]*", text or "")
+    if not m:
+        return None
+    return tuple(int(x) for x in m.group(0).split("."))
+
+
+def _pad_tuple(t, n):
+    return t + (0,) * (n - len(t))
+
+
+def _checkout_version():
+    """Best-effort live Hermes version as a tuple: git tag first, then the
+    `hermes --version` date in parentheses. Returns (tuple|None, source)."""
+    checkout = _HERMES_HOME / "hermes-agent"
+    try:
+        r = subprocess.run(["git", "-C", str(checkout), "describe",
+                            "--tags", "--abbrev=0"],
+                           capture_output=True, text=True, timeout=15)
+        if r.returncode == 0 and r.stdout.strip():
+            return _version_tuple(r.stdout.strip()), "git tag"
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    hermes = shutil.which("hermes")
+    if hermes:
+        try:
+            r = subprocess.run([hermes, "--version"], capture_output=True,
+                               text=True, timeout=15)
+            m = re.search(r"\((\d{4}\.\d{1,2}\.\d{1,2}(?:\.\d+)?)\)",
+                          r.stdout or "")
+            if m:
+                return _version_tuple(m.group(1)), "hermes --version"
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return None, None
+
+
+def _artifact_probe():
+    """The package's patch vs the applied state in the live checkout.
+
+    `git apply --reverse --check` passes only when the working tree's
+    changes are EXACTLY this package's patch. A failing probe means
+    the tree carries an OLDER/NEWER applied patch — the 'updated the
+    package without re-running install.sh' trap, and the state that makes
+    the next `hermes update` conflicting. Returns (ok, message|None)."""
+    checkout = _HERMES_HOME / "hermes-agent"
+    patch = Path(__file__).resolve().parent.parent / "patch" / \
+        "redactor-registry-patterns.patch"
+    if not (checkout / ".git").exists() or not patch.is_file():
+        return True, None   # not a git checkout / source package incomplete
+    try:
+        r = subprocess.run(["git", "-C", str(checkout), "apply",
+                            "--reverse", "--check", str(patch)],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return True, None
+    if r.returncode == 0:
+        return True, None
+    return False, ("the applied patch differs from this package's artifact — "
+                   "run ./install.sh to replace it in place (pattern file and "
+                   "custom literals untouched)")
+
 
 def _installation_status():
     """Best-effort detection of an existing Info Guard install: engine
@@ -787,14 +864,45 @@ def cmd_setup(args):
 
 def cmd_check(args):
     """Health check — the package's schedulable watchdog. Verifies the
-    engine marker survived updates, the pattern file is present, and
-    reports gitleaks availability. Exit 0 = healthy, 1 = broken,
+    engine marker survived updates, the pattern file is present, the
+    applied patch matches this package's artifact, and the live Hermes is
+    within the tested release range. Exit 0 = healthy, 1 = broken,
     2 = error. No alert channel assumed: the caller's scheduler decides
     what to do with a non-zero exit (cron mail, ntfy, ...)."""
     problems = 0
     inst = _installation_status()
     if inst["engine"]:
         print("[info-guard] ✓ engine: ACTIVE — all 5 patch markers present")
+        probe_ok, probe_msg = _artifact_probe()
+        if not probe_ok:
+            problems += 1
+            print(f"[info-guard] ✗ patch state: {probe_msg}")
+        ver, src = _checkout_version()
+        if ver is None:
+            print("[info-guard] ⚠ supported range: could not detect the live "
+                  "Hermes version (no git tags, no hermes on PATH) — range "
+                  f"check skipped (tested: {_fmt_version(_SUPPORTED_MIN)}–"
+                  f"{_fmt_version(_SUPPORTED_MAX)})")
+        elif ver > _pad_tuple(_SUPPORTED_MAX, len(ver)):
+            problems += 1
+            print(f"[info-guard] ✗ supported range: your Hermes "
+                  f"({_fmt_version(ver)}, from {src}) is NEWER than the "
+                  f"tested range ({_fmt_version(_SUPPORTED_MIN)}–"
+                  f"{_fmt_version(_SUPPORTED_MAX)}). Update Info Guard FIRST "
+                  f"(git pull the package) and re-run ./install.sh before "
+                  f"your next `hermes update` — an untested release may not "
+                  f"accept the patch.")
+        elif ver < _pad_tuple(_SUPPORTED_MIN, len(ver)):
+            print(f"[info-guard] ⚠ supported range: your Hermes "
+                  f"({_fmt_version(ver)}) is OLDER than the tested range "
+                  f"({_fmt_version(_SUPPORTED_MIN)}–"
+                  f"{_fmt_version(_SUPPORTED_MAX)}) — masking still works, "
+                  f"but upgrade Hermes to a tested version when convenient.")
+        else:
+            print(f"[info-guard] ✓ supported range: Hermes {_fmt_version(ver)} "
+                  f"({src}) within tested range "
+                  f"({_fmt_version(_SUPPORTED_MIN)}–"
+                  f"{_fmt_version(_SUPPORTED_MAX)})")
     elif inst["partial"]:
         problems += 1
         missing = ", ".join(rel for rel, ok in inst["markers"].items() if not ok)

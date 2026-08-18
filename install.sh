@@ -6,7 +6,8 @@
 # What it does:
 #   1. Locates the Hermes Agent checkout (git install).
 #   2. Applies the registry-fed redaction patch (idempotent, marker-guarded;
-#      fails loudly instead of silently if the codebase has drifted).
+#      ACTIVE + artifact mismatch = replaces the stale applied patch in
+#      place; fails loudly instead of silently if the codebase has drifted).
 #   3. Creates <home>/state/info-guard/ and seeds redact_patterns.json +
 #      custom_literals.json (never overwrites existing files).
 #   4. Points Hermes at the pattern file (security.redact_patterns config;
@@ -57,6 +58,8 @@ fi
 
 # ── 2. engine integrity (5 markers, external-audit B2/F5) ───────────────
 # All present = ACTIVE; some = PARTIAL (half-reverted update); none = MISSING.
+# ACTIVE + artifact mismatch = a stale applied patch (updated the package
+# without re-running install.sh, or vice versa) — replaced in place.
 _marker_count() {
     local n=0
     grep -q "_redact_registry_patterns" "$CHECKOUT/agent/redact.py" 2>/dev/null && n=$((n+1))
@@ -68,7 +71,19 @@ _marker_count() {
 }
 MARKERS=$(_marker_count)
 if [ "$MARKERS" = "5" ]; then
-    say "engine ACTIVE (5/5 markers) — patch already applied (use --force to re-apply)"
+    if [ "$FORCE" = "1" ] || ! git -C "$CHECKOUT" apply --reverse --check "$PATCH" 2>/dev/null; then
+        say "engine ACTIVE (5/5 markers) but the applied patch differs from this package's artifact — replacing it in place"
+        git -C "$CHECKOUT" checkout -- agent/redact.py cli.py gateway/run.py hermes_cli/config.py hermes_cli/main.py \
+            || die "could not reset the 5 patched files — resolve working-tree changes in $CHECKOUT, then re-run install.sh"
+        git -C "$CHECKOUT" apply --check "$PATCH" \
+            || die "patch no longer applies — the codebase has drifted (hermes update?). Rebase the patch against the current checkout, or use the upstream PR once merged."
+        git -C "$CHECKOUT" apply "$PATCH"
+        git -C "$CHECKOUT" apply --reverse --check "$PATCH" \
+            || die "verification failed after replacing the patch — unexpected state in $CHECKOUT"
+        say "patch replaced — checkout now matches this package's artifact"
+    else
+        say "engine ACTIVE (5/5 markers) — patch applied and matches this package's artifact"
+    fi
 elif [ "$MARKERS" != "0" ]; then
     die "engine PARTIAL ($MARKERS/5 markers) — a failed hermes update likely half-reverted the patch.
      Restore the patched files first, then re-run install.sh:
