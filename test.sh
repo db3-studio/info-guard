@@ -358,6 +358,75 @@ check("check: missing engine exits 1",
       chk2.returncode == 1,
       f"rc={chk2.returncode} out={chk2.stdout[-200:]!r}")
 
+# ── 12. preflight v2.1 report: structure, tiers, masking, exit codes ──
+pf_home = os.path.join(tmp, "pf-home")
+for sub in ("sessions", "logs", "cron/output"):
+    os.makedirs(os.path.join(pf_home, sub), exist_ok=True)
+# Synthetic values ONLY, runtime-constructed (push protection: canonical
+# fake secrets trip GitHub's scanner as literals). Shapes chosen to land in
+# each report tier:
+#   - token-format: Discord bot token shape (MTQ...) and JWT shape (eyJ...)
+#   - placeholder:  'your...' example text
+#   - already-masked: literal ****** in the source
+jwt = "eyJ" + "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + "." + "a" * 15   # 52 chars: under the 64-char value cap
+dsc = "MTQ" + "5MjY4NTA5Mzk0MjQ2MDE3OQ"
+with open(os.path.join(pf_home, "sessions", "d.jsonl"), "w") as f:
+    f.write(f"HASS_TOKEN={jwt}\n")
+    f.write(f"DISCORD_BOT_TOKEN={dsc}\n")
+    f.write("GOOGLE_API_KEY=your-actual-key-here\n")
+    f.write("Authorization: ******\n")
+env6 = dict(os.environ)
+env6["HERMES_HOME"] = pf_home
+pf = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "preflight"],
+    env=env6, capture_output=True, text=True, timeout=300)
+pfo = pf.stdout + pf.stderr
+check("preflight: findings exit code 1", pf.returncode == 1,
+      f"rc={pf.returncode} out={pfo[-300:]!r}")
+for section in ("Info Guard v0.2.0 — Preflight Report",
+                "WHAT THIS IS", "BOTTOM LINE", "AREAS OF CONCERN",
+                "TOP TOKEN-FORMAT VALUES", "FAMILIES WITH REAL VALUES AT REST",
+                "TOP SECRET-FAMILY KEYS", "FILES WITH MOST FINDINGS",
+                "NEXT STEPS", "DETAILS"):
+    check(f"preflight: section '{section}' present", section in pfo)
+check("preflight: raw values never printed",
+      jwt not in pfo and dsc not in pfo and "your-actual-key-here" not in pfo,
+      "a raw synthetic value appeared in the report")
+check("preflight: masked forms shown",
+      "MT...OQ" in pfo and "ey...aa" in pfo,
+      f"masked forms missing: {pfo[:400]!r}")
+check("preflight: token-format tier counted",
+      "look like real secrets" in pfo or "looks like real secrets" in pfo)
+check("preflight: leak pointer lists a family",
+      "DISCORD_BOT_TOKEN" in pfo and "real" in pfo)
+check("preflight: key-name tier labeled NOT leaks",
+      "NOT leak findings" in pfo)
+
+# 12b. preflight CLEAN path: empty scan dirs -> exit 0 + header + CLEAN
+pf_clean = os.path.join(tmp, "pf-clean")
+for sub in ("sessions", "logs", "cron/output"):
+    os.makedirs(os.path.join(pf_clean, sub), exist_ok=True)
+with open(os.path.join(pf_clean, "logs", "x.log"), "w") as f:
+    f.write("hello world\n")
+env7 = dict(os.environ)
+env7["HERMES_HOME"] = pf_clean
+pfc = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "preflight"],
+    env=env7, capture_output=True, text=True, timeout=300)
+pfco = pfc.stdout + pfc.stderr
+check("preflight: clean home exits 0", pfc.returncode == 0,
+      f"rc={pfc.returncode} out={pfco[-200:]!r}")
+check("preflight: clean path has report header + CLEAN",
+      "Preflight Report" in pfco and "preflight CLEAN" in pfco)
+
+# 12c. --version flag
+ver = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
+    capture_output=True, text=True, timeout=60)
+check("--version prints the package version",
+      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.2.0",
+      f"rc={ver.returncode} out={ver.stdout.strip()!r}")
+
 
 print(f"\n[test] {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

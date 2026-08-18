@@ -149,6 +149,49 @@ unacceptable in your threat model, keep the registry under your own
 
 Edit it, then run `info-guard build` — live within seconds, no restarts.
 
+## Preflight report format (v0.2.0+)
+
+`info-guard preflight` prints a structured, fully-masked report. The format
+is a contract — tests assert its sections; keep them in sync when changing
+it. Every value is masked (head/tail via `_mask_value`) or `***`; raw values
+never reach the terminal.
+
+Report sections, in order:
+
+1. **Header** — `Info Guard v<version> — Preflight Report` + scan metadata
+   (read-only, masked, generated timestamp).
+2. **WHAT THIS IS** — one-paragraph framing of the scan scope.
+3. **BOTTOM LINE** — total candidates split into three tiers:
+   - 🔴 **token-format** (`_value_class` == `token-format`): values that
+     look like real credentials (JWT `eyJ`, GitHub `ghp_`, OpenAI `sk-`,
+     Discord `MTQ`, Firecrawl `fc-`, generated `key_`, ...)
+   - 🟡 **key-name** (everything else): lines that merely *mention* a
+     secret-sounding key — mostly harmless, but where real finds hide
+   - ⚪ **already-masked**: values that are already `***` in the source or
+     blanked by the scan's own redaction — no action
+4. **AREAS OF CONCERN** — the same three tiers with plain-language meaning
+   and action guidance.
+5. **TOP TOKEN-FORMAT VALUES** — distinct token-shaped values with
+   occurrence counts and a type guess (JWT, GitHub PAT, ...). Deduped by
+   file:line:value.
+6. **FAMILIES WITH REAL VALUES AT REST (the leak pointer)** — per key
+   family (key name, or gitleaks RuleID, or `bare-token`): how many rows
+   carry a real token-format value vs already-masked vs total. Only
+   families with ≥1 real value are listed. **This is the actionable leak
+   list** — a real value at rest in a transcript is treated as compromised.
+7. **TOP SECRET-FAMILY KEYS** — key-name *mentions* ranked by count.
+   Explicitly NOT leak findings (a mention ≠ a value at rest).
+8. **FILES WITH MOST FINDINGS** — where the hits concentrate.
+9. **NEXT STEPS** — the review/rotate/re-run checklist.
+10. **DETAILS** — deduplicated ledger (first 50 of N unique), each row:
+    `[cls] rule`, `file:line  value=<masked>`, trimmed context window
+    (40 chars before / 80 after the match — never the whole line, which
+    could be multi-KB).
+
+Exit codes: **0 = clean** (also printed with the header), **1 = findings**,
+**2 = usage error**. gitleaks is optional: without it the scan runs the
+key-shape pass only and says so.
+
 ## Version notes
 
 - Requires Hermes Agent **v0.20.0+**. One version-tolerant patch: apply-checked

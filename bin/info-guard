@@ -67,6 +67,10 @@ STATE_DIR = _HERMES_HOME / "state" / "info-guard"
 MATCHER = STATE_DIR / "redact_patterns.json"
 CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
+# Package version — bump with every feature/behavior change; the preflight
+# report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
+_PACKAGE_VERSION = "0.2.0"
+
 VALID_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Keys that may appear in config/unit files but not in .env (PIN classes,
@@ -269,6 +273,76 @@ def _mask_value(v: str) -> str:
     return v[:2] + "..." + v[-2:]
 
 
+# Token-shaped value forms the report treats as "looks like a real secret"
+# (highest-signal tier). Superset of _TOKEN_PREFIX_RE: adds JWT (eyJ),
+# Discord bot tokens (MTQ), Firecrawl (fc-), and hash-like shapes — the
+# families the friend's 2026-08-18 preflight actually surfaced.
+_VALUE_TOKEN_RE = re.compile(
+    r"^(?:eyJ[A-Za-z0-9_.\-]{6,}|sk-[A-Za-z0-9_\-]{10,}|key_[A-Za-z0-9]{20,}|"
+    r"ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9\-]{10,}|"
+    r"AKIA[A-Za-z0-9]{16}|AC[a-z0-9]{32}|whsec_[A-Za-z0-9]{16,}|glpat-[A-Za-z0-9_\-]{10,}|"
+    r"xr[a-z0-9_\-]{10,}|MTQ[A-Za-z0-9_\-]{6,}|fc-[A-Za-z0-9_\-]{16,}|97ee[A-Za-z0-9_\-]{6,})")
+
+
+def _value_class(value: str) -> str:
+    """Classify a raw scan value into a report tier. The value itself is
+    NEVER printed — only the tier label leaves this function.
+
+    Returns one of:
+      token-format   — looks like a real credential (JWT, ghp_, sk-, ...)
+      placeholder    — example/placeholder text ('your...')
+      already-masked — the value is already a mask (***) in the source
+      key-name       — anything else: a key-name mention, code ref, path...
+    """
+    v = (value or "").strip().strip('"').strip("'")
+    if not v or set(v) <= {"*"}:
+        return "already-masked"
+    if v.lower().startswith("your"):
+        return "placeholder"
+    if _VALUE_TOKEN_RE.match(v):
+        return "token-format"
+    return "key-name"
+
+
+def _value_type(value: str) -> str:
+    """Human label for a token-shaped value (JWT, GitHub PAT, ...)."""
+    v = (value or "").strip().strip('"').strip("'")
+    if v.startswith("eyJ"):
+        return "JWT"
+    if v.startswith(("ghp_", "github_pat_")):
+        return "GitHub PAT"
+    if v.startswith("sk-"):
+        return "API key"
+    if v.startswith("MTQ"):
+        return "Discord bot token"
+    if v.startswith("fc-"):
+        return "Firecrawl key"
+    if v.startswith("key_"):
+        return "generated key"
+    if v.startswith("xox"):
+        return "Slack token"
+    if v.startswith("AKIA"):
+        return "AWS key"
+    if v.startswith("whsec_"):
+        return "webhook secret"
+    if v.startswith("glpat-"):
+        return "GitLab PAT"
+    if v.startswith("97ee"):
+        return "hash-like token"
+    return "token-shaped"
+
+
+def _family_of(rule: str) -> str:
+    """The secret-family name a hit belongs to: the key name for key-shape
+    hits ('key-family:HASS_TOKEN' -> 'HASS_TOKEN'), the gitleaks RuleID for
+    gitleaks hits, 'bare-token' for prefix-only token hits."""
+    if rule.startswith("key-family:"):
+        return rule[len("key-family:"):]
+    if rule == "known-prefix":
+        return "bare-token"
+    return rule
+
+
 def _key_scan(path: Path):
     """Key-shape + token-prefix pass over one file. Returns list of
     (cls, rule, line_no, value, masked_repr, context). The raw value is
@@ -286,13 +360,16 @@ def _key_scan(path: Path):
                 continue
             if len(val) > 64:                       # giant json blob, not a value
                 continue
-            ctx = line[: m.end()] + line[m.end():][:80]
+            # Bounded window around the match (40 before / 80 after) — the
+            # old `line[:m.end()] + ...` prefix could be multi-KB when the
+            # matched line was a huge blob, making reports unreadable.
+            ctx = line[max(0, m.start() - 40): m.end() + 80]
             ctx = re.sub(re.escape(val), "***", ctx, count=1)
             hits.append(("KEY-SHAPE", f"key-family:{key[:40]}", lineno, val,
                          f"{key}={_mask_value(val)}", ctx))
         for m in _TOKEN_PREFIX_RE.finditer(line):
             tok = m.group(1)
-            ctx = line[: m.end()] + line[m.end():][:80]
+            ctx = line[max(0, m.start() - 40): m.end() + 80]
             ctx = re.sub(re.escape(tok), "***", ctx, count=1)
             hits.append(("TOKEN-SHAPE", "known-prefix", lineno, tok,
                          _mask_value(tok), ctx))
@@ -524,6 +601,10 @@ def cmd_preflight(args):
               "key-shape pass only (install gitleaks for the tuned-ruleset pass)")
     all_hits.sort(key=lambda h: (h[2], h[3]))
     print()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    print(f"Info Guard v{_PACKAGE_VERSION} — Preflight Report")
+    print(f"Read-only scan of Hermes home · values masked · generated {now}")
+    print()
     if not all_hits:
         print("[info-guard] ✓ preflight CLEAN — no key-shaped values, token "
               "prefixes, or gitleaks rule hits in Hermes' transcripts and logs.")
@@ -542,18 +623,112 @@ def cmd_preflight(args):
         print("  Re-run preflight anytime (it's free) — e.g. after adding a")
         print("  new service, to confirm the baseline still holds.")
         return 0
+    from collections import Counter, OrderedDict
+    # ── tier counts: token-format / key-name / already-masked ─────────
+    classes = Counter(_value_class(h[4]) for h in all_hits)
+    n_tok = classes.get("token-format", 0)
+    n_mask = classes.get("already-masked", 0)
+    n_key = len(all_hits) - n_tok - n_mask
     print(f"[info-guard] ✗ preflight FINDINGS — {len(all_hits)} candidate(s) in "
           f"Hermes' own data. Each is a value that LOOKS like a secret at rest:")
-    from collections import Counter, OrderedDict
-    tier = Counter(h[0] for h in all_hits)
-    print(f"    tiers: {', '.join(f'{k} {v}' for k, v in tier.most_common())}")
-    # dedup identical (cls, rule, file, line, value) → ×N display
+    print()
+    print("WHAT THIS IS")
+    print("  A read-only scan of Hermes' transcripts, logs, and cron output")
+    print("  for values that LOOK like secrets at rest. Nothing was written;")
+    print("  every value below is masked (head/tail only) or fully hidden "
+          "(\"***\").")
+    print()
+    print("BOTTOM LINE")
+    print(f"  {len(all_hits)} candidates found. Of those:")
+    print(f"  🔴 {n_tok} {'looks' if n_tok == 1 else 'look'} like real secrets (token-format)")
+    print(f"  🟡 {n_key} {'is' if n_key == 1 else 'are'} key-name match{'es' if n_key != 1 else ''} — lines that merely mention a")
+    print("     secret-sounding key. Most could be harmless (code, headers,")
+    print("     config examples) — or could be pointing at a real value.")
+    if n_mask:
+        print(f"  ⚪ {n_mask} are already masked (\"***\") — handled by the")
+        print("     redactor or the scan itself. No action needed.")
+    print()
+    print("AREAS OF CONCERN (highest signal first)")
+    print(f"  🔴 {'TOKEN-FORMAT':<16} ({n_tok:<4}) Values that LOOK like real credentials")
+    print("     (ghp_, sk-, eyJ JWTs, fc-...). Check these first — but could")
+    print("     be harmless lookalikes (examples, test fixtures, already-")
+    print("     rotated values).")
+    print(f"  🟡 {'KEY-NAME':<16} ({n_key:<4}) Lines that mention secret-family keys")
+    print("     (Authorization, api_key, password…). Could be harmless (code,")
+    print("     headers, config examples) — or could be pointing at a real")
+    print("     value.")
+    if n_mask:
+        print(f"  ⚪ {'ALREADY-MASKED':<16} ({n_mask:<4}) Values already masked in the source")
+        print("     (\"***\"). Working as intended — no action.")
+    print()
+    # ── top token-format values (dedup by file:line:value) ────────────
+    tok_counter = Counter()
+    tok_seen = set()
+    for h in all_hits:
+        if _value_class(h[4]) != "token-format":
+            continue
+        sig = (h[2], h[3], h[4])
+        if sig in tok_seen:
+            continue
+        tok_seen.add(sig)
+        tok_counter[(h[4], _value_type(h[4]))] += 1
+    if tok_counter:
+        print("TOP TOKEN-FORMAT VALUES (the actionable list)")
+        for (val, vtype), n in tok_counter.most_common(15):
+            print(f"  {_mask_value(val):<14} × {n:<4} {vtype}")
+        print()
+    # ── families with real values at rest (the leak pointer) ──────────
+    fam_real = Counter()
+    fam_total = Counter()
+    fam_masked = Counter()
+    fam_seen = set()
+    for h in all_hits:
+        fam = _family_of(h[1])
+        sig = (h[2], h[3], h[4])
+        if sig in fam_seen:
+            continue
+        fam_seen.add(sig)
+        fam_total[fam] += 1
+        cls = _value_class(h[4])
+        if cls == "token-format":
+            fam_real[fam] += 1
+        elif cls == "already-masked":
+            fam_masked[fam] += 1
+    leaky = [(n, f) for f, n in fam_real.items() if n > 0]
+    if leaky:
+        print("FAMILIES WITH REAL VALUES AT REST (the leak pointer)")
+        for n, f in sorted(leaky, reverse=True)[:15]:
+            m = fam_masked.get(f, 0)
+            print(f"  {f:<32} {n} real" + (f" · {m} masked" if m else "")
+                  + f" · {fam_total[f]} total")
+        print()
+    # ── top secret-family keys (mentions, NOT leaks) ──────────────────
+    mentions = Counter(_family_of(h[1]) for h in all_hits)
+    print("TOP SECRET-FAMILY KEYS (key-name mentions — NOT leak findings)")
+    for f, n in mentions.most_common(15):
+        print(f"  {f:<32} × {n}")
+    print()
+    # ── files with most findings ───────────────────────────────────────
+    files = Counter(h[2] for h in all_hits)
+    print("FILES WITH MOST FINDINGS")
+    for f, n in files.most_common(10):
+        print(f"  {f:<60} × {n}")
+    print()
+    print("NEXT STEPS")
+    print("  1. Review the TOKEN-FORMAT list above — that's the actionable set.")
+    print("  2. For each value: is this exact value still live? Yes → rotate it.")
+    print("     No → it's already superseded; ignore.")
+    print("  3. Re-run preflight after rotating → confirm those rows are gone.")
+    print("  4. Install Info Guard afterwards: it prevents NEW occurrences but")
+    print("     never removes what is already at rest.")
+    print()
+    # ── details: dedup identical (cls, rule, file, line, value) → ×N ──
     deduped = OrderedDict()
     for h in all_hits:
         key = (h[0], h[1], h[2], h[3], h[4])
         count, _ = deduped.get(key, (0, None))
         deduped[key] = (count + 1, h)
-    print()
+    print(f"DETAILS (first 50 of {len(deduped)} unique candidates, deduplicated)")
     shown = 0
     for key, (n, h) in deduped.items():
         if shown >= 50:
@@ -567,14 +742,8 @@ def cmd_preflight(args):
         shown += 1
     if len(deduped) > 50:
         print(f"  …and {len(deduped) - 50} more unique candidates (first 50 shown)")
-    print("  What this means: a secret at rest in transcripts/logs is already\n"
-          "  compromised (anyone with file access can read it). Review the list;\n"
-          "  for anything you confirm is a real secret: ROTATE or delete it.\n"
-          "  Installing Info Guard does NOT clean these up — masking is\n"
-          "  display-only; it prevents the NEXT occurrence, it never removes\n"
-          "  what is already here.\n"
-          "  Known false-positive classes: code identifiers (password_hash =),\n"
-          "  config examples in docs, harmless IDs matching token prefixes.")
+    print("  Known false-positive classes: code identifiers (password_hash =),")
+    print("  config examples in docs, harmless IDs matching token prefixes.")
     return 1
 
 
@@ -950,6 +1119,9 @@ def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
         return 0 if argv and argv[0] in ("-h", "--help") else 1
+    if argv[0] == "--version":
+        print(f"info-guard {_PACKAGE_VERSION}")
+        return 0
     cmd, rest = argv[0], argv[1:]
     if cmd == "build":
         cmd_build(rest)
