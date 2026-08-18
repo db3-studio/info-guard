@@ -383,7 +383,7 @@ pf = subprocess.run(
 pfo = pf.stdout + pf.stderr
 check("preflight: findings exit code 1", pf.returncode == 1,
       f"rc={pf.returncode} out={pfo[-300:]!r}")
-for section in ("Info Guard v0.2.1 — Preflight Report",
+for section in ("Info Guard v0.2.2 — Preflight Report",
                 "WHAT THIS IS", "BOTTOM LINE", "AREAS OF CONCERN",
                 "TOP TOKEN-FORMAT VALUES", "FAMILIES WITH REAL VALUES AT REST",
                 "TOP SECRET-FAMILY KEYS", "FILES WITH MOST FINDINGS",
@@ -424,7 +424,7 @@ ver = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
     capture_output=True, text=True, timeout=60)
 check("--version prints the package version",
-      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.2.1",
+      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.2.2",
       f"rc={ver.returncode} out={ver.stdout.strip()!r}")
 
 

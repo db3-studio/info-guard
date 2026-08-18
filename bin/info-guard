@@ -69,7 +69,7 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.2.1"
+_PACKAGE_VERSION = "0.2.2"
 
 VALID_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -715,16 +715,19 @@ def cmd_preflight(args):
         print(f"  {f:<60} × {n}")
     print()
     print("NEXT STEPS")
-    print("  1. Review the TOKEN-FORMAT list above — that's the actionable set.")
-    print("  2. For each value: is this exact value still live? Yes → rotate it.")
-    print("     No → it's already superseded; ignore.")
-    print("  3. Re-run preflight after rotating → the old rows will REMAIN:")
-    print("     rotation invalidates the value but does not touch the files")
-    print("     (masking is display-only and never rewrites them). The re-run")
-    print("     confirms no NEW values appeared; rows clear only when the")
-    print("     files themselves are deleted or archived.")
-    print("  4. Install Info Guard afterwards: it prevents NEW occurrences but")
-    print("     never removes what is already at rest.")
+    print("  1. Rotate every TOKEN-FORMAT value above that is still live —")
+    print("     that closes the exposure (the copy at rest becomes dead).")
+    print("     Values already superseded: ignore.")
+    print("  2. Decide prevention — the fork:")
+    print("     • Install Info Guard — masks your exact values so future")
+    print("       occurrences never land unmasked in transcripts/logs.")
+    print("       Install does NOT clean what is already at rest: rotate")
+    print("       first (step 1), then install.")
+    print("     • Don't install — accept recurrence: re-scan periodically")
+    print("       and rotate whenever a new live value appears.")
+    print("  No routine re-run needed: rows stay until the files are")
+    print("  deleted/archived. Re-scan after rotating only to confirm the")
+    print("  rotation itself didn't leak the new value into logs.")
     print()
     # ── details: dedup identical (cls, rule, file, line, value) → ×N ──
     deduped = OrderedDict()

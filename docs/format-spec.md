@@ -182,11 +182,16 @@ Report sections, in order:
 7. **TOP SECRET-FAMILY KEYS** — key-name *mentions* ranked by count.
    Explicitly NOT leak findings (a mention ≠ a value at rest).
 8. **FILES WITH MOST FINDINGS** — where the hits concentrate.
-9. **NEXT STEPS** — the review/rotate/re-run checklist. Note the re-run
-   expectation is stated honestly: **rotating does not clear old rows** —
-   the value stays at rest in the files (masking is display-only and never
-   rewrites them); rows clear only when the files are deleted/archived.
-   The re-run confirms no NEW values appeared.
+9. **NEXT STEPS** — a decision fork, not a linear checklist:
+   (1) rotate every token-format value that is still live (closes the
+   exposure; the at-rest copy becomes dead), (2) choose prevention:
+   install Info Guard (masks future occurrences — but install does NOT
+   clean what is at rest, so rotate first) OR don't install and accept
+   recurrence (re-scan periodically, rotate whenever a new live value
+   appears). Explicitly: **no routine re-run needed** — rotated rows stay
+   in the report until the files are deleted/archived. The only justified
+   re-scan is right after rotating, to confirm the rotation itself didn't
+   leak the new value into logs.
 10. **DETAILS** — deduplicated ledger (first 50 of N unique), each row:
     `[cls] rule`, `file:line  value=<masked>`, trimmed context window
     (40 chars before / 80 after the match — never the whole line, which
