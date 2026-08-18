@@ -182,7 +182,11 @@ Report sections, in order:
 7. **TOP SECRET-FAMILY KEYS** — key-name *mentions* ranked by count.
    Explicitly NOT leak findings (a mention ≠ a value at rest).
 8. **FILES WITH MOST FINDINGS** — where the hits concentrate.
-9. **NEXT STEPS** — the review/rotate/re-run checklist.
+9. **NEXT STEPS** — the review/rotate/re-run checklist. Note the re-run
+   expectation is stated honestly: **rotating does not clear old rows** —
+   the value stays at rest in the files (masking is display-only and never
+   rewrites them); rows clear only when the files are deleted/archived.
+   The re-run confirms no NEW values appeared.
 10. **DETAILS** — deduplicated ledger (first 50 of N unique), each row:
     `[cls] rule`, `file:line  value=<masked>`, trimmed context window
     (40 chars before / 80 after the match — never the whole line, which

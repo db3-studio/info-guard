@@ -69,7 +69,7 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.2.0"
+_PACKAGE_VERSION = "0.2.1"
 
 VALID_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -718,7 +718,11 @@ def cmd_preflight(args):
     print("  1. Review the TOKEN-FORMAT list above — that's the actionable set.")
     print("  2. For each value: is this exact value still live? Yes → rotate it.")
     print("     No → it's already superseded; ignore.")
-    print("  3. Re-run preflight after rotating → confirm those rows are gone.")
+    print("  3. Re-run preflight after rotating → the old rows will REMAIN:")
+    print("     rotation invalidates the value but does not touch the files")
+    print("     (masking is display-only and never rewrites them). The re-run")
+    print("     confirms no NEW values appeared; rows clear only when the")
+    print("     files themselves are deleted or archived.")
     print("  4. Install Info Guard afterwards: it prevents NEW occurrences but")
     print("     never removes what is already at rest.")
     print()
