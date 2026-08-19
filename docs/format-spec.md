@@ -265,6 +265,16 @@ count — the summary line states all three so every table's sum reconciles.
 Date discipline: historical date ranges come from **session filename
 timestamps** (`session_YYYYMMDD…`), never filesystem mtime.
 
+Detection coverage (v0.3.1): the key-shape pass covers secret-family keys
+including `Authorization` headers (v0.3.1 — `auth\b` never matched
+"Authorization"); the bare-value pass covers token prefixes (`sk-`,
+`ghp_`, `key_`, …) plus **dot-structured JWTs** (`eyJ` header ≥8 chars +
+`.` + payload ≥2 — the canonical jwt.io header without a dot never
+fires, masked-looking short forms never fire). The prefix pass searches
+whole lines, so `Authorization: Bearer <jwt>` yields an actionable JWT
+row (unattributed when no key context); `Authorization: ***` counts
+already-masked.
+
 Exit codes: **0 = clean**, **1 = findings** (any credential-shaped value),
 **2 = usage error**. gitleaks is optional: without it the scan runs the
 key-shape pass only and says so.

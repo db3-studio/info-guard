@@ -2,14 +2,14 @@
   "schema": "info-guard/assessment/v1",
   "tool": {
     "name": "info-guard",
-    "version": "0.3.0",
+    "version": "0.3.1",
     "gitleaks": "8.30.1",
     "installed": false,
     "engine_state": "none",
     "engine_version": null
   },
   "scan": {
-    "generated": "2026-08-19T15:41:06Z",
+    "generated": "2026-08-19T16:40:53Z",
     "dirs": [
       "."
     ],
@@ -25,14 +25,14 @@
     "confirmed_active": null
   },
   "totals": {
-    "findings": 18,
+    "findings": 25,
     "credential_shaped": 10,
-    "raw_detections": 16,
+    "raw_detections": 21,
     "distinct_values": 6,
     "family_attributed": 9,
     "unattributed": 1,
     "key_name_mentions": 0,
-    "already_masked": 2,
+    "already_masked": 4,
     "partition": true
   },
   "families": {
@@ -68,7 +68,7 @@
         "family": "bare-token",
         "value": 1,
         "masked": 0,
-        "mentions": 4,
+        "mentions": 9,
         "types": [
           "generated key"
         ],
@@ -236,6 +236,23 @@
         ]
       },
       {
+        "family": "Authorization",
+        "value": 0,
+        "masked": 2,
+        "mentions": 2,
+        "types": [],
+        "status": "protected",
+        "priority": "protected",
+        "distinct_values": 0,
+        "areas": {},
+        "dates": [],
+        "example": {
+          "value_masked": "***",
+          "file": "logs/agent.log",
+          "line": 1
+        }
+      },
+      {
         "family": "api_key",
         "value": 0,
         "masked": 1,
@@ -275,7 +292,7 @@
     {
       "area": "sessions",
       "credential_shaped": 8,
-      "masked": 1,
+      "masked": 2,
       "percentage": 80.0,
       "files_affected": 2,
       "status": "mixed",
@@ -296,7 +313,7 @@
     {
       "area": "logs",
       "credential_shaped": 1,
-      "masked": 1,
+      "masked": 2,
       "percentage": 10.0,
       "files_affected": 1,
       "status": "protected"
@@ -379,6 +396,12 @@
     },
     {
       "scope_type": "family",
+      "scope": "Authorization",
+      "status": "protected",
+      "note": "2 occurrences already masked in the source"
+    },
+    {
+      "scope_type": "family",
       "scope": "api_key",
       "status": "protected",
       "note": "1 occurrence already masked in the source"
@@ -393,13 +416,13 @@
       "scope_type": "area",
       "scope": "sessions",
       "status": "mixed",
-      "note": "1 of 9 occurrences already masked in place"
+      "note": "2 of 10 occurrences already masked in place"
     },
     {
       "scope_type": "area",
       "scope": "logs/agent.log",
       "status": "protected",
-      "note": "1 of 2 occurrences already masked in place"
+      "note": "2 of 3 occurrences already masked in place"
     }
   ],
   "top_values": [
@@ -463,24 +486,24 @@
   "affected_files": [
     {
       "file": "sessions/session_20260505_075138_3cf0d0a1.jsonl",
-      "total_findings": 9,
+      "total_findings": 12,
       "credential_shaped": 5,
       "key_name_mentions": 0,
-      "already_masked": 0
+      "already_masked": 1
     },
     {
       "file": "sessions/session_20260424_211845_69c7b6.jsonl",
-      "total_findings": 6,
+      "total_findings": 8,
       "credential_shaped": 3,
       "key_name_mentions": 0,
       "already_masked": 1
     },
     {
       "file": "logs/agent.log",
-      "total_findings": 2,
+      "total_findings": 4,
       "credential_shaped": 1,
       "key_name_mentions": 0,
-      "already_masked": 1
+      "already_masked": 2
     },
     {
       "file": "cron/output/watch.log",
@@ -520,7 +543,7 @@
     "telemetry": [
       [
         "bare-token",
-        4
+        9
       ],
       [
         "HASS_TOKEN",
@@ -529,6 +552,10 @@
       [
         "generic-api-key",
         3
+      ],
+      [
+        "Authorization",
+        2
       ],
       [
         "api_key",

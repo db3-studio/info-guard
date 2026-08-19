@@ -383,7 +383,7 @@ pf = subprocess.run(
 pfo = pf.stdout + pf.stderr
 check("preflight: findings exit code 1", pf.returncode == 1,
       f"rc={pf.returncode} out={pfo[-300:]!r}")
-for section in ("Info Guard v0.3.0 — Preflight Security Assessment",
+for section in ("Info Guard v0.3.1 — Preflight Security Assessment",
                 "STATUS", "EXECUTIVE SUMMARY", "WHAT MATTERS",
                 "CREDENTIAL EXPOSURE BY FAMILY",
                 "EXPOSURE LOCATIONS",
@@ -480,8 +480,45 @@ ver = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
     capture_output=True, text=True, timeout=60)
 check("--version prints the package version",
-      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.3.0",
+      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.3.1",
       f"rc={ver.returncode} out={ver.stdout.strip()!r}")
+
+# 12d. detection gaps (v0.3.1): Authorization family + dot-structured
+# bare-JWT rule — explicit positive/negative matrix (external review).
+gap_home = os.path.join(tmp, "pf-gaps")
+os.makedirs(os.path.join(gap_home, "sessions"), exist_ok=True)
+jwt_c = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + "." + "c" * 15
+jwt_d = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + "." + "d" * 15
+with open(os.path.join(gap_home, "sessions", "session_20260819_120000_g.jsonl"),
+          "w") as f:
+    f.write("NEW_JWT=" + jwt_c + "\n")   # positive: bare JWT, non-keyword key
+    f.write("NEW_JWT=" + "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + "\n")
+    # negative: canonical jwt.io header, no dot
+    f.write("NEW_JWT=eyJhbG...zzzz\n")   # negative: masked-looking short form
+    f.write("Authorization: Bearer " + jwt_d + "\n")  # positive: Bearer JWT
+    f.write("Authorization: ***\n")      # already-masked
+env_gap = dict(os.environ)
+env_gap["HERMES_HOME"] = gap_home
+pfg = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "preflight"],
+    env=env_gap, capture_output=True, text=True, timeout=300)
+pfgo = pfg.stdout + pfg.stderr
+check("gaps: bare JWT under non-keyword key detected",
+      pfg.returncode == 1 and "ey...cc" in pfgo,
+      f"rc={pfg.returncode} out={pfgo[-200:]!r}")
+check("gaps: jwt.io header without dot NOT detected",
+      "ey...J9" not in pfgo,
+      "the canonical header alone must not fire")
+check("gaps: masked-looking short eyJ NOT detected",
+      "ey...zz" not in pfgo,
+      "masked-looking short forms must not fire")
+check("gaps: Bearer JWT detected as credential-shaped",
+      "ey...dd" in pfgo and "JWT" in pfgo,
+      "Bearer header JWTs must become actionable")
+check("gaps: Authorization *** lands already-masked",
+      '"Authorization"' in pfgo and "Protected" in pfgo,
+      "masked Authorization rows must count as protected")
 
 # ── 13. preflight --json: same object, schema-shaped, masked, no chatter ──
 pfj = subprocess.run(

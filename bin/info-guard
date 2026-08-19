@@ -81,7 +81,7 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.3.0"
+_PACKAGE_VERSION = "0.3.1"
 
 VALID_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -258,7 +258,7 @@ def cmd_status():
 _PREFLIGHT_DIRS = ["sessions", "logs", "cron/output"]
 
 _KEY_FAMILY_RE = re.compile(
-    r"(?:api[ _.\-]?key|token|secret|passwd|password|credential|auth|pass|pw|pin)\b",
+    r"(?:api[ _.\\-]?key|token|secret|passwd|password|credential|auth|authorization|pass|pw|pin)\b",
     re.IGNORECASE)
 _KEY_FORM_RE = re.compile(
     r"\b([A-Za-z0-9_.\-]*" + _KEY_FAMILY_RE.pattern + r"[A-Za-z0-9_.\-]*)\s*[=:]\s*(\S+)",
@@ -267,7 +267,7 @@ _TOKEN_PREFIX_RE = re.compile(
     r"\b(sk-[A-Za-z0-9_\-]{10,}|key_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|"
     r"github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9\-]{10,}|AKIA[A-Za-z0-9]{16}|"
     r"AC[a-z0-9]{32}|whsec_[A-Za-z0-9]{16,}|glpat-[A-Za-z0-9_\-]{10,}|"
-    r"xr[a-z0-9_\-]{10,})\b")
+    r"xr[a-z0-9_\\-]{10,}|eyJ[A-Za-z0-9_\\-]{8,}\.[A-Za-z0-9_\\-]{2,})\b")
 _TRIVIAL_VALUES = {"true", "false", "null", "none", "yes", "no", "0", "1", "undefined", "auto"}
 # Hard-mask for gitleaks Match context: any 16+ char run (token-shaped
 # fragments survive gitleaks' own --redact in the Match field)
@@ -379,7 +379,7 @@ def _family_of(rule: str) -> str:
 
 
 _GENERIC_KEY_RE = re.compile(
-    r"^(?:api[ _.\-]?key|token|secret|passwd|password|credential|auth|pass|pw|pin)$",
+    r"^(?:api[ _.\\-]?key|token|secret|passwd|password|credential|auth|authorization|pass|pw|pin)$",
     re.IGNORECASE)
 
 

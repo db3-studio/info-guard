@@ -1,8 +1,8 @@
 [info-guard] ℹ Info Guard not detected — this run is the before-install decide step.
-[info-guard] preflight — scanning 1 dirs / ~4 files under /tmp/tmp.TvjCjJHOu2 (read-only, nothing written)
+[info-guard] preflight — scanning 1 dirs / ~4 files under /tmp/tmp.UHJu61ZweP (read-only, nothing written)
 
-Info Guard v0.3.0 — Preflight Security Assessment
-Read-only scan of Hermes home · values masked · generated 2026-08-19 15:41 UTC
+Info Guard v0.3.1 — Preflight Security Assessment
+Read-only scan of Hermes home · values masked · generated 2026-08-19 16:40 UTC
 Engine: Info Guard NOT INSTALLED — decide step (no redaction engine active)
 SCOPE: . — 4 files
 
@@ -12,10 +12,10 @@ STATUS: 🔴 ACTION REQUIRED
 
 EXECUTIVE SUMMARY
   🔴 10       credential-shaped candidates (values that look like real secrets)
-            9 family-attributed · 1 unattributed (generic token shapes) · 6 distinct values · 16 raw detections · 6 duplicate detector hits collapsed
+            9 family-attributed · 1 unattributed (generic token shapes) · 6 distinct values · 21 raw detections · 11 duplicate detector hits collapsed
   🟠 4        files scanned
   🔑 8        families with value-shaped material
-  🛡️ 2        occurrences already masked (prevention layer working)
+  🛡️ 4        occurrences already masked (prevention layer working)
 
   WHAT MATTERS
   • The 10 candidates are token-shaped values (API key, Discord bot token, GitHub PAT, JWT…); only you
@@ -23,7 +23,7 @@ EXECUTIVE SUMMARY
   • 8 of 10 candidates sit in historical
     session transcripts — consistent with retained historical exposure
     (see EXPOSURE LOCATIONS).
-  • Redaction is working: api_key, FIRECRAWL_API_KEY are already masked in the source.
+  • Redaction is working: Authorization, api_key are already masked in the source.
 
 CREDENTIAL EXPOSURE BY FAMILY
   Family                             Type                          Qty  Value (masked 2+2) Status
@@ -36,6 +36,7 @@ CREDENTIAL EXPOSURE BY FAMILY
   TUNNEL_TOKEN                       generated key                   1  ke...CC†           🔴 Exposed
   X-N8N-API-KEY                      JWT                             1  ey...bb†           🔴 Exposed
   "api_key"                          —                        1 masked  —                  🟢 Protected
+  "Authorization"                    —                        2 masked  —                  🟢 Protected
   FIRECRAWL_API_KEY                  —                        1 masked  —                  🟢 Protected
 
   † (no key context) — same value also under: TUNNEL_TOKEN
@@ -57,18 +58,18 @@ CREDENTIAL EXPOSURE BY FAMILY
   only in the scanned file. `--full` lists every candidate row.
 
 EXPOSURE LOCATIONS
-  sessions   8 credential-shaped candidates · 1 masked 🟡 Mixed
+  sessions   8 credential-shaped candidates · 2 masked 🟡 Mixed
   cron       1 credential-shaped candidate · 0 masked 🔴 Exposed
-  logs       1 credential-shaped candidate · 1 masked 🟢 Protected
+  logs       1 credential-shaped candidate · 2 masked 🟢 Protected
 
   Pattern: Candidates are concentrated in historical session
   transcripts (2026-04-24–2026-05-05, from session timestamps) — consistent with
   retained historical exposure rather than a current logging failure.
 
   SHOW AFFECTED FILES (top 10)
-  sessions/session_20260505_075138_3cf0d0a1.jsonl            9 findings (5 candidates)
-  sessions/session_20260424_211845_69c7b6.jsonl              6 findings (3 candidates)
-  logs/agent.log                                             2 findings (1 candidate)
+  sessions/session_20260505_075138_3cf0d0a1.jsonl            12 findings (5 candidates)
+  sessions/session_20260424_211845_69c7b6.jsonl              8 findings (3 candidates)
+  logs/agent.log                                             4 findings (1 candidate)
   cron/output/watch.log                                      1 finding (1 candidate)
 
 RECOMMENDED ACTIONS
@@ -90,7 +91,7 @@ APPENDIX A — FINDING LEDGER
   [SUSPICIOUS] generic-api-key (×3)
       sessions/session_20260424_211845_69c7b6.jsonl:2  value=ey...bb
 
-  [TOKEN-SHAPE] known-prefix (×4)
+  [TOKEN-SHAPE] known-prefix (×9)
       cron/output/watch.log:1  value=ke...CC
 
   [KEY-SHAPE] key-family:HASS_TOKEN (×3)

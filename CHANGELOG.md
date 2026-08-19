@@ -6,6 +6,29 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [v0.3.1] - 2026-08-19
+
+### Fixed
+- **Detection gaps (external review approved 2026-08-19, one wave):**
+  1. **`Authorization` headers are now key-shape findings** — `auth\b`
+     never matched "Authorization" (no word boundary), so every
+     `Authorization: ***` / `Authorization: Bearer …` line was silently
+     skipped. `Authorization: ***` counts already-masked (protected);
+     `Authorization: Bearer <jwt>` becomes actionable via the JWT rule.
+  2. **Dot-structured bare-JWT detection** — JWTs under keys with no
+     keyword (e.g. `NEW_JWT=eyJ…`) now fire: `eyJ` header (≥8 chars) +
+     `.` + payload (≥2). The canonical jwt.io header (no dot) and
+     masked-looking short forms never fire. The value classifier already
+     knew JWT — the detector now matches it.
+- Battery: 104 checks (was 99; +5 explicit positive/negative gap matrix:
+  bare JWT under a non-keyword key → detected; jwt.io header without dot
+  → NOT detected; masked-looking short `eyJ…` → NOT detected; Bearer JWT
+  → detected; `Authorization: ***` → protected).
+- Demo re-pinned from actual output (raw 16→21, masked 2→4, findings
+  18→25, +"Authorization" protected family; candidate rows and distinct
+  values unchanged at 10/6).
+- format-spec: detection-coverage note (Authorization + JWT rules).
+
 ## [v0.3.0] - 2026-08-19
 
 ### Added
