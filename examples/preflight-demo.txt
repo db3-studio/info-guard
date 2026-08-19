@@ -1,0 +1,118 @@
+[info-guard] ℹ Info Guard not detected — this run is the before-install decide step.
+[info-guard] preflight — scanning 1 dirs / ~4 files under /tmp/tmp.TvjCjJHOu2 (read-only, nothing written)
+
+Info Guard v0.3.0 — Preflight Security Assessment
+Read-only scan of Hermes home · values masked · generated 2026-08-19 15:41 UTC
+Engine: Info Guard NOT INSTALLED — decide step (no redaction engine active)
+SCOPE: . — 4 files
+
+STATUS: 🔴 ACTION REQUIRED
+        Credential-shaped values were found at rest. They are candidates, not confirmed leaks.
+        No changes were made by this scan. Nothing was written.
+
+EXECUTIVE SUMMARY
+  🔴 10       credential-shaped candidates (values that look like real secrets)
+            9 family-attributed · 1 unattributed (generic token shapes) · 6 distinct values · 16 raw detections · 6 duplicate detector hits collapsed
+  🟠 4        files scanned
+  🔑 8        families with value-shaped material
+  🛡️ 2        occurrences already masked (prevention layer working)
+
+  WHAT MATTERS
+  • The 10 candidates are token-shaped values (API key, Discord bot token, GitHub PAT, JWT…); only you
+    can confirm which are live (see CREDENTIAL EXPOSURE BY FAMILY).
+  • 8 of 10 candidates sit in historical
+    session transcripts — consistent with retained historical exposure
+    (see EXPOSURE LOCATIONS).
+  • Redaction is working: api_key, FIRECRAWL_API_KEY are already masked in the source.
+
+CREDENTIAL EXPOSURE BY FAMILY
+  Family                             Type                          Qty  Value (masked 2+2) Status
+  ANTHROPIC_API_KEY                  API key                         1  sk...AA            🔴 Exposed
+  (no key context)                   generated key                   1  ke...CC†           🔴 Exposed
+  DISCORD_BOT_TOKEN                  Discord bot token               1  MT...OQ            🔴 Exposed
+  HASS_TOKEN                         JWT                             3  ey...aa            🔴 Exposed
+  N8N_API_KEY                        JWT                             1  ey...bb†           🔴 Exposed
+  "token"                            GitHub PAT                      1  gh...BB            🔴 Exposed
+  TUNNEL_TOKEN                       generated key                   1  ke...CC†           🔴 Exposed
+  X-N8N-API-KEY                      JWT                             1  ey...bb†           🔴 Exposed
+  "api_key"                          —                        1 masked  —                  🟢 Protected
+  FIRECRAWL_API_KEY                  —                        1 masked  —                  🟢 Protected
+
+  † (no key context) — same value also under: TUNNEL_TOKEN
+  † N8N_API_KEY — same value also under: X-N8N-API-KEY
+  † TUNNEL_TOKEN — same value also under: (no key context)
+  † X-N8N-API-KEY — same value also under: N8N_API_KEY
+
+  DISTINCT VALUES — THE ROTATE LIST
+  ey...aa            JWT                           3  HASS_TOKEN
+  ke...CC            generated key                 2  TUNNEL_TOKEN
+  ey...bb            JWT                           2  X-N8N-API-KEY
+  gh...BB            GitHub PAT                    1  "token"
+  MT...OQ            Discord bot token             1  DISCORD_BOT_TOKEN
+  sk...AA            API key                       1  ANTHROPIC_API_KEY
+
+  If a masked value matches a credential you currently use, rotate it.
+  If it belongs to a credential that has already been superseded, no
+  action is required. Values are masked 2+2 — the full value exists
+  only in the scanned file. `--full` lists every candidate row.
+
+EXPOSURE LOCATIONS
+  sessions   8 credential-shaped candidates · 1 masked 🟡 Mixed
+  cron       1 credential-shaped candidate · 0 masked 🔴 Exposed
+  logs       1 credential-shaped candidate · 1 masked 🟢 Protected
+
+  Pattern: Candidates are concentrated in historical session
+  transcripts (2026-04-24–2026-05-05, from session timestamps) — consistent with
+  retained historical exposure rather than a current logging failure.
+
+  SHOW AFFECTED FILES (top 10)
+  sessions/session_20260505_075138_3cf0d0a1.jsonl            9 findings (5 candidates)
+  sessions/session_20260424_211845_69c7b6.jsonl              6 findings (3 candidates)
+  logs/agent.log                                             2 findings (1 candidate)
+  cron/output/watch.log                                      1 finding (1 candidate)
+
+RECOMMENDED ACTIONS
+  🔴 1. Rotate active candidates — Check the 6 distinct credential-shaped values (see DISTINCT VALUES); rotate any still in use. At-rest copies stay in these files either way (masking never rewrites files); values already superseded: ignore.
+  🟠 2. Choose prevention — Install Info Guard to mask future occurrences, or accept recurrence and re-scan periodically. Install does NOT clean what is already at rest — rotate first.
+  🟡 3. Clean historical exposure — Archive/delete affected transcripts if appropriate. Rows only clear when the files are deleted.
+  🟢 4. Verify — After rotating, re-run once to confirm the rotation itself did not leak the new values into logs. No routine re-run otherwise.
+
+  The tiers above are mutually exclusive: every finding is classified
+  into exactly one — credential-shaped, key-name mention, or already
+  masked.
+
+APPENDIX A — FINDING LEDGER
+  (sample — one per family; `info-guard preflight --full` for the complete ledger)
+  Values are masked: you see the first and last 2 characters
+  only. The full value exists only in the scanned file — it
+  never leaves the machine. Values too short to mask partially
+  are counted in the totals but not listed here.
+  [SUSPICIOUS] generic-api-key (×3)
+      sessions/session_20260424_211845_69c7b6.jsonl:2  value=ey...bb
+
+  [TOKEN-SHAPE] known-prefix (×4)
+      cron/output/watch.log:1  value=ke...CC
+
+  [KEY-SHAPE] key-family:HASS_TOKEN (×3)
+      logs/agent.log:2  value=HASS_TOKEN=ey...aa
+
+  [KEY-SHAPE] key-family:X-N8N-API-KEY (×1)
+      sessions/session_20260424_211845_69c7b6.jsonl:2  value=X-N8N-API-KEY=ey...bb
+
+  [KEY-SHAPE] key-family:token (×1)
+      sessions/session_20260424_211845_69c7b6.jsonl:4  value=token=gh...BB
+
+  [KEY-SHAPE] key-family:DISCORD_BOT_TOKEN (×1)
+      sessions/session_20260505_075138_3cf0d0a1.jsonl:2  value=DISCORD_BOT_TOKEN=MT...OQ
+
+  [KEY-SHAPE] key-family:ANTHROPIC_API_KEY (×1)
+      sessions/session_20260505_075138_3cf0d0a1.jsonl:3  value=ANTHROPIC_API_KEY=sk...AA
+
+  [KEY-SHAPE] key-family:N8N_API_KEY (×1)
+      sessions/session_20260505_075138_3cf0d0a1.jsonl:4  value=N8N_API_KEY=ey...bb
+
+  [KEY-SHAPE] key-family:TUNNEL_TOKEN (×1)
+      sessions/session_20260505_075138_3cf0d0a1.jsonl:5  value=TUNNEL_TOKEN=ke...CC
+
+  Known false-positive classes: code identifiers (password_hash =),
+  config examples in docs, harmless IDs matching token prefixes.

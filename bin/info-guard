@@ -17,6 +17,18 @@ Usage:
                                     <home>/cron/output) — run BEFORE deciding
                                     whether to install. Read-only, output
                                     masked, nothing written.
+                                    --json: emit the assessment object
+                                    (schema info-guard/assessment/v1, see
+                                    docs/assessment-schema.md) to stdout;
+                                    --json-out FILE: write it atomically
+                                    (0600). The text report is unchanged.
+  info-guard watch [DIR ...]        Re-run the scan and report NEW
+                                    credential-shaped values since the
+                                    baseline (<state>/watch-baseline.json —
+                                    value sha256 only, 0600). First run
+                                    creates the baseline; exit 1 when new
+                                    values appear (cron-friendly); --reset
+                                    clears the baseline.
   info-guard setup [--all]          Interactive bootstrap: reviews preflight
                                     candidates one by one (masked only),
                                     registers the ones you confirm as custom
@@ -69,7 +81,7 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.2.8"
+_PACKAGE_VERSION = "0.3.0"
 
 VALID_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -638,9 +650,30 @@ def _gitleaks_scan(root: Path, redact=True):
 def cmd_preflight(args):
     # --full: print the complete deduplicated ledger instead of the
     # one-example-per-family sampler (same masking, no cap).
+    # --json: emit the assessment object to stdout (no chatter — the
+    # object carries engine state); --json-out FILE: atomic 0600 write.
     full = "--full" in (args or [])
+    as_json = "--json" in (args or [])
+    json_out = None
+    names = []
+    a = list(args or [])
+    i = 0
+    while i < len(a):
+        x = a[i]
+        if x == "--json-out":
+            i += 1
+            if i >= len(a):
+                print("[info-guard] preflight: --json-out requires a file "
+                      "path", file=sys.stderr)
+                return 2
+            json_out = a[i]
+        elif x.startswith("--"):
+            pass  # --full / --json handled above; unknown flags ignored
+        else:
+            names.append(x)
+        i += 1
+    as_json = as_json or json_out is not None
     dirs = []
-    names = [a for a in (args or []) if not a.startswith("--")]
     for name in names or _PREFLIGHT_DIRS:
         p = _HERMES_HOME / name
         if p.is_dir():
@@ -650,34 +683,152 @@ def cmd_preflight(args):
               f"({', '.join(_PREFLIGHT_DIRS)}) — nothing to scan")
         return 0
     _ensure_gitleaks()
-    _print_install_status()
     total = 0
     for d in dirs:
         total += sum(1 for _ in d.rglob("*") if _.is_file())
-    print(f"[info-guard] preflight — scanning {len(dirs)} dirs / ~{total} files "
-          f"under {_HERMES_HOME} (read-only, nothing written)")
-    all_hits, gitleaks_ok = [], True
-    for d in dirs:
-        for p in sorted(d.rglob("*")):
-            if not p.is_file():
-                continue
-            for hit in _key_scan(p):
-                all_hits.append((hit[0], hit[1], str(p.relative_to(_HERMES_HOME)), *hit[2:]))
-        ghits, ok = _gitleaks_scan(d)
-        gitleaks_ok = gitleaks_ok and ok
-        for cls, rule, fname, line, value, masked, ctx in ghits:
-            rel = os.path.relpath(fname, str(_HERMES_HOME)) if fname else str(d)
-            all_hits.append((cls, rule, rel, line, value, masked, ctx))
-    if not gitleaks_ok:
+    if not as_json:
+        _print_install_status()
+        print(f"[info-guard] preflight — scanning {len(dirs)} dirs / ~{total} "
+              f"files under {_HERMES_HOME} (read-only, nothing written)")
+    all_hits, gitleaks_ok = _collect_hits(dirs)
+    if not gitleaks_ok and not as_json:
         print("[info-guard] preflight: ⚠ gitleaks not found on PATH — ran "
               "key-shape pass only (install gitleaks for the tuned-ruleset pass)")
     all_hits.sort(key=lambda h: (h[2], h[3]))
-    print()
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+        "+00:00", "Z")
     assessment = _build_assessment(
         all_hits, [str(d.relative_to(_HERMES_HOME)) for d in dirs], total,
         gitleaks_ok, now)
+    if as_json:
+        if json_out:
+            _atomic_write_json(Path(json_out), assessment)
+            print(f"[info-guard] preflight: assessment written to {json_out}")
+        else:
+            print(json.dumps(assessment, indent=2))
+        return 1 if assessment["totals"]["credential_shaped"] else 0
+    print()
     return _render_assessment(assessment, all_hits, full)
+
+
+def cmd_watch(args):
+    """Watch mode: re-run the scan and report NEW credential-shaped
+    values since the baseline (value sha256 only, 0600 state file).
+    First run (or --reset) creates the baseline; exit 1 when new values
+    appear — cron-friendly. The baseline is union-kept across
+    tool/gitleaks version changes (known values never re-alert)."""
+    reset = "--reset" in (args or [])
+    names = [a for a in (args or []) if not a.startswith("--")]
+    dirs = []
+    for name in names or _PREFLIGHT_DIRS:
+        p = _HERMES_HOME / name
+        if p.is_dir():
+            dirs.append(p)
+    if not dirs:
+        print(f"[info-guard] watch: no scan targets under {_HERMES_HOME} "
+              f"({', '.join(_PREFLIGHT_DIRS)}) — nothing to scan")
+        return 0
+    _ensure_gitleaks()
+    all_hits, gitleaks_ok = _collect_hits(dirs)
+    if not gitleaks_ok:
+        print("[info-guard] watch: ⚠ gitleaks not found on PATH — key-shape "
+              "pass only")
+    all_hits.sort(key=lambda h: (h[2], h[3]))
+    current = _watch_values(all_hits)
+    baseline_path = STATE_DIR / "watch-baseline.json"
+    prev = None
+    if not reset and baseline_path.exists():
+        try:
+            prev = json.loads(baseline_path.read_text())
+        except (OSError, ValueError):
+            prev = None  # broken baseline: rebuild (never crash)
+    if prev is None:
+        _write_watch_baseline(baseline_path, current, None)
+        verb = "reset — " if reset else ""
+        print(f"[info-guard] watch: baseline {verb}created — "
+              f"{_n(len(current))} known credential-shaped "
+              f"value{'s' if len(current) != 1 else ''} "
+              "(re-run to detect new ones)")
+        return 0
+    known = {v["value_sha256"] for v in prev.get("values", [])}
+    new = {k: e for k, e in current.items() if e["value_sha256"] not in known}
+    if (prev.get("tool_version") != _PACKAGE_VERSION
+            or prev.get("gitleaks_version") != _GITLEAKS_VERSION):
+        print("[info-guard] watch: tool/gitleaks version changed — known "
+              "values retained (union), updated rules may surface fresh "
+              "findings")
+    if new:
+        print("[info-guard] watch: NEW credential-shaped values found "
+              "(masked 2+2 · type · family · count)")
+        for v, e in new.items():
+            fam = _family_label(e["family"]) if e["family"] else "(no key context)"
+            print(f"  {_mask_value(v):<18} {e['type'][:22]:<24} "
+                  f"{_n(e['count']):>6}  {fam}")
+        _write_watch_baseline(baseline_path, current, prev)
+        print(f"[info-guard] watch: baseline updated — {_n(len(current))} "
+              "values now known")
+        return 1
+    print(f"[info-guard] watch: no new credential-shaped values since "
+          f"{_fmt_generated(prev.get('generated', ''))}")
+    return 0
+
+
+def _watch_values(all_hits):
+    """Distinct credential-shaped values -> metadata for the watch
+    baseline. sha256 of the raw value only — raw values never touch
+    the baseline file."""
+    out = {}
+    for h in all_hits:
+        cls, rule, rel, line, value, masked, ctx = h
+        vc = _value_class(value)
+        if cls != "HIGH-CONFIDENCE" and vc != "token-format":
+            continue
+        e = out.setdefault(value, {"type": _value_type(value), "family": None,
+                                   "count": 0, "value_sha256": _sha(value)})
+        e["count"] += 1
+        if e["family"] is None:
+            f = _family_of(rule)
+            e["family"] = f if f != "bare-token" else None
+    return out
+
+
+def _sha(s):
+    return hashlib.sha256(s.encode()).hexdigest()
+
+
+def _write_watch_baseline(path, current, prev):
+    """Write the watch baseline: {schema, generated, tool_version,
+    gitleaks_version, values:[{value_sha256, type, family, count,
+    first_seen}]}. Union semantics: rows known in prev keep their
+    first_seen; new rows get today. 0600 via _atomic_write_json."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+        "+00:00", "Z")
+    prev_by_sha = {}
+    if prev:
+        prev_by_sha = {v["value_sha256"]: v for v in prev.get("values", [])}
+    values = []
+    for value, e in current.items():
+        old = prev_by_sha.get(e["value_sha256"])
+        row = {"value_sha256": e["value_sha256"], "type": e["type"],
+               "family": e["family"], "count": e["count"]}
+        row["first_seen"] = old.get("first_seen", now) if old else now
+        values.append(row)
+    values.sort(key=lambda v: (v["first_seen"], v["value_sha256"]))
+    _atomic_write_json(path, {"schema": "info-guard/watch-baseline/v1",
+                              "generated": now,
+                              "tool_version": _PACKAGE_VERSION,
+                              "gitleaks_version": _GITLEAKS_VERSION,
+                              "values": values})
+
+
+def _fmt_generated(iso):
+    """ISO-8601 -> the text report's display form (renderer owns
+    language; the object carries machine time)."""
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return iso
+    return dt.strftime("%Y-%m-%d %H:%M UTC")
 
 
 # ── assessment object (v0.2.4 contract): facts only, no prose ────────────
@@ -942,6 +1093,7 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
     inst = _installation_status()
     manifest = _install_manifest()
     return {
+        "schema": "info-guard/assessment/v1",
         "tool": {"name": "info-guard", "version": _PACKAGE_VERSION,
                  "gitleaks": _GITLEAKS_VERSION,
                  "installed": inst["engine"],
@@ -960,13 +1112,17 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
                         if n_rows else
                         "No credential-shaped values found at rest."),
             "credential_shaped": n_rows,
+            # Reserved for a future validation step (the scanner cannot
+            # know activeness); kept null so the field never drifts.
+            "confirmed_active": None,
         },
         "totals": {"findings": len(all_hits), "credential_shaped": n_rows,
                    "raw_detections": n_action, "distinct_values": len(vals),
                    "family_attributed": fam_attr, "unattributed": unattr,
                    "key_name_mentions": n_key, "already_masked": n_mask,
                    "partition": True},
-        "families": families,
+        "families": {"total_with_values": sum(1 for f in families if f["value"] > 0),
+                     "complete": True, "items": families},
         "locations": locations,
         "patterns": patterns,
         "redaction": redaction,
@@ -1034,7 +1190,7 @@ def _render_assessment(a, all_hits, full):
     t = a["totals"]
     nf = a["scan"]["files_scanned"]
     print(f"Info Guard v{_PACKAGE_VERSION} — Preflight Security Assessment")
-    print(f"Read-only scan of Hermes home · values masked · generated {a['scan']['generated']}")
+    print(f"Read-only scan of Hermes home · values masked · generated {_fmt_generated(a['scan']['generated'])}")
     eng = a["tool"]["engine_state"]
     if eng == "active":
         ev = a["tool"]["engine_version"] or a["tool"]["version"]
@@ -1072,7 +1228,7 @@ def _render_assessment(a, all_hits, full):
     parts.append(" · ".join(raw_parts))
     print(f"  {'':10}" + " · ".join(parts))
     print(f"  🟠 {_n(nf):<8} file{'s' if nf != 1 else ''} scanned")
-    fams_w = sum(1 for f in a["families"] if f["value"] > 0)
+    fams_w = sum(1 for f in a["families"]["items"] if f["value"] > 0)
     print(f"  🔑 {_n(fams_w):<8} families with value-shaped material")
     print(f"  🛡️ {_n(nm):<8} occurrence{'s' if nm != 1 else ''} already masked (prevention layer working)")
     print()
@@ -1110,10 +1266,10 @@ def _render_assessment(a, all_hits, full):
     st_order = {"exposed": 0, "mixed": 1, "protected": 2}
     st_icon = {"exposed": "🔴 Exposed", "mixed": "🟡 Mixed",
                "protected": "🟢 Protected"}
-    fams_sorted = sorted(a["families"],
+    fams_sorted = sorted(a["families"]["items"],
                          key=lambda r: (st_order.get(r["status"], 3),
                                         r["family"].lower()))
-    n_prot = sum(1 for r in a["families"] if r["status"] == "protected")
+    n_prot = sum(1 for r in a["families"]["items"] if r["status"] == "protected")
     n_prot_shown = 0
     for r in fams_sorted:
         if r["status"] == "protected":
@@ -1685,6 +1841,8 @@ def main(argv):
         return cmd_status()
     if cmd == "preflight":
         return cmd_preflight(rest)
+    if cmd == "watch":
+        return cmd_watch(rest)
     if cmd == "setup":
         return cmd_setup(rest)
     if cmd == "check":

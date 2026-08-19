@@ -383,7 +383,7 @@ pf = subprocess.run(
 pfo = pf.stdout + pf.stderr
 check("preflight: findings exit code 1", pf.returncode == 1,
       f"rc={pf.returncode} out={pfo[-300:]!r}")
-for section in ("Info Guard v0.2.8 — Preflight Security Assessment",
+for section in ("Info Guard v0.3.0 — Preflight Security Assessment",
                 "STATUS", "EXECUTIVE SUMMARY", "WHAT MATTERS",
                 "CREDENTIAL EXPOSURE BY FAMILY",
                 "EXPOSURE LOCATIONS",
@@ -480,8 +480,127 @@ ver = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
     capture_output=True, text=True, timeout=60)
 check("--version prints the package version",
-      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.2.8",
+      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.3.0",
       f"rc={ver.returncode} out={ver.stdout.strip()!r}")
+
+# ── 13. preflight --json: same object, schema-shaped, masked, no chatter ──
+pfj = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "preflight", "--json"],
+    env=env6, capture_output=True, text=True, timeout=300)
+pj = pfj.stdout
+check("preflight --json: exit code matches findings", pfj.returncode == 1,
+      f"rc={pfj.returncode} stderr={pfj.stderr[-200:]!r}")
+check("preflight --json: stdout is pure JSON (no chatter)",
+      pj.lstrip().startswith("{") and "preflight — scanning" not in pj)
+obj = json.loads(pj)
+check("preflight --json: schema field",
+      obj.get("schema") == "info-guard/assessment/v1")
+check("preflight --json: status reserves confirmed_active",
+      obj["status"].get("confirmed_active") is None)
+fams = obj["families"]
+check("preflight --json: families wrapper object",
+      isinstance(fams.get("items"), list) and fams.get("complete") is True
+      and fams.get("total_with_values")
+      == sum(1 for f in fams["items"] if f["value"] > 0))
+t = obj["totals"]
+check("preflight --json: totals reconcile (raw partition)",
+      t["findings"] == t["raw_detections"] + t["key_name_mentions"]
+      + t["already_masked"])
+check("preflight --json: attribution split reconciles",
+      t["credential_shaped"] == t["family_attributed"] + t["unattributed"])
+check("preflight --json: distinct <= rows <= raw",
+      t["distinct_values"] <= t["credential_shaped"] <= t["raw_detections"])
+check("preflight --json: raw values never present",
+      jwt not in pj and dsc not in pj and "your-actual-key-here" not in pj,
+      "a raw synthetic value appeared in the JSON")
+check("preflight --json: masked example value present",
+      "ey...aa" in pj and "MT...OQ" in pj)
+check("preflight --json: numbers match the text report",
+      f"  🔴 {t['credential_shaped']} " in pfo
+      and f"{t['distinct_values']} distinct values" in pfo)
+
+# 13b. --json-out: atomic 0600 write, identical object
+outf = os.path.join(tmp, "assessment.json")
+pfjo = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "preflight", "--json-out", outf],
+    env=env6, capture_output=True, text=True, timeout=300)
+check("preflight --json-out: exit code matches findings",
+      pfjo.returncode == 1)
+check("preflight --json-out: file written 0600",
+      os.path.exists(outf) and (os.stat(outf).st_mode & 0o777) == 0o600)
+obj2 = json.load(open(outf))
+obj2["scan"]["generated"] = obj["scan"]["generated"]  # same-second tolerance
+check("preflight --json-out: identical object", obj2 == obj)
+pfje = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "preflight", "--json-out"],
+    env=env6, capture_output=True, text=True, timeout=60)
+check("preflight --json-out: missing path is usage error",
+      pfje.returncode == 2, f"rc={pfje.returncode}")
+
+# ── 14. watch: value-sha256 baseline lifecycle, cron-friendly ──
+w1 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env6, capture_output=True, text=True, timeout=300)
+w1o = w1.stdout + w1.stderr
+check("watch: first run creates baseline, exit 0",
+      w1.returncode == 0 and "baseline created" in w1o,
+      f"rc={w1.returncode} out={w1o[-200:]!r}")
+bl = os.path.join(pf_home, "state", "info-guard", "watch-baseline.json")
+check("watch: baseline file 0600",
+      os.path.exists(bl) and (os.stat(bl).st_mode & 0o777) == 0o600)
+bobj = json.load(open(bl))
+check("watch: baseline schema + sha256-only rows",
+      bobj.get("schema") == "info-guard/watch-baseline/v1"
+      and all(len(v["value_sha256"]) == 64 for v in bobj["values"]))
+check("watch: baseline knows both fixture values",
+      len(bobj["values"]) == 2)
+check("watch: baseline contains no raw values",
+      jwt not in json.dumps(bobj) and dsc not in json.dumps(bobj),
+      "a raw synthetic value reached the baseline")
+w2 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env6, capture_output=True, text=True, timeout=300)
+check("watch: no-new exits 0 with status line",
+      w2.returncode == 0 and "no new" in (w2.stdout + w2.stderr),
+      f"rc={w2.returncode}")
+# a new credential-shaped value appears (keyword key + sk- prefix)
+with open(os.path.join(pf_home, "sessions", "session_20260505_075138_d.jsonl"),
+          "a") as f:
+    f.write("ANTHROPIC_API_KEY=sk-newprobe1234567890\n")
+w3 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env6, capture_output=True, text=True, timeout=300)
+w3o = w3.stdout + w3.stderr
+check("watch: new value exits 1",
+      w3.returncode == 1, f"rc={w3.returncode} out={w3o[-200:]!r}")
+check("watch: new value listed masked",
+      "sk...90" in w3o and "sk-newprobe1234567890" not in w3o)
+check("watch: baseline updated to 3",
+      len(json.load(open(bl))["values"]) == 3)
+w4 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "watch", "--reset"],
+    env=env6, capture_output=True, text=True, timeout=300)
+check("watch: --reset recreates baseline",
+      w4.returncode == 0 and "baseline reset" in (w4.stdout + w4.stderr),
+      f"rc={w4.returncode}")
+check("watch: reset baseline matches current scan",
+      len(json.load(open(bl))["values"]) == 3)
+# version-change union: fake an older tool_version in the baseline
+bobj3 = json.load(open(bl))
+bobj3["tool_version"] = "0.2.8"
+open(bl, "w").write(json.dumps(bobj3))
+w5 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env6, capture_output=True, text=True, timeout=300)
+w5o = w5.stdout + w5.stderr
+check("watch: version change union-keeps + notice",
+      w5.returncode == 0 and "union" in w5o
+      and len(json.load(open(bl))["values"]) == 3,
+      f"rc={w5.returncode} out={w5o[-200:]!r}")
 
 
 print(f"\n[test] {PASS} passed, {FAIL} failed")

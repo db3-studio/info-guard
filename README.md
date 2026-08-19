@@ -88,6 +88,26 @@ Already installed? Preflight detects it (engine marker + pattern file) and
 frames the run as a health check: findings are at-rest residue that masking
 does not remove — rotate or delete them.
 
+## Example report
+
+`examples/preflight-demo.txt` is a full sample report — and
+`examples/preflight-demo.json` the same assessment as JSON (schema
+`info-guard/assessment/v1`, documented in `docs/assessment-schema.md`) —
+generated from a synthetic 4-file fixture. It shows what a real run looks
+like on a small, imperfect history: 10 candidate rows, 6 distinct values,
+shared-value daggers, protected families. Regenerate either with
+`examples/gen-demo.sh` — fixture values are synthetic and
+runtime-constructed, so the committed examples contain no secrets of any
+kind (only 2+2 masked forms).
+
+The machine surface (v0.3.0): `preflight --json [--json-out FILE]` prints
+or writes the assessment object — the text report is its render, never a
+second implementation; `preflight watch` re-runs the scan and reports NEW
+credential-shaped values against a sha256-only baseline
+(`<state>/info-guard/watch-baseline.json`, 0600) — cron-friendly, exit 1
+on new values, `--reset` to clear, union-kept across tool/gitleaks
+upgrades. Contract: `docs/format-spec.md`.
+
 **Privacy & credential handling:** preflight is safe-by-construction —
 values are masked before they leave the machine, never echoed, and the scan
 only reads local files. It is fully **agent-runnable by design** (via your

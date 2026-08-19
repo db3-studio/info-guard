@@ -1,0 +1,567 @@
+{
+  "schema": "info-guard/assessment/v1",
+  "tool": {
+    "name": "info-guard",
+    "version": "0.3.0",
+    "gitleaks": "8.30.1",
+    "installed": false,
+    "engine_state": "none",
+    "engine_version": null
+  },
+  "scan": {
+    "generated": "2026-08-19T15:41:06Z",
+    "dirs": [
+      "."
+    ],
+    "files_scanned": 4,
+    "read_only": true,
+    "gitleaks_ok": true
+  },
+  "status": {
+    "severity": "high",
+    "action_required": true,
+    "summary": "Credential-shaped values were found at rest. They are candidates, not confirmed leaks.",
+    "credential_shaped": 10,
+    "confirmed_active": null
+  },
+  "totals": {
+    "findings": 18,
+    "credential_shaped": 10,
+    "raw_detections": 16,
+    "distinct_values": 6,
+    "family_attributed": 9,
+    "unattributed": 1,
+    "key_name_mentions": 0,
+    "already_masked": 2,
+    "partition": true
+  },
+  "families": {
+    "total_with_values": 8,
+    "complete": true,
+    "items": [
+      {
+        "family": "HASS_TOKEN",
+        "value": 3,
+        "masked": 0,
+        "mentions": 3,
+        "types": [
+          "JWT"
+        ],
+        "status": "exposed",
+        "priority": "high",
+        "distinct_values": 1,
+        "areas": {
+          "logs": 1,
+          "sessions": 2
+        },
+        "dates": [
+          "2026-04-24",
+          "2026-05-05"
+        ],
+        "example": {
+          "value_masked": "ey...aa",
+          "file": "logs/agent.log",
+          "line": 2
+        }
+      },
+      {
+        "family": "bare-token",
+        "value": 1,
+        "masked": 0,
+        "mentions": 4,
+        "types": [
+          "generated key"
+        ],
+        "status": "exposed",
+        "priority": "high",
+        "distinct_values": 1,
+        "areas": {
+          "cron": 1
+        },
+        "dates": [],
+        "example": {
+          "value_masked": "ke...CC",
+          "file": "cron/output/watch.log",
+          "line": 1
+        },
+        "shared_with": [
+          "TUNNEL_TOKEN"
+        ]
+      },
+      {
+        "family": "X-N8N-API-KEY",
+        "value": 1,
+        "masked": 0,
+        "mentions": 1,
+        "types": [
+          "JWT"
+        ],
+        "status": "exposed",
+        "priority": "high",
+        "distinct_values": 1,
+        "areas": {
+          "sessions": 1
+        },
+        "dates": [
+          "2026-04-24"
+        ],
+        "example": {
+          "value_masked": "ey...bb",
+          "file": "sessions/session_20260424_211845_69c7b6.jsonl",
+          "line": 2
+        },
+        "shared_with": [
+          "N8N_API_KEY"
+        ]
+      },
+      {
+        "family": "token",
+        "value": 1,
+        "masked": 0,
+        "mentions": 1,
+        "types": [
+          "GitHub PAT"
+        ],
+        "status": "exposed",
+        "priority": "high",
+        "distinct_values": 1,
+        "areas": {
+          "sessions": 1
+        },
+        "dates": [
+          "2026-04-24"
+        ],
+        "example": {
+          "value_masked": "gh...BB",
+          "file": "sessions/session_20260424_211845_69c7b6.jsonl",
+          "line": 4
+        }
+      },
+      {
+        "family": "DISCORD_BOT_TOKEN",
+        "value": 1,
+        "masked": 0,
+        "mentions": 1,
+        "types": [
+          "Discord bot token"
+        ],
+        "status": "exposed",
+        "priority": "high",
+        "distinct_values": 1,
+        "areas": {
+          "sessions": 1
+        },
+        "dates": [
+          "2026-05-05"
+        ],
+        "example": {
+          "value_masked": "MT...OQ",
+          "file": "sessions/session_20260505_075138_3cf0d0a1.jsonl",
+          "line": 2
+        }
+      },
+      {
+        "family": "ANTHROPIC_API_KEY",
+        "value": 1,
+        "masked": 0,
+        "mentions": 1,
+        "types": [
+          "API key"
+        ],
+        "status": "exposed",
+        "priority": "high",
+        "distinct_values": 1,
+        "areas": {
+          "sessions": 1
+        },
+        "dates": [
+          "2026-05-05"
+        ],
+        "example": {
+          "value_masked": "sk...AA",
+          "file": "sessions/session_20260505_075138_3cf0d0a1.jsonl",
+          "line": 3
+        }
+      },
+      {
+        "family": "N8N_API_KEY",
+        "value": 1,
+        "masked": 0,
+        "mentions": 1,
+        "types": [
+          "JWT"
+        ],
+        "status": "exposed",
+        "priority": "high",
+        "distinct_values": 1,
+        "areas": {
+          "sessions": 1
+        },
+        "dates": [
+          "2026-05-05"
+        ],
+        "example": {
+          "value_masked": "ey...bb",
+          "file": "sessions/session_20260505_075138_3cf0d0a1.jsonl",
+          "line": 4
+        },
+        "shared_with": [
+          "X-N8N-API-KEY"
+        ]
+      },
+      {
+        "family": "TUNNEL_TOKEN",
+        "value": 1,
+        "masked": 0,
+        "mentions": 1,
+        "types": [
+          "generated key"
+        ],
+        "status": "exposed",
+        "priority": "high",
+        "distinct_values": 1,
+        "areas": {
+          "sessions": 1
+        },
+        "dates": [
+          "2026-05-05"
+        ],
+        "example": {
+          "value_masked": "ke...CC",
+          "file": "sessions/session_20260505_075138_3cf0d0a1.jsonl",
+          "line": 5
+        },
+        "shared_with": [
+          "bare-token"
+        ]
+      },
+      {
+        "family": "api_key",
+        "value": 0,
+        "masked": 1,
+        "mentions": 1,
+        "types": [],
+        "status": "protected",
+        "priority": "protected",
+        "distinct_values": 0,
+        "areas": {},
+        "dates": [],
+        "example": {
+          "value_masked": "***",
+          "file": "logs/agent.log",
+          "line": 3
+        }
+      },
+      {
+        "family": "FIRECRAWL_API_KEY",
+        "value": 0,
+        "masked": 1,
+        "mentions": 1,
+        "types": [],
+        "status": "protected",
+        "priority": "protected",
+        "distinct_values": 0,
+        "areas": {},
+        "dates": [],
+        "example": {
+          "value_masked": "***",
+          "file": "sessions/session_20260424_211845_69c7b6.jsonl",
+          "line": 3
+        }
+      }
+    ]
+  },
+  "locations": [
+    {
+      "area": "sessions",
+      "credential_shaped": 8,
+      "masked": 1,
+      "percentage": 80.0,
+      "files_affected": 2,
+      "status": "mixed",
+      "date_range": {
+        "source": "session_timestamp",
+        "start": "2026-04-24",
+        "end": "2026-05-05"
+      }
+    },
+    {
+      "area": "cron",
+      "credential_shaped": 1,
+      "masked": 0,
+      "percentage": 10.0,
+      "files_affected": 1,
+      "status": "exposed"
+    },
+    {
+      "area": "logs",
+      "credential_shaped": 1,
+      "masked": 1,
+      "percentage": 10.0,
+      "files_affected": 1,
+      "status": "protected"
+    }
+  ],
+  "patterns": [
+    {
+      "type": "historical_concentration",
+      "severity": "info",
+      "confidence": "moderate",
+      "summary": "Candidates are concentrated in historical session transcripts.",
+      "areas": [
+        "sessions"
+      ],
+      "date_range": {
+        "source": "session_timestamp",
+        "start": "2026-04-24",
+        "end": "2026-05-05"
+      }
+    },
+    {
+      "type": "redaction_active",
+      "severity": "info",
+      "confidence": "high",
+      "summary": "A share of occurrences are already masked in the source.",
+      "areas": [
+        "logs",
+        "sessions"
+      ]
+    }
+  ],
+  "redaction": [
+    {
+      "scope_type": "family",
+      "scope": "HASS_TOKEN",
+      "status": "exposed",
+      "note": "value-shaped material remains at rest"
+    },
+    {
+      "scope_type": "family",
+      "scope": "bare-token",
+      "status": "exposed",
+      "note": "value-shaped material remains at rest"
+    },
+    {
+      "scope_type": "family",
+      "scope": "X-N8N-API-KEY",
+      "status": "exposed",
+      "note": "value-shaped material remains at rest"
+    },
+    {
+      "scope_type": "family",
+      "scope": "token",
+      "status": "exposed",
+      "note": "value-shaped material remains at rest"
+    },
+    {
+      "scope_type": "family",
+      "scope": "DISCORD_BOT_TOKEN",
+      "status": "exposed",
+      "note": "value-shaped material remains at rest"
+    },
+    {
+      "scope_type": "family",
+      "scope": "ANTHROPIC_API_KEY",
+      "status": "exposed",
+      "note": "value-shaped material remains at rest"
+    },
+    {
+      "scope_type": "family",
+      "scope": "N8N_API_KEY",
+      "status": "exposed",
+      "note": "value-shaped material remains at rest"
+    },
+    {
+      "scope_type": "family",
+      "scope": "TUNNEL_TOKEN",
+      "status": "exposed",
+      "note": "value-shaped material remains at rest"
+    },
+    {
+      "scope_type": "family",
+      "scope": "api_key",
+      "status": "protected",
+      "note": "1 occurrence already masked in the source"
+    },
+    {
+      "scope_type": "family",
+      "scope": "FIRECRAWL_API_KEY",
+      "status": "protected",
+      "note": "1 occurrence already masked in the source"
+    },
+    {
+      "scope_type": "area",
+      "scope": "sessions",
+      "status": "mixed",
+      "note": "1 of 9 occurrences already masked in place"
+    },
+    {
+      "scope_type": "area",
+      "scope": "logs/agent.log",
+      "status": "protected",
+      "note": "1 of 2 occurrences already masked in place"
+    }
+  ],
+  "top_values": [
+    {
+      "value_masked": "ey...aa",
+      "type": "JWT",
+      "family": "HASS_TOKEN",
+      "count": 3,
+      "families": [
+        "HASS_TOKEN"
+      ]
+    },
+    {
+      "value_masked": "ke...CC",
+      "type": "generated key",
+      "family": "TUNNEL_TOKEN",
+      "count": 2,
+      "families": [
+        "TUNNEL_TOKEN",
+        "bare-token"
+      ]
+    },
+    {
+      "value_masked": "ey...bb",
+      "type": "JWT",
+      "family": "X-N8N-API-KEY",
+      "count": 2,
+      "families": [
+        "N8N_API_KEY",
+        "X-N8N-API-KEY"
+      ]
+    },
+    {
+      "value_masked": "gh...BB",
+      "type": "GitHub PAT",
+      "family": "token",
+      "count": 1,
+      "families": [
+        "token"
+      ]
+    },
+    {
+      "value_masked": "MT...OQ",
+      "type": "Discord bot token",
+      "family": "DISCORD_BOT_TOKEN",
+      "count": 1,
+      "families": [
+        "DISCORD_BOT_TOKEN"
+      ]
+    },
+    {
+      "value_masked": "sk...AA",
+      "type": "API key",
+      "family": "ANTHROPIC_API_KEY",
+      "count": 1,
+      "families": [
+        "ANTHROPIC_API_KEY"
+      ]
+    }
+  ],
+  "affected_files": [
+    {
+      "file": "sessions/session_20260505_075138_3cf0d0a1.jsonl",
+      "total_findings": 9,
+      "credential_shaped": 5,
+      "key_name_mentions": 0,
+      "already_masked": 0
+    },
+    {
+      "file": "sessions/session_20260424_211845_69c7b6.jsonl",
+      "total_findings": 6,
+      "credential_shaped": 3,
+      "key_name_mentions": 0,
+      "already_masked": 1
+    },
+    {
+      "file": "logs/agent.log",
+      "total_findings": 2,
+      "credential_shaped": 1,
+      "key_name_mentions": 0,
+      "already_masked": 1
+    },
+    {
+      "file": "cron/output/watch.log",
+      "total_findings": 1,
+      "credential_shaped": 1,
+      "key_name_mentions": 0,
+      "already_masked": 0
+    }
+  ],
+  "recommendations": [
+    {
+      "priority": "high",
+      "step": 1,
+      "title": "Rotate active candidates",
+      "detail": "Check the 6 distinct credential-shaped values (see DISTINCT VALUES); rotate any still in use. At-rest copies stay in these files either way (masking never rewrites files); values already superseded: ignore."
+    },
+    {
+      "priority": "medium",
+      "step": 2,
+      "title": "Choose prevention",
+      "detail": "Install Info Guard to mask future occurrences, or accept recurrence and re-scan periodically. Install does NOT clean what is already at rest \u2014 rotate first."
+    },
+    {
+      "priority": "low",
+      "step": 3,
+      "title": "Clean historical exposure",
+      "detail": "Archive/delete affected transcripts if appropriate. Rows only clear when the files are deleted."
+    },
+    {
+      "priority": "info",
+      "step": 4,
+      "title": "Verify",
+      "detail": "After rotating, re-run once to confirm the rotation itself did not leak the new values into logs. No routine re-run otherwise."
+    }
+  ],
+  "appendix": {
+    "telemetry": [
+      [
+        "bare-token",
+        4
+      ],
+      [
+        "HASS_TOKEN",
+        3
+      ],
+      [
+        "generic-api-key",
+        3
+      ],
+      [
+        "api_key",
+        1
+      ],
+      [
+        "X-N8N-API-KEY",
+        1
+      ],
+      [
+        "FIRECRAWL_API_KEY",
+        1
+      ],
+      [
+        "token",
+        1
+      ],
+      [
+        "DISCORD_BOT_TOKEN",
+        1
+      ],
+      [
+        "ANTHROPIC_API_KEY",
+        1
+      ],
+      [
+        "N8N_API_KEY",
+        1
+      ],
+      [
+        "TUNNEL_TOKEN",
+        1
+      ]
+    ]
+  }
+}

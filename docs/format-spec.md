@@ -156,9 +156,33 @@ The format is a contract — tests assert its sections; keep them in sync when
 changing it. Every value is masked (head/tail 2+2 via `_mask_value`) or `***`;
 raw values never reach the terminal.
 
-The scan builds ONE in-memory assessment object (facts only, no prose); the
-report is its render. v0.3.0 serializes the same object as JSON and diffs it
-(`watch`) — the text report is never a second implementation.
+The scan builds ONE in-memory assessment object (facts only, no prose);
+the report is its render. The object is the contract:
+`docs/assessment-schema.md` (schema `info-guard/assessment/v1`). The text
+report is never a second implementation.
+
+### `--json` / `--json-out` / `watch` (v0.3.0)
+
+- `preflight --json` serializes the SAME object to stdout — no chatter
+  (the object's `tool` block carries engine state). `--json-out FILE`
+  writes it atomically (temp + fsync + rename, **0600**) and implies JSON
+  mode. Exit codes unchanged: 0 = clean, 1 = findings, 2 = usage error.
+- `preflight watch` re-runs the scan and diffs the credential-shaped
+  DISTINCT-VALUE set (sha256 of each value) against
+  `<state>/info-guard/watch-baseline.json` (schema
+  `info-guard/watch-baseline/v1`, 0600, **value sha256 only — raw values
+  never persisted**). First run (or `--reset`) creates the baseline,
+  exit 0. Later runs: no new values → one-line status, exit 0; new values
+  → masked NEW VALUES block (2+2 · type · family · count) + baseline
+  update, exit 1 — cron-friendly. On tool/gitleaks version change the
+  baseline is **union-kept** (known values never re-alert) with a notice;
+  a broken/unreadable baseline is rebuilt, never a crash.
+- The baseline lives under `<state>/info-guard/`, which is not in the
+  default scan set (`sessions`, `logs`, `cron/output`) — Info Guard never
+  scans its own artifacts. Passing explicit dirs that include it is the
+  caller's choice.
+- `scan.generated` is ISO-8601 UTC; the text renderer reformats for
+  display (renderer owns language).
 
 Report sections, in order (each printed only when its data is non-empty):
 
@@ -222,12 +246,15 @@ Report sections, in order (each printed only when its data is non-empty):
    DETECTION TELEMETRY** (key-name mention counts, explicitly NOT findings —
    forensic mode only). Source-masked rows stay count-only in both modes.
 
-Taxonomy — a partition, stated in the report: every finding is classified
+Taxonomy — a partition, stated in the report: every raw hit is classified
 into exactly one of **credential-shaped** (token-format values + gitleaks
 HIGH-CONFIDENCE — the actionable set), **key-name mention** (includes
 reference/noise rows; a future tier may split them), or **already-masked**
-(the prevention layer working). `findings = credential_shaped +
-key_name_mentions + already_masked`, exactly.
+(the prevention layer working). `findings = raw_detections +
+key_name_mentions + already_masked`, exactly — the partition holds over
+RAW hits. `credential_shaped` is the deduplicated row count of the
+credential-shaped class (≤ `raw_detections`); the headline, family,
+location and affected-file tables all sum to it.
 
 The candidate unit is the unique **`file:line:value` row**: when several
 detectors flag the same value on the same line (key-shape + token-prefix +

@@ -6,6 +6,49 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-08-19
+
+### Added
+- **`preflight --json`** — the assessment object (schema
+  `info-guard/assessment/v1`, documented in `docs/assessment-schema.md`)
+  printed to stdout: pure JSON, no chatter (the object's `tool` block
+  carries engine state), exit codes unchanged. The text report is its
+  render — one object, two surfaces, never a second implementation.
+  `preflight --json-out FILE` writes the same object atomically (temp +
+  fsync + rename, 0600) and implies JSON mode.
+- **`preflight watch`** — cron-friendly drift detection: re-runs the scan
+  and reports NEW credential-shaped values since a baseline
+  (`<state>/info-guard/watch-baseline.json`, schema
+  `info-guard/watch-baseline/v1`, **value sha256 only**, 0600). First run
+  (or `--reset`) creates the baseline; later runs exit 1 on new values
+  (masked 2+2 · type · family · count), 0 on no-new. The baseline is
+  **union-kept** across tool/gitleaks version changes (known values never
+  re-alert) with a printed notice; a broken baseline is rebuilt, never a
+  crash. The state dir is not in the default scan set — Info Guard never
+  scans its own artifacts.
+- **`examples/` demo report** — `preflight-demo.txt` + `preflight-demo.json`
+  generated from a synthetic 4-file fixture (10 candidate rows, 6 distinct
+  values, shared-value daggers, protected families); regenerate with
+  `examples/gen-demo.sh` (fixture values are synthetic and
+  runtime-constructed — no secrets in the committed examples).
+- `status.confirmed_active: null` — reserved for a future validation
+  step, so the field never drifts.
+- `scan.generated` is now ISO-8601 UTC; the text renderer reformats for
+  display (renderer owns language).
+
+### Changed
+- `families` in the assessment object is now the wrapper
+  `{total_with_values, complete, items}` (friend-review point: make
+  sampled/complete data explicit). Text report output is byte-identical.
+- format-spec: `--json`/`watch` contract section; the taxonomy partition
+  formula corrected for the v0.2.8 dedup semantics — `findings =
+  raw_detections + key_name_mentions + already_masked` holds over RAW
+  hits; `credential_shaped` is the deduplicated row count of that class.
+- Battery: 99 checks (was 72; +27: JSON validity/schema/chatter,
+  no-raw-value greps over JSON output and the watch baseline, totals
+  reconciliation, JSON↔text number parity, watch lifecycle
+  first-run/no-new/new-value/`--reset`/version-union).
+
 ## [v0.2.8] - 2026-08-19
 
 ### Changed
