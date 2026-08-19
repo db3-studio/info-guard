@@ -273,6 +273,13 @@ def _mask_value(v: str) -> str:
     return v[:2] + "..." + v[-2:]
 
 
+def _n(x) -> str:
+    """Thousands separator for every printed count (contract: numbers
+    carry separators). The assessment object keeps raw ints — facts;
+    only the render formats them."""
+    return f"{x:,}"
+
+
 # Token-shaped value forms the report treats as "looks like a real secret"
 # (highest-signal tier). Superset of _TOKEN_PREFIX_RE: adds JWT (eyJ),
 # Discord bot tokens (MTQ), Firecrawl (fc-), and hash-like shapes — the
@@ -815,9 +822,9 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
             st, note = "exposed", "value-shaped material remains at rest"
         elif e["value"] > 0:
             st = "mixed"
-            note = f"{e['value']} value-shaped · {e['masked']} masked occurrences"
+            note = f"{_n(e['value'])} value-shaped · {_n(e['masked'])} masked occurrences"
         else:
-            st, note = "protected", f"{e['masked']} occurrences already masked in the source"
+            st, note = "protected", f"{_n(e['masked'])} occurrences already masked in the source"
         redaction.append({"scope_type": "family", "scope": f, "status": st, "note": note})
     for area, e in loc_items:
         if e["masked"] == 0:
@@ -826,7 +833,7 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
         st = "mostly_masked" if e["masked"] >= total / 2 else "mixed"
         scope = "logs/agent.log" if area == "logs" else area
         redaction.append({"scope_type": "area", "scope": scope, "status": st,
-                          "note": f"{e['masked']} of {total} occurrences already masked in place"})
+                          "note": f"{_n(e['masked'])} of {_n(total)} occurrences already masked in place"})
 
     # the proof list: distinct credential-shaped values, 2+2 masked,
     # family-attributed when determinable (reviewer: never forced)
@@ -856,8 +863,8 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
         "status": {
             "severity": "high" if n_action else "none",
             "action_required": n_action > 0,
-            "summary": (f"{n_action} credential-shaped value{'s' if n_action != 1 else ''} "
-                        "found at rest. They are candidates, not confirmed leaks."
+            "summary": ("Credential-shaped values were found at rest. They are "
+                        "candidates, not confirmed leaks."
                         if n_action else
                         "No credential-shaped values found at rest."),
             "credential_shaped": n_action,
@@ -874,7 +881,7 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
         "affected_files": affected_files,
         "recommendations": [
             {"priority": "high", "step": 1, "title": "Rotate active candidates",
-             "detail": (f"Check the {n_action} credential-shaped values; rotate any "
+             "detail": (f"Check the {_n(n_action)} credential-shaped values; rotate any "
                         "still in use. At-rest copies stay in these files either way "
                         "(masking never rewrites files); values already superseded: "
                         "ignore.")},
@@ -905,9 +912,9 @@ def _print_clean(a):
     print()
     print("EXECUTIVE SUMMARY")
     print("  🟢 0         credential-shaped candidates")
-    print(f"  🟠 {t['findings']:<8} finding{'s' if t['findings'] != 1 else ''} — key-name mentions and already-masked only")
-    print(f"  🟠 {nf:<8} file{'s' if nf != 1 else ''} scanned")
-    print(f"  🛡️ {nm:<8} occurrence{'s' if nm != 1 else ''} already masked (prevention layer working)")
+    print(f"  🟠 {_n(t['findings']):<8} finding{'s' if t['findings'] != 1 else ''} — key-name mentions and already-masked only")
+    print(f"  🟠 {_n(nf):<8} file{'s' if nf != 1 else ''} scanned")
+    print(f"  🛡️ {_n(nm):<8} occurrence{'s' if nm != 1 else ''} already masked (prevention layer working)")
     print()
     print("  WHAT THIS MEANS")
     print("  No detected credential-shaped values AT REST in the scanned dirs — a")
@@ -934,7 +941,7 @@ def _render_assessment(a, all_hits, full):
     nf = a["scan"]["files_scanned"]
     print(f"Info Guard v{_PACKAGE_VERSION} — Preflight Security Assessment")
     print(f"Read-only scan of Hermes home · values masked · generated {a['scan']['generated']}")
-    print(f"SCOPE: {' · '.join(a['scan']['dirs'])} — {nf} file{'s' if nf != 1 else ''}")
+    print(f"SCOPE: {' · '.join(a['scan']['dirs'])} — {_n(nf)} file{'s' if nf != 1 else ''}")
     print()
     if not t["credential_shaped"]:
         return _print_clean(a)
@@ -949,30 +956,32 @@ def _render_assessment(a, all_hits, full):
     print("EXECUTIVE SUMMARY")
     nf = a["scan"]["files_scanned"]
     nm = t["already_masked"]
-    print(f"  🔴 {t['credential_shaped']:<8} credential-shaped candidates (values that look like real secrets)")
-    split = (f"  {'':10}{t['family_attributed']} family-attributed · "
-             f"{t['unattributed']} unattributed (generic token shapes)")
+    print(f"  🔴 {_n(t['credential_shaped']):<8} credential-shaped candidates (values that look like real secrets)")
+    split = (f"  {'':10}{_n(t['family_attributed'])} family-attributed · "
+             f"{_n(t['unattributed'])} unattributed (generic token shapes)")
     if t["family_attributed"] + t["unattributed"] != t["credential_shaped"]:
-        split += f" — {t['credential_shaped']} candidate rows total"
+        distinct = t["family_attributed"] + t["unattributed"]
+        split += (f" — {_n(distinct)} distinct rows, "
+                  f"{_n(t['credential_shaped'])} with duplicates")
     print(split)
-    print(f"  🟠 {nf:<8} file{'s' if nf != 1 else ''} scanned")
+    print(f"  🟠 {_n(nf):<8} file{'s' if nf != 1 else ''} scanned")
     fams_w = sum(1 for f in a["families"] if f["value"] > 0)
-    print(f"  🔑 {fams_w:<8} families with value-shaped material")
-    print(f"  🛡️ {nm:<8} occurrence{'s' if nm != 1 else ''} already masked (prevention layer working)")
+    print(f"  🔑 {_n(fams_w):<8} families with value-shaped material")
+    print(f"  🛡️ {_n(nm):<8} occurrence{'s' if nm != 1 else ''} already masked (prevention layer working)")
     print()
     print("  WHAT MATTERS")
     types = sorted({v["type"] for v in a["top_values"]})
     tsum = ", ".join(types[:4])
     if len(types) > 4:
-        tsum += " and other token shapes"
+        tsum += "…"
     if not tsum:
         tsum = "token-shaped"
-    print(f"  • The {t['credential_shaped']} candidates are {tsum} values; only you can")
-    print("    confirm which are live (see CREDENTIAL EXPOSURE BY FAMILY).")
+    print(f"  • The {_n(t['credential_shaped'])} candidates are token-shaped values ({tsum}); only you")
+    print("    can confirm which are live (see CREDENTIAL EXPOSURE BY FAMILY).")
     sess = next((l for l in a["locations"] if l["area"] == "sessions"), None)
     tot = sum(l["credential_shaped"] for l in a["locations"])
     if sess and tot and sess["credential_shaped"] >= tot / 2:
-        print(f"  • {sess['credential_shaped']} of {tot} candidates sit in historical")
+        print(f"  • {_n(sess['credential_shaped'])} of {_n(tot)} distinct candidates sit in historical")
         print("    session transcripts — consistent with retained historical exposure")
         print("    (see EXPOSURE LOCATIONS).")
     if t["already_masked"]:
@@ -991,7 +1000,7 @@ def _render_assessment(a, all_hits, full):
             continue
         ev = (" · ".join(r["types"]) or "token-shaped") + " value"
         prio = "🔴 High" if r["priority"] == "high" else "🟢 Protected"
-        print(f"  {r['family'][:32]:<34} {r['value']:>4}  {ev:<26} {prio}")
+        print(f"  {r['family'][:32]:<34} {_n(r['value']):>4}  {ev:<26} {prio}")
     prot = [r for r in a["families"] if r["value"] == 0 and r["masked"] > 0]
     for r in prot[:10]:
         print(f"  {r['family'][:32]:<34} {'—':>4}  {'mostly already masked':<26} 🟢 Protected")
@@ -1002,9 +1011,9 @@ def _render_assessment(a, all_hits, full):
     vals = a["top_values"]
     for v in vals[:15]:
         fam_s = (v["family"] or "—")[:24]
-        print(f"  {v['value_masked']:<16} {v['count']:>4}  {v['type']:<22} {fam_s}")
+        print(f"  {v['value_masked']:<16} {_n(v['count']):>4}  {v['type']:<22} {fam_s}")
     if len(vals) > 15:
-        print(f"  … (top 15 by count; `--full` lists all {len(vals)})")
+        print(f"  … (top 15 by count; `--full` lists all {_n(len(vals))})")
     print("  If a masked value matches a credential you currently use, rotate it.")
     print("  If it belongs to a credential that has already been superseded, no")
     print("  action is required.")
@@ -1016,7 +1025,7 @@ def _render_assessment(a, all_hits, full):
         if l["credential_shaped"] == 0:
             continue
         plural = "s" if l["credential_shaped"] != 1 else ""
-        print(f"  {l['area']:<10} {l['credential_shaped']:<5} credential-shaped candidate{plural}")
+        print(f"  {l['area']:<10} {_n(l['credential_shaped']):<5} credential-shaped candidate{plural}")
     print()
     pat = next((p for p in a["patterns"]
                 if p["type"] == "historical_concentration"), None)
@@ -1037,9 +1046,9 @@ def _render_assessment(a, all_hits, full):
     print()
     print("  SHOW AFFECTED FILES (top 10)")
     for f in a["affected_files"][:10]:
-        extra = (f"  ({f['credential_shaped']} credential-shaped)"
+        extra = (f"  ({_n(f['credential_shaped'])} credential-shaped)"
                  if f["credential_shaped"] else "")
-        print(f"  {f['file'][:56]:<58} × {f['total_findings']}{extra}")
+        print(f"  {f['file'][:56]:<58} × {_n(f['total_findings'])}{extra}")
     print()
 
     # ── REDACTION EFFECTIVENESS ────────────────────────────────────────
@@ -1067,7 +1076,7 @@ def _render_assessment(a, all_hits, full):
                    if r["family"] != "bare-token" else
                    f"{ev} with no key context")
         plural = "s" if r["value"] != 1 else ""
-        print(f"  {r['family']} · {r['value']} candidate{plural}")
+        print(f"  {r['family']} · {_n(r['value'])} candidate{plural}")
         print(f"    Why flagged: {flagged}")
         print(f"    Where:       {where}")
         print("    Status:      ⚠️ candidate — active status unknown")
@@ -1088,7 +1097,7 @@ def _render_assessment(a, all_hits, full):
     # ── APPENDIX A — telemetry (demoted, NOT findings) ─────────────────
     print("APPENDIX A — DETECTION TELEMETRY (key-name mentions — NOT findings)")
     for key, n in a["appendix"]["telemetry"][:15]:
-        print(f"  {key[:32]:<34} × {n}")
+        print(f"  {key[:32]:<34} × {_n(n)}")
     if len(a["appendix"]["telemetry"]) > 15:
         print("  …")
     print()
