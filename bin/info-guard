@@ -69,7 +69,7 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.2.7"
+_PACKAGE_VERSION = "0.2.8"
 
 VALID_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -364,6 +364,23 @@ def _family_of(rule: str) -> str:
     if rule == "known-prefix":
         return "bare-token"
     return rule
+
+
+_GENERIC_KEY_RE = re.compile(
+    r"^(?:api[ _.\-]?key|token|secret|passwd|password|credential|auth|pass|pw|pin)$",
+    re.IGNORECASE)
+
+
+def _family_label(f: str) -> str:
+    """Human-facing family name. A family that IS a generic key word (the
+    literal env var name `token`) renders quoted so it never reads as a
+    credential class; the synthetic bare-token family renders as
+    '(no key context)'. Data/JSON family names stay unchanged."""
+    if f == "bare-token":
+        return "(no key context)"
+    if f and _GENERIC_KEY_RE.match(f):
+        return f'"{f}"'
+    return f
 
 
 def _known_env_keys() -> set:
@@ -732,6 +749,7 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
             else:
                 n_key += 1
     n_action = n_tok + n_gl
+    n_rows = 0  # unique (file, line, value) candidate rows — the canonical count
 
     # Per-family / per-area / per-file tallies + the distinct-value proof
     # list. Real-value rows are deduped by (file, line, value) signature;
@@ -750,19 +768,15 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
         fe["mentions"] += 1
         fl = files.setdefault(rel, {"total": 0, "value": 0, "key": 0, "masked": 0})
         fl["total"] += 1
-        vc = _value_class(value)
-        is_real = cls == "HIGH-CONFIDENCE" or vc == "token-format"
-        if is_real:
-            fl["value"] += 1
-        elif vc == "already-masked":
-            fl["masked"] += 1
-        else:
-            fl["key"] += 1
         sig = (rel, line, value)
         if sig in sig_seen:
             continue
         sig_seen.add(sig)
+        vc = _value_class(value)
+        is_real = cls == "HIGH-CONFIDENCE" or vc == "token-format"
         if is_real:
+            n_rows += 1
+            fl["value"] += 1
             fe["value"] += 1
             t = _value_type(value)
             if t not in fe["types"]:
@@ -781,8 +795,11 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
             ve["count"] += 1
             ve["fams"][f] += 1
         elif vc == "already-masked":
+            fl["masked"] += 1
             fe["masked"] += 1
             le["masked"] += 1
+        else:
+            fl["key"] += 1
         if fe["first"] is None:
             fe["first"] = h
         if fe["display"] is None and _displayable_value(value):
@@ -808,6 +825,13 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
         if disp:
             example = {"value_masked": _mask_value(disp[4]),
                        "file": disp[2], "line": disp[3]}
+        shared = []
+        if disp is not None:
+            fams_of = vals.get(disp[4])
+            if fams_of:
+                cfams = fams_of["fams"]
+                shared = sorted((g for g in cfams if g != f),
+                                key=lambda g: (-cfams[g], g))
         if e["value"] > 0 and e["masked"] == 0:
             status = "exposed"
         elif e["value"] > 0:
@@ -823,6 +847,8 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
             "areas": dict(e["areas"]), "dates": sorted(e["dates"]),
             "example": example,
         })
+        if shared:
+            families[-1]["shared_with"] = shared
 
     # locations: credential-shaped candidates bucketed by area
     loc_items = sorted(loc.items(), key=lambda x: -x[1]["value"])
@@ -901,7 +927,8 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
         known = [f for f in fam_c if f != "bare-token"]
         fam_n = max(known, key=lambda f: fam_c[f]) if known else None
         top_values.append({"value_masked": _mask_value(v), "type": e["type"],
-                           "family": fam_n, "count": e["count"]})
+                           "family": fam_n, "count": e["count"],
+                           "families": sorted(e["fams"])})
     top_values.sort(key=lambda x: -x["count"])
 
     affected_files = [
@@ -926,15 +953,16 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
                  "files_scanned": files_scanned, "read_only": True,
                  "gitleaks_ok": gitleaks_ok},
         "status": {
-            "severity": "high" if n_action else "none",
-            "action_required": n_action > 0,
+            "severity": "high" if n_rows else "none",
+            "action_required": n_rows > 0,
             "summary": ("Credential-shaped values were found at rest. They are "
                         "candidates, not confirmed leaks."
-                        if n_action else
+                        if n_rows else
                         "No credential-shaped values found at rest."),
-            "credential_shaped": n_action,
+            "credential_shaped": n_rows,
         },
-        "totals": {"findings": len(all_hits), "credential_shaped": n_action,
+        "totals": {"findings": len(all_hits), "credential_shaped": n_rows,
+                   "raw_detections": n_action, "distinct_values": len(vals),
                    "family_attributed": fam_attr, "unattributed": unattr,
                    "key_name_mentions": n_key, "already_masked": n_mask,
                    "partition": True},
@@ -946,10 +974,11 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
         "affected_files": affected_files,
         "recommendations": [
             {"priority": "high", "step": 1, "title": "Rotate active candidates",
-             "detail": (f"Check the {_n(n_action)} credential-shaped values; rotate any "
-                        "still in use. At-rest copies stay in these files either way "
-                        "(masking never rewrites files); values already superseded: "
-                        "ignore.")},
+             "detail": (f"Check the {_n(len(vals))} distinct credential-shaped "
+                        "values (see DISTINCT VALUES); rotate any still in use. "
+                        "At-rest copies stay in these files either way "
+                        "(masking never rewrites files); values already "
+                        "superseded: ignore.")},
             {"priority": "medium", "step": 2, "title": "Choose prevention",
              "detail": ("Install Info Guard to mask future occurrences, or accept "
                         "recurrence and re-scan periodically. Install does NOT clean "
@@ -1030,13 +1059,18 @@ def _render_assessment(a, all_hits, full):
     nf = a["scan"]["files_scanned"]
     nm = t["already_masked"]
     print(f"  🔴 {_n(t['credential_shaped']):<8} credential-shaped candidates (values that look like real secrets)")
-    split = (f"  {'':10}{_n(t['family_attributed'])} family-attributed · "
-             f"{_n(t['unattributed'])} unattributed (generic token shapes)")
-    if t["family_attributed"] + t["unattributed"] != t["credential_shaped"]:
-        distinct = t["family_attributed"] + t["unattributed"]
-        split += (f" — {_n(distinct)} distinct rows, "
-                  f"{_n(t['credential_shaped'])} with duplicates")
-    print(split)
+    parts = [f"{_n(t['family_attributed'])} family-attributed"]
+    if t["unattributed"]:
+        parts.append(f"{_n(t['unattributed'])} unattributed (generic token shapes)")
+    else:
+        parts.append("0 unattributed")
+    parts.append(f"{_n(t['distinct_values'])} distinct values")
+    raw_parts = [f"{_n(t['raw_detections'])} raw detections"]
+    dups = t["raw_detections"] - t["credential_shaped"]
+    if dups:
+        raw_parts.append(f"{_n(dups)} duplicate detector hits collapsed")
+    parts.append(" · ".join(raw_parts))
+    print(f"  {'':10}" + " · ".join(parts))
     print(f"  🟠 {_n(nf):<8} file{'s' if nf != 1 else ''} scanned")
     fams_w = sum(1 for f in a["families"] if f["value"] > 0)
     print(f"  🔑 {_n(fams_w):<8} families with value-shaped material")
@@ -1054,7 +1088,7 @@ def _render_assessment(a, all_hits, full):
     sess = next((l for l in a["locations"] if l["area"] == "sessions"), None)
     tot = sum(l["credential_shaped"] for l in a["locations"])
     if sess and tot and sess["credential_shaped"] >= tot / 2:
-        print(f"  • {_n(sess['credential_shaped'])} of {_n(tot)} distinct candidates sit in historical")
+        print(f"  • {_n(sess['credential_shaped'])} of {_n(tot)} candidates sit in historical")
         print("    session transcripts — consistent with retained historical exposure")
         print("    (see EXPOSURE LOCATIONS).")
     if t["already_masked"]:
@@ -1094,19 +1128,38 @@ def _render_assessment(a, all_hits, full):
             n_more = r.get("distinct_values", 1) - 1
             if n_more > 0:
                 val += f" ({_n(n_more)} more)"
+            if r.get("shared_with"):
+                val += "†"
         else:
             qty = f"{_n(r['masked'])} masked"
             val = "—"
-        print(f"  {r['family'][:32]:<34} {typ[:22]:<24} {qty:>8}  {val:<18} "
+        print(f"  {_family_label(r['family'])[:32]:<34} {typ[:22]:<24} {qty:>8}  {val:<18} "
               f"{st_icon.get(r['status'], r['status'])}")
     if n_prot > 10:
         print(f"  …showing top 10 of {_n(n_prot)} protected families "
               "(`--full` lists every row)")
     print()
+    foot = [(r["family"], r.get("shared_with")) for r in fams_sorted
+            if r.get("shared_with") and r["value"] > 0]
+    for fam, others in foot:
+        print(f"  † {_family_label(fam)} — same value also under: "
+              f"{', '.join(_family_label(g) for g in others)}")
+    if foot:
+        print()
+    print("  DISTINCT VALUES — THE ROTATE LIST")
+    tv = a["top_values"]
+    for v in tv[:15]:
+        fam_l = _family_label(v["family"]) if v["family"] else "(no key context)"
+        print(f"  {v['value_masked']:<18} {v['type'][:22]:<24} "
+              f"{_n(v['count']):>6}  {fam_l}")
+    if len(tv) > 15:
+        print(f"  …showing top 15 of {_n(len(tv))} distinct values "
+              "(`--full` lists every value)")
+    print()
     print("  If a masked value matches a credential you currently use, rotate it.")
     print("  If it belongs to a credential that has already been superseded, no")
     print("  action is required. Values are masked 2+2 — the full value exists")
-    print("  only in the scanned file. `--full` lists every distinct value.")
+    print("  only in the scanned file. `--full` lists every candidate row.")
     print()
 
     # ── EXPOSURE LOCATIONS (candidates + masked counts + area status) ──
@@ -1145,9 +1198,14 @@ def _render_assessment(a, all_hits, full):
     print()
     print("  SHOW AFFECTED FILES (top 10)")
     for f in a["affected_files"][:10]:
-        extra = (f"  ({_n(f['credential_shaped'])} credential-shaped)"
-                 if f["credential_shaped"] else "")
-        print(f"  {f['file'][:56]:<58} × {_n(f['total_findings'])}{extra}")
+        cand = f["credential_shaped"]
+        find_plural = "s" if f["total_findings"] != 1 else ""
+        if cand:
+            cand_plural = "s" if cand != 1 else ""
+            print(f"  {f['file'][:56]:<58} {_n(f['total_findings'])} finding{find_plural} "
+                  f"({_n(cand)} candidate{cand_plural})")
+        else:
+            print(f"  {f['file'][:56]:<58} {_n(f['total_findings'])} finding{find_plural}")
     print()
 
     # ── RECOMMENDED ACTIONS ────────────────────────────────────────────
@@ -1180,7 +1238,8 @@ def _render_assessment(a, all_hits, full):
         # APPENDIX A — the complete ledger (the main report's appendix);
         # APPENDIX B — telemetry (forensic mode only: mentions are NOT
         # findings).
-        print(f"APPENDIX A — FINDING LEDGER (complete — {_n(len(deduped))} unique candidates)")
+        print(f"APPENDIX A — FINDING LEDGER (complete — {_n(len(deduped))} detections · "
+              f"{_n(t['credential_shaped'])} unique candidate rows)")
         print("  Values are masked: you see the first and last 2 characters")
         print("  only. The full value exists only in the scanned file — it")
         print("  never leaves the machine.")

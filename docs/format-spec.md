@@ -171,13 +171,16 @@ Report sections, in order (each printed only when its data is non-empty):
 2. **STATUS** — 🔴 ACTION REQUIRED + one-line summary (candidates, not
    confirmed leaks) / 🟢 CLEAN + what it means. "No changes were made by this
    scan" is prominent here.
-3. **EXECUTIVE SUMMARY** — metric cards: credential-shaped candidates with
-   the **family-attributed · unattributed split** (the family table's sum
-   always reconciles; a note appears when duplicated rows make the split
-   differ from the candidate-row total), files scanned, families with
-   value-shaped material, already-masked occurrences. Plus WHAT MATTERS:
-   2–3 bullets generated from the assessment (value shapes, location
-   concentration, redaction working).
+3. **EXECUTIVE SUMMARY** — metric cards: **credential-shaped candidates**
+   (the canonical count: one per unique `file:line:value` row — the family,
+   location and affected-file tables all sum to it exactly), with the
+   **family-attributed · unattributed split**, **distinct values** (the
+   rotate list), and **raw detections** (detector fires before dedup; a
+   "N duplicate detector hits collapsed" note appears when they exceed the
+   candidate count). Plus files scanned, families with value-shaped
+   material, already-masked occurrences. And WHAT MATTERS: 2–3 bullets
+   generated from the assessment (value shapes, location concentration,
+   redaction working).
 4. **CREDENTIAL EXPOSURE BY FAMILY** — the merged master table (owner
    refinement 2026-08-19): one row per family with **Family · Type · Qty ·
    Value (masked 2+2) · Status** (🔴 Exposed / 🟡 Mixed / 🟢 Protected
@@ -186,7 +189,16 @@ Report sections, in order (each printed only when its data is non-empty):
    families); Value = the top distinct value in 2+2 masked form ("+N more"
    when the family has further distinct values; `--full` lists every
    distinct value). Protected-only families are capped at 10 with a
-   "showing top N of M" line.
+   "showing top N of M" line. Rows whose masked value also appears under
+   another family carry a dagger (†) with a footnote naming the other
+   families — one credential caught under multiple key names (e.g. header
+   vs env var). Below the table, **DISTINCT VALUES — THE ROTATE LIST**
+   lists every distinct value once (mask 2+2 · type · occurrence count ·
+   dominant family; top 15, `--full` for all) — the checklist behind
+   RECOMMENDED ACTIONS #1. Literal generic key names render quoted
+   (`"token"`) so they never read as credential classes; the synthetic
+   prefix-only family renders as `(no key context)`. Data/JSON family
+   names are unchanged.
 5. **EXPOSURE LOCATIONS** — per area (sessions / logs / cron / state /
    other): **credential-shaped candidate counts + masked counts + area
    status** (🔴 Exposed / 🟡 Mixed / 🟢 Mostly masked / 🟢 Protected —
@@ -194,8 +206,10 @@ Report sections, in order (each printed only when its data is non-empty):
    Protected, ≥ half → Mostly masked, some → Mixed, none → Exposed), a
    qualified Pattern observation ("consistent with retained historical
    exposure rather than a current logging failure" — never a definitive
-   claim), and SHOW AFFECTED FILES (top 10, with credential-shaped breakdown
-   when > 0).
+   claim), and SHOW AFFECTED FILES (top 10: "N findings (M candidates)" —
+   findings include duplicate detector fires and mentions; the candidate
+   column is the deduplicated file:line:value count and sums to the
+   headline exactly).
 6. **RECOMMENDED ACTIONS** — 4 numbered steps (rotate active candidates →
    choose prevention → clean historical exposure → verify) + the explicit
    tier-partition statement + no-routine-re-run note.
@@ -214,6 +228,12 @@ HIGH-CONFIDENCE — the actionable set), **key-name mention** (includes
 reference/noise rows; a future tier may split them), or **already-masked**
 (the prevention layer working). `findings = credential_shaped +
 key_name_mentions + already_masked`, exactly.
+
+The candidate unit is the unique **`file:line:value` row**: when several
+detectors flag the same value on the same line (key-shape + token-prefix +
+gitleaks can all fire), the row counts once. `totals.raw_detections` keeps
+the raw detector-fire count and `totals.distinct_values` the value-level
+count — the summary line states all three so every table's sum reconciles.
 
 Date discipline: historical date ranges come from **session filename
 timestamps** (`session_YYYYMMDD…`), never filesystem mtime.

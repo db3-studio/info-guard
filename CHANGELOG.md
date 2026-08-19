@@ -6,6 +6,34 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [v0.2.8] - 2026-08-19
+
+### Changed
+- External review wave 2 (3 points — the friend's review of the
+  v0.2.4–v0.2.7 demo report); all three confirmed against the demo fixture
+  and fixed:
+  1. **One counting semantics everywhere.** "Credential-shaped candidate"
+     is now defined as one unique `file:line:value` row; the headline,
+     family, location and affected-file tables all reconcile to it exactly
+     (demo: 10 everywhere — was 16 vs 10). New totals fields:
+     `raw_detections` (detector fires before dedup) and `distinct_values`
+     (the rotate list); the EXECUTIVE SUMMARY states all three and names
+     the collapsed duplicate hits. Affected-file rows now read
+     "N findings (M candidates)".
+  2. **Same-value visibility.** Family-table rows whose masked value also
+     appears under another family carry a dagger (†) with a footnote
+     naming the other families (one credential caught under multiple key
+     names — e.g. an API key as both header and env var). A
+     **DISTINCT VALUES — THE ROTATE LIST** block in the main report lists
+     each distinct value once (mask 2+2 · type · count · dominant family);
+     RECOMMENDED ACTIONS #1 now references the distinct-value count.
+  3. **Family naming.** Literal generic key names render quoted
+     (`"token"` — the key is literally named token, not a credential
+     class); the synthetic prefix-only family renders as
+     `(no key context)`. Data/JSON family names are unchanged.
+- Battery: 72 checks (was 70; +2 reconciliation checks; the locations
+  status check pinned to the area-status contract it already rendered).
+
 ## [v0.2.4] - 2026-08-19
 
 ### Changed
@@ -94,7 +122,8 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 - Test battery (`test.sh`) and CI matrix covering supported Hermes versions.
 - Docs: format spec, examples.
 
-[Unreleased]: https://github.com/db3-studio/info-guard/compare/v0.2.7...HEAD
+[Unreleased]: https://github.com/db3-studio/info-guard/compare/v0.2.8...HEAD
+[v0.2.8]: https://github.com/db3-studio/info-guard/compare/v0.2.7...v0.2.8
 [v0.2.7]: https://github.com/db3-studio/info-guard/compare/v0.2.6...v0.2.7
 [v0.2.6]: https://github.com/db3-studio/info-guard/compare/v0.2.5...v0.2.6
 [v0.2.5]: https://github.com/db3-studio/info-guard/compare/v0.2.4...v0.2.5

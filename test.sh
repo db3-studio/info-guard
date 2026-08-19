@@ -383,7 +383,7 @@ pf = subprocess.run(
 pfo = pf.stdout + pf.stderr
 check("preflight: findings exit code 1", pf.returncode == 1,
       f"rc={pf.returncode} out={pfo[-300:]!r}")
-for section in ("Info Guard v0.2.7 — Preflight Security Assessment",
+for section in ("Info Guard v0.2.8 — Preflight Security Assessment",
                 "STATUS", "EXECUTIVE SUMMARY", "WHAT MATTERS",
                 "CREDENTIAL EXPOSURE BY FAMILY",
                 "EXPOSURE LOCATIONS",
@@ -410,9 +410,16 @@ check("preflight: merged table shows protected family",
 check("preflight: table heading present", "Family" in pfo
       and "Value (masked 2+2)" in pfo)
 check("preflight: locations carry masked counts + status",
-      "· 1 masked" in pfo and "Mixed" in pfo)
+      "· 1 masked" in pfo and "Mostly masked" in pfo,
+      "expected masked count + area status in EXPOSURE LOCATIONS")
 check("preflight: attribution split reconciles",
       "family-attributed" in pfo and "unattributed" in pfo)
+check("preflight: summary reconciles candidates · distinct values · raw detections",
+      "distinct values" in pfo and "raw detections" in pfo,
+      "expected the three-way reconciliation line")
+check("preflight: DISTINCT VALUES rotate list present",
+      "DISTINCT VALUES — THE ROTATE LIST" in pfo,
+      "expected the distinct-values rotate list in the main report")
 check("preflight: tier partition stated explicitly",
       "mutually exclusive" in pfo)
 check("preflight: session-timestamp date discipline",
@@ -473,7 +480,7 @@ ver = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
     capture_output=True, text=True, timeout=60)
 check("--version prints the package version",
-      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.2.7",
+      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.2.8",
       f"rc={ver.returncode} out={ver.stdout.strip()!r}")
 
 
