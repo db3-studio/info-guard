@@ -189,21 +189,24 @@ Report sections, in order (each printed only when its data is non-empty):
    "showing top N of M" line.
 5. **EXPOSURE LOCATIONS** — per area (sessions / logs / cron / state /
    other): **credential-shaped candidate counts + masked counts + area
-   status** (🔴 Exposed / 🟡 Mixed / 🟢 Mostly masked — masked ≥ half of all
-   occurrences), a qualified Pattern observation ("consistent with retained
-   historical exposure rather than a current logging failure" — never a
-   definitive claim), and SHOW AFFECTED FILES (top 10, with credential-shaped
-   breakdown when > 0).
+   status** (🔴 Exposed / 🟡 Mixed / 🟢 Mostly masked / 🟢 Protected —
+   masked is the share of the area's *candidates* already redacted: all →
+   Protected, ≥ half → Mostly masked, some → Mixed, none → Exposed), a
+   qualified Pattern observation ("consistent with retained historical
+   exposure rather than a current logging failure" — never a definitive
+   claim), and SHOW AFFECTED FILES (top 10, with credential-shaped breakdown
+   when > 0).
 6. **RECOMMENDED ACTIONS** — 4 numbered steps (rotate active candidates →
    choose prevention → clean historical exposure → verify) + the explicit
    tier-partition statement + no-routine-re-run note.
-7. **APPENDIX A — FINDING LEDGER** — in the main report: a sample (one
-   example per family, ranked by signal; junk-display rows count-only;
-   `— your .env key` labels; rows show file:line + the 2+2 masked value only —
-   no context line). With `--full`: the complete deduplicated ledger (same
-   masking, no cap) followed by **APPENDIX B — DETECTION TELEMETRY**
-   (key-name mention counts, explicitly NOT findings — forensic mode only).
-   Source-masked rows stay count-only in both modes.
+7. **APPENDIX A — FINDING LEDGER** — in the main report: the sample mode,
+   with the "(sample — one per family; …)" hint as a smaller subtitle under
+   the title (one example per family, ranked by signal; junk-display rows
+   count-only; `— your .env key` labels; rows show file:line + the 2+2
+   masked value only — no context line). With `--full`: the complete
+   deduplicated ledger (same masking, no cap) followed by **APPENDIX B —
+   DETECTION TELEMETRY** (key-name mention counts, explicitly NOT findings —
+   forensic mode only). Source-masked rows stay count-only in both modes.
 
 Taxonomy — a partition, stated in the report: every finding is classified
 into exactly one of **credential-shaped** (token-format values + gitleaks

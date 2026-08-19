@@ -69,7 +69,7 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.2.6"
+_PACKAGE_VERSION = "0.2.7"
 
 VALID_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -693,17 +693,18 @@ def _session_date(rel: str):
 
 
 def _area_status(value: int, masked: int):
-    """Redaction status for an AREA scope (locations rows): mostly_masked
-    when masked >= half of all occurrences, mixed otherwise, exposed when
-    nothing is masked. None when the area has no occurrences at all."""
-    total = value + masked
-    if total == 0:
-        return None
+    """Redaction status for an AREA scope (locations rows), under the
+    owner's reading of the display: masked is the share of the area's
+    candidates already redacted. protected = every candidate masked (or
+    no candidates at all), mostly_masked = at least half, mixed = some,
+    exposed = none."""
     if value == 0:
-        return "mostly_masked"
+        return "protected" if masked else None
     if masked == 0:
         return "exposed"
-    return "mostly_masked" if masked >= total / 2 else "mixed"
+    if masked >= value:
+        return "protected"
+    return "mostly_masked" if masked >= value / 2 else "mixed"
 
 
 def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
@@ -1111,7 +1112,8 @@ def _render_assessment(a, all_hits, full):
     # ── EXPOSURE LOCATIONS (candidates + masked counts + area status) ──
     print("EXPOSURE LOCATIONS")
     st_icon = {"exposed": "🔴 Exposed", "mixed": "🟡 Mixed",
-               "mostly_masked": "🟢 Mostly masked"}
+               "mostly_masked": "🟢 Mostly masked",
+               "protected": "🟢 Protected"}
     for l in a["locations"]:
         if l["credential_shaped"] == 0 and l.get("masked", 0) == 0:
             continue
@@ -1211,7 +1213,8 @@ def _render_assessment(a, all_hits, full):
                 fam_rows[fam][2] = h
             if _value_class(h[4]) == "token-format":
                 fam_rows[fam][3] = True
-        print("APPENDIX A — FINDING LEDGER (sample — one per family; `info-guard preflight --full` for the complete ledger)")
+        print("APPENDIX A — FINDING LEDGER")
+        print("  (sample — one per family; `info-guard preflight --full` for the complete ledger)")
         print("  Values are masked: you see the first and last 2 characters")
         print("  only. The full value exists only in the scanned file — it")
         print("  never leaves the machine. Values too short to mask partially")

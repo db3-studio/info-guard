@@ -56,6 +56,23 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
   properly; the EXECUTIVE SUMMARY cards get inline SVG icon badges (red/
   orange circles, key, shield) instead of plain dots.
 
+### Refinements (v0.2.7, same wave — third owner review)
+- **EXECUTIVE SUMMARY cards**: SVG pictograms reverted to distinct color
+  dots (the PDF font stack lacks emoji glyphs, so dots are the reliable
+  badge) — red / orange / blue / green per card.
+- **Table Status columns de-duplicated**: the small dots were redundant
+  with the card dots — status columns are text-only now.
+- **EXPOSURE LOCATIONS status semantics**: masked is the share of the
+  area's *candidates* already redacted — all masked → 🟢 Protected (was
+  "Mostly masked" even at 1 of 1), ≥ half → Mostly masked, some → Mixed,
+  none → Exposed.
+- **APPENDIX A title**: the "(sample — one per family; …)" hint moved to a
+  smaller subtitle under the title.
+- Fixed (styled PDF renderer): after the B→A renumbering, the ledger
+  section fell through to the raw `<pre>` renderer (its handler still
+  matched APPENDIX B) — the styled ledger cards are back; the ledger
+  handler now owns APPENDIX A and the telemetry handler owns APPENDIX B.
+
 ## [v0.2.3] - 2026-08-18
 
 ### Changed
@@ -77,7 +94,8 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 - Test battery (`test.sh`) and CI matrix covering supported Hermes versions.
 - Docs: format spec, examples.
 
-[Unreleased]: https://github.com/db3-studio/info-guard/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/db3-studio/info-guard/compare/v0.2.7...HEAD
+[v0.2.7]: https://github.com/db3-studio/info-guard/compare/v0.2.6...v0.2.7
 [v0.2.6]: https://github.com/db3-studio/info-guard/compare/v0.2.5...v0.2.6
 [v0.2.5]: https://github.com/db3-studio/info-guard/compare/v0.2.4...v0.2.5
 [v0.2.4]: https://github.com/db3-studio/info-guard/compare/v0.2.3...v0.2.4

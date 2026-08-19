@@ -383,13 +383,15 @@ pf = subprocess.run(
 pfo = pf.stdout + pf.stderr
 check("preflight: findings exit code 1", pf.returncode == 1,
       f"rc={pf.returncode} out={pfo[-300:]!r}")
-for section in ("Info Guard v0.2.6 — Preflight Security Assessment",
+for section in ("Info Guard v0.2.7 — Preflight Security Assessment",
                 "STATUS", "EXECUTIVE SUMMARY", "WHAT MATTERS",
                 "CREDENTIAL EXPOSURE BY FAMILY",
                 "EXPOSURE LOCATIONS",
                 "RECOMMENDED ACTIONS",
-                "APPENDIX A — FINDING LEDGER (sample"):
+                "APPENDIX A — FINDING LEDGER"):
     check(f"preflight: section '{section}' present", section in pfo)
+check("preflight: appendix subtitle under the title",
+      "(sample — one per family" in pfo)
 check("preflight: SCOPE line present", "SCOPE:" in pfo)
 check("preflight: engine line present (install state + version)",
       "Engine:" in pfo and "NOT INSTALLED" in pfo)
@@ -435,7 +437,8 @@ check("preflight --full: same finding exit code",
       f"rc={pff.returncode} (sampler rc={pf.returncode}) out={pffo[-200:]!r}")
 check("preflight --full: complete-ledger header, no sampler",
       "APPENDIX A — FINDING LEDGER (complete" in pffo
-      and "APPENDIX A — FINDING LEDGER (sample" not in pffo,
+      and "APPENDIX A — FINDING LEDGER" in pffo
+      and "(sample — one per family" not in pffo,
       "expected complete ledger header")
 check("preflight --full: telemetry appendix present (forensic mode)",
       "APPENDIX B — DETECTION TELEMETRY" in pffo,
@@ -470,7 +473,7 @@ ver = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
     capture_output=True, text=True, timeout=60)
 check("--version prints the package version",
-      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.2.6",
+      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.2.7",
       f"rc={ver.returncode} out={ver.stdout.strip()!r}")
 
 
