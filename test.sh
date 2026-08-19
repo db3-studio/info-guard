@@ -374,7 +374,7 @@ with open(os.path.join(pf_home, "sessions", "session_20260505_075138_d.jsonl"), 
     f.write(f"HASS_TOKEN={jwt}\n")
     f.write(f"DISCORD_BOT_TOKEN={dsc}\n")
     f.write("GOOGLE_API_KEY=your-actual-key-here\n")
-    f.write("Authorization: ***")
+    f.write("API_KEY: ***")
 env6 = dict(os.environ)
 env6["HERMES_HOME"] = pf_home
 pf = subprocess.run(
@@ -383,16 +383,16 @@ pf = subprocess.run(
 pfo = pf.stdout + pf.stderr
 check("preflight: findings exit code 1", pf.returncode == 1,
       f"rc={pf.returncode} out={pfo[-300:]!r}")
-for section in ("Info Guard v0.2.4 — Preflight Security Assessment",
+for section in ("Info Guard v0.2.5 — Preflight Security Assessment",
                 "STATUS", "EXECUTIVE SUMMARY", "WHAT MATTERS",
                 "CREDENTIAL EXPOSURE BY FAMILY",
-                "VALUES — MATCH AGAINST YOUR CURRENT CREDENTIALS",
-                "EXPOSURE LOCATIONS", "REDACTION EFFECTIVENESS",
+                "EXPOSURE LOCATIONS",
                 "WHY AM I SEEING THIS", "RECOMMENDED ACTIONS",
-                "APPENDIX A — DETECTION TELEMETRY",
                 "APPENDIX B — FINDING LEDGER (sample"):
     check(f"preflight: section '{section}' present", section in pfo)
 check("preflight: SCOPE line present", "SCOPE:" in pfo)
+check("preflight: engine line present (install state + version)",
+      "Engine:" in pfo and "NOT INSTALLED" in pfo)
 check("preflight: raw values never printed",
       jwt not in pfo and dsc not in pfo and "your-actual-key-here" not in pfo,
       "a raw synthetic value appeared in the report")
@@ -401,18 +401,26 @@ check("preflight: masked forms shown (the proof)",
       f"masked forms missing: {pfo[:400]!r}")
 check("preflight: credential-shaped tier counted",
       "credential-shaped candidates" in pfo)
-check("preflight: family table lists a family with priority",
-      "DISCORD_BOT_TOKEN" in pfo and "High" in pfo)
+check("preflight: merged family table lists a family with status",
+      "DISCORD_BOT_TOKEN" in pfo and "Exposed" in pfo)
+check("preflight: merged table shows protected family",
+      "Protected" in pfo)
+check("preflight: table heading present", "Family" in pfo
+      and "Value (masked 2+2)" in pfo)
+check("preflight: locations carry masked counts + status",
+      "· 1 masked" in pfo and "Mixed" in pfo)
 check("preflight: attribution split reconciles",
       "family-attributed" in pfo and "unattributed" in pfo)
 check("preflight: tier partition stated explicitly",
       "mutually exclusive" in pfo)
 check("preflight: session-timestamp date discipline",
       "from session timestamps" in pfo)
-check("preflight: key-name tier labeled NOT findings",
-      "NOT findings" in pfo)
-check("preflight: why-am-i-seeing-this action guidance",
-      "rotate if still in use" in pfo)
+check("preflight: key-name tier defined in the partition note",
+      "key-name" in pfo)
+check("preflight: why status = redaction status, caveat in action",
+      "active status unknown" in pfo and "candidate — active status unknown" not in pfo)
+check("preflight: appendix A absent from the main report",
+      "APPENDIX A" not in pfo)
 
 # 12a2. preflight --full: complete ledger replaces the sampler
 pff = subprocess.run(
@@ -427,6 +435,9 @@ check("preflight --full: complete-ledger header, no sampler",
       "APPENDIX B — FINDING LEDGER (complete" in pffo
       and "APPENDIX B — FINDING LEDGER (sample" not in pffo,
       "expected complete ledger header")
+check("preflight --full: telemetry appendix present (forensic mode)",
+      "APPENDIX A — DETECTION TELEMETRY" in pffo,
+      "expected telemetry appendix in --full")
 check("preflight --full: every family row listed, not one per family",
       pffo.count("value=") >= pfo.count("value="),
       "full ledger should carry at least as many rows as the sampler")
@@ -457,7 +468,7 @@ ver = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
     capture_output=True, text=True, timeout=60)
 check("--version prints the package version",
-      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.2.4",
+      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.2.5",
       f"rc={ver.returncode} out={ver.stdout.strip()!r}")
 
 

@@ -71,17 +71,18 @@ it's missing, preflight explains the benefit and offers to install it
 (`go install` or the GitHub release binary into `~/.local/bin`); non-tty
 runs get the command and continue with the key-shape pass only.
 
-The report (v0.2.4+) is a security assessment structured for humans and
-agents alike: header with version + timestamp and a **SCOPE** line, a one-line
-STATUS, an EXECUTIVE SUMMARY (metric cards incl. the family-attributed ·
-unattributed split), **CREDENTIAL EXPOSURE BY FAMILY** with the distinct
-masked-value proof list (`VALUES — MATCH AGAINST YOUR CURRENT CREDENTIALS`),
-EXPOSURE LOCATIONS with a qualified pattern observation, REDACTION
-EFFECTIVENESS, WHY AM I SEEING THIS, RECOMMENDED ACTIONS, and two appendices
-(detection telemetry + the deduplicated finding ledger with trimmed context;
-`--full` prints the complete ledger). Tiers are a partition — every finding
-is exactly one of credential-shaped / key-name mention / already-masked.
-Full format contract: `docs/format-spec.md`.
+The report (v0.2.5+) is a security assessment structured for humans and
+agents alike: header with version + timestamp, an **Engine** line (install
+state + installed version from the install manifest), and a **SCOPE** line;
+a one-line STATUS; an EXECUTIVE SUMMARY (metric cards incl. the
+family-attributed · unattributed split); **CREDENTIAL EXPOSURE BY FAMILY** —
+a single merged table (family, type, quantity, the 2+2 masked proof value,
+and an Exposed/Mixed/Protected status circle); EXPOSURE LOCATIONS with
+candidate + masked counts and area status; WHY AM I SEEING THIS;
+RECOMMENDED ACTIONS; and a finding-ledger appendix (sample; `--full` prints
+the complete ledger plus the detection telemetry). Tiers are a partition —
+every finding is exactly one of credential-shaped / key-name mention /
+already-masked. Full format contract: `docs/format-spec.md`.
 
 Already installed? Preflight detects it (engine marker + pattern file) and
 frames the run as a health check: findings are at-rest residue that masking

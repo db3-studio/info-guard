@@ -24,6 +24,24 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 - No charts (owner decision 08-19) — totals are the fact; a visual chart stays
   a renderer-only add later (the assessment object carries the counts).
 
+### Refinements (v0.2.5, same wave — owner review of the shipped report)
+- **Engine line** in the header: install state + installed version (new
+  `state/info-guard/install.json` manifest written by install.sh) — or
+  NOT INSTALLED for the decide step.
+- **VALUES + REDACTION EFFECTIVENESS merged** into one CREDENTIAL EXPOSURE BY
+  FAMILY table: Family · Type · Qty · Value (masked 2+2) · Status circle
+  (Exposed/Mixed/Protected), sorted by status group then alphabetically;
+  the per-value list lives in `--full` ("+N more" hint per family).
+- **EXPOSURE LOCATIONS expanded**: masked counts + area status per area
+  (the former area-scope rows moved here — one home for area-level data).
+- **Table headings** on every table (terminal and PDF).
+- **WHY AM I SEEING THIS**: Status now shows the redaction status (matching
+  the merged table); "active status unknown" moved into the Action line.
+- **Appendix A (telemetry) removed from the main report** — `--full` only
+  (forensic mode; the main report is the assessment).
+- Fixed: literal `<br>` rendering between the exec-summary card lines in the
+  styled PDF renderer; "1 occurrences" pluralization in redaction notes.
+
 ## [v0.2.3] - 2026-08-18
 
 ### Changed
@@ -45,7 +63,8 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 - Test battery (`test.sh`) and CI matrix covering supported Hermes versions.
 - Docs: format spec, examples.
 
-[Unreleased]: https://github.com/db3-studio/info-guard/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/db3-studio/info-guard/compare/v0.2.5...HEAD
+[v0.2.5]: https://github.com/db3-studio/info-guard/compare/v0.2.4...v0.2.5
 [v0.2.4]: https://github.com/db3-studio/info-guard/compare/v0.2.3...v0.2.4
 [v0.2.3]: https://github.com/db3-studio/info-guard/compare/v0.2.0...v0.2.3
 [v0.2.0]: https://github.com/db3-studio/info-guard/compare/9aee07b...v0.2.0

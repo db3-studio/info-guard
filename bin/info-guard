@@ -69,7 +69,7 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.2.4"
+_PACKAGE_VERSION = "0.2.5"
 
 VALID_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -278,6 +278,22 @@ def _n(x) -> str:
     carry separators). The assessment object keeps raw ints — facts;
     only the render formats them."""
     return f"{x:,}"
+
+
+INSTALL_MANIFEST = STATE_DIR / "install.json"
+
+
+def _install_manifest():
+    """The install manifest written by install.sh — records WHICH package
+    version installed the engine (the report header shows it). None when
+    absent (legacy install or not installed)."""
+    try:
+        data = json.loads(INSTALL_MANIFEST.read_text())
+        if isinstance(data.get("version"), str):
+            return data
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 # Token-shaped value forms the report treats as "looks like a real secret"
@@ -676,6 +692,20 @@ def _session_date(rel: str):
     return f"{d[:4]}-{d[4:6]}-{d[6:]}"
 
 
+def _area_status(value: int, masked: int):
+    """Redaction status for an AREA scope (locations rows): mostly_masked
+    when masked >= half of all occurrences, mixed otherwise, exposed when
+    nothing is masked. None when the area has no occurrences at all."""
+    total = value + masked
+    if total == 0:
+        return None
+    if value == 0:
+        return "mostly_masked"
+    if masked == 0:
+        return "exposed"
+    return "mostly_masked" if masked >= total / 2 else "mixed"
+
+
 def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
     """Reduce the raw hit list into the assessment object. Classification
     is a PARTITION: every hit lands in exactly one tier (credential-shaped,
@@ -760,7 +790,14 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
     fam_attr = sum(e["value"] for f, e in fam.items() if f != "bare-token")
     unattr = fam.get("bare-token", {}).get("value", 0)
 
-    # families: value-bearing first, then protected-only (facts only)
+    # distinct values per family (for the "+N more values" hint in the
+    # merged table; the full per-value list lives in --full)
+    fam_distinct = {}
+    for v, ve in vals.items():
+        for f in ve["fams"]:
+            fam_distinct[f] = fam_distinct.get(f, 0) + 1
+
+    # families: facts + redaction status (exposed / mixed / protected)
     families = []
     for f, e in sorted(fam.items(), key=lambda x: -x[1]["value"]):
         if e["value"] == 0 and e["masked"] == 0:
@@ -768,11 +805,20 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
         disp = e["display"] or e["first"]
         example = None
         if disp:
-            example = {"value_masked": disp[5], "file": disp[2], "line": disp[3]}
+            example = {"value_masked": _mask_value(disp[4]),
+                       "file": disp[2], "line": disp[3]}
+        if e["value"] > 0 and e["masked"] == 0:
+            status = "exposed"
+        elif e["value"] > 0:
+            status = "mixed"
+        else:
+            status = "protected"
         families.append({
             "family": f, "value": e["value"], "masked": e["masked"],
             "mentions": e["mentions"], "types": e["types"],
+            "status": status,
             "priority": "high" if e["value"] > 0 else "protected",
+            "distinct_values": fam_distinct.get(f, e["value"]),
             "areas": dict(e["areas"]), "dates": sorted(e["dates"]),
             "example": example,
         })
@@ -785,9 +831,13 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
         if e["value"] == 0 and e["masked"] == 0:
             continue
         entry = {"area": area, "credential_shaped": e["value"],
+                 "masked": e["masked"],
                  "percentage": (round(e["value"] * 100 / total_val, 1)
                                 if total_val else 0.0),
                  "files_affected": len(e["files"])}
+        st = _area_status(e["value"], e["masked"])
+        if st:
+            entry["status"] = st
         if e["dates"]:
             entry["date_range"] = {"source": "session_timestamp",
                                    "start": min(e["dates"]), "end": max(e["dates"])}
@@ -822,18 +872,25 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
             st, note = "exposed", "value-shaped material remains at rest"
         elif e["value"] > 0:
             st = "mixed"
-            note = f"{_n(e['value'])} value-shaped · {_n(e['masked'])} masked occurrences"
+            note = (f"{_n(e['value'])} value-shaped · "
+                    f"{_n(e['masked'])} masked "
+                    f"occurrence{'s' if e['masked'] != 1 else ''}")
         else:
-            st, note = "protected", f"{_n(e['masked'])} occurrences already masked in the source"
+            st = "protected"
+            note = (f"{_n(e['masked'])} "
+                    f"occurrence{'s' if e['masked'] != 1 else ''} "
+                    "already masked in the source")
         redaction.append({"scope_type": "family", "scope": f, "status": st, "note": note})
     for area, e in loc_items:
         if e["masked"] == 0:
             continue
         total = e["value"] + e["masked"]
-        st = "mostly_masked" if e["masked"] >= total / 2 else "mixed"
+        st = _area_status(e["value"], e["masked"])
         scope = "logs/agent.log" if area == "logs" else area
         redaction.append({"scope_type": "area", "scope": scope, "status": st,
-                          "note": f"{_n(e['masked'])} of {_n(total)} occurrences already masked in place"})
+                          "note": f"{_n(e['masked'])} of {_n(total)} "
+                                  f"occurrence{'s' if total != 1 else ''} "
+                                  "already masked in place"})
 
     # the proof list: distinct credential-shaped values, 2+2 masked,
     # family-attributed when determinable (reviewer: never forced)
@@ -854,9 +911,16 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
 
     telemetry = Counter(_family_of(h[1]) for h in all_hits)
 
+    inst = _installation_status()
+    manifest = _install_manifest()
     return {
         "tool": {"name": "info-guard", "version": _PACKAGE_VERSION,
-                 "gitleaks": _GITLEAKS_VERSION},
+                 "gitleaks": _GITLEAKS_VERSION,
+                 "installed": inst["engine"],
+                 "engine_state": ("active" if inst["engine"] else
+                                  ("partial" if inst["partial"] else "none")),
+                 "engine_version": (manifest.get("version")
+                                    if manifest and inst["engine"] else None)},
         "scan": {"generated": generated, "dirs": dirs,
                  "files_scanned": files_scanned, "read_only": True,
                  "gitleaks_ok": gitleaks_ok},
@@ -941,6 +1005,14 @@ def _render_assessment(a, all_hits, full):
     nf = a["scan"]["files_scanned"]
     print(f"Info Guard v{_PACKAGE_VERSION} — Preflight Security Assessment")
     print(f"Read-only scan of Hermes home · values masked · generated {a['scan']['generated']}")
+    eng = a["tool"]["engine_state"]
+    if eng == "active":
+        ev = a["tool"]["engine_version"] or a["tool"]["version"]
+        print(f"Engine: Info Guard INSTALLED v{ev} (ACTIVE) · gitleaks {a['tool']['gitleaks']}")
+    elif eng == "partial":
+        print("Engine: Info Guard PARTIAL — re-run install.sh to restore the redaction engine")
+    else:
+        print("Engine: Info Guard NOT INSTALLED — decide step (no redaction engine active)")
     print(f"SCOPE: {' · '.join(a['scan']['dirs'])} — {_n(nf)} file{'s' if nf != 1 else ''}")
     print()
     if not t["credential_shaped"]:
@@ -993,39 +1065,64 @@ def _render_assessment(a, all_hits, full):
             print(f"  • Redaction is working: {names} {verb} already masked in the source.")
     print()
 
-    # ── CREDENTIAL EXPOSURE BY FAMILY + the proof list ─────────────────
+    # ── CREDENTIAL EXPOSURE BY FAMILY ──────────────────────────────────
+    # Merged table: candidates + the 2+2 proof value + redaction status
+    # (owner refinements: VALUES + REDACTION EFFECTIVENESS consolidated;
+    # sorted by status group, alphabetical within). The complete per-value
+    # list lives in --full.
     print("CREDENTIAL EXPOSURE BY FAMILY")
-    for r in a["families"]:
-        if r["value"] == 0:
-            continue
-        ev = (" · ".join(r["types"]) or "token-shaped") + " value"
-        prio = "🔴 High" if r["priority"] == "high" else "🟢 Protected"
-        print(f"  {r['family'][:32]:<34} {_n(r['value']):>4}  {ev:<26} {prio}")
-    prot = [r for r in a["families"] if r["value"] == 0 and r["masked"] > 0]
-    for r in prot[:10]:
-        print(f"  {r['family'][:32]:<34} {'—':>4}  {'mostly already masked':<26} 🟢 Protected")
-    if len(prot) > 10:
-        print(f"  …showing top 10 of {len(prot)} protected families (`--full` lists every row)")
+    print(f"  {'Family':<34} {'Type':<24} {'Qty':>8}  {'Value (masked 2+2)':<18} Status")
+    st_order = {"exposed": 0, "mixed": 1, "protected": 2}
+    st_icon = {"exposed": "🔴 Exposed", "mixed": "🟡 Mixed",
+               "protected": "🟢 Protected"}
+    fams_sorted = sorted(a["families"],
+                         key=lambda r: (st_order.get(r["status"], 3),
+                                        r["family"].lower()))
+    n_prot = sum(1 for r in a["families"] if r["status"] == "protected")
+    n_prot_shown = 0
+    for r in fams_sorted:
+        if r["status"] == "protected":
+            n_prot_shown += 1
+            if n_prot_shown > 10:
+                continue
+        typ = " · ".join(r["types"]) or "—"
+        if r["value"] > 0:
+            qty = _n(r["value"])
+            ex = r.get("example")
+            val = ex["value_masked"] if ex else "—"
+            n_more = r.get("distinct_values", 1) - 1
+            if n_more > 0:
+                val += f" ({_n(n_more)} more)"
+        else:
+            qty = f"{_n(r['masked'])} masked"
+            val = "—"
+        print(f"  {r['family'][:32]:<34} {typ[:22]:<24} {qty:>8}  {val:<18} "
+              f"{st_icon.get(r['status'], r['status'])}")
+    if n_prot > 10:
+        print(f"  …showing top 10 of {_n(n_prot)} protected families "
+              "(`--full` lists every row)")
     print()
-    print("  VALUES — MATCH AGAINST YOUR CURRENT CREDENTIALS")
-    vals = a["top_values"]
-    for v in vals[:15]:
-        fam_s = (v["family"] or "—")[:24]
-        print(f"  {v['value_masked']:<16} {_n(v['count']):>4}  {v['type']:<22} {fam_s}")
-    if len(vals) > 15:
-        print(f"  … (top 15 by count; `--full` lists all {_n(len(vals))})")
     print("  If a masked value matches a credential you currently use, rotate it.")
     print("  If it belongs to a credential that has already been superseded, no")
-    print("  action is required.")
+    print("  action is required. Values are masked 2+2 — the full value exists")
+    print("  only in the scanned file. `--full` lists every distinct value.")
     print()
 
-    # ── EXPOSURE LOCATIONS ─────────────────────────────────────────────
+    # ── EXPOSURE LOCATIONS (candidates + masked counts + area status) ──
     print("EXPOSURE LOCATIONS")
+    st_icon = {"exposed": "🔴 Exposed", "mixed": "🟡 Mixed",
+               "mostly_masked": "🟢 Mostly masked"}
     for l in a["locations"]:
-        if l["credential_shaped"] == 0:
+        if l["credential_shaped"] == 0 and l.get("masked", 0) == 0:
             continue
-        plural = "s" if l["credential_shaped"] != 1 else ""
-        print(f"  {l['area']:<10} {_n(l['credential_shaped']):<5} credential-shaped candidate{plural}")
+        masked = _n(l.get("masked", 0))
+        if l["credential_shaped"] > 0:
+            plural = "s" if l["credential_shaped"] != 1 else ""
+            left = f"{_n(l['credential_shaped'])} credential-shaped candidate{plural} · {masked} masked"
+        else:
+            left = f"{masked} masked occurrences"
+        st = st_icon.get(l.get("status"), "")
+        print(f"  {l['area']:<10} {left:<34} {st}")
     print()
     pat = next((p for p in a["patterns"]
                 if p["type"] == "historical_concentration"), None)
@@ -1051,15 +1148,6 @@ def _render_assessment(a, all_hits, full):
         print(f"  {f['file'][:56]:<58} × {_n(f['total_findings'])}{extra}")
     print()
 
-    # ── REDACTION EFFECTIVENESS ────────────────────────────────────────
-    print("REDACTION EFFECTIVENESS")
-    print("  Scope              Status          Evidence")
-    icons = {"protected": "🟢 Protected", "mostly_masked": "🟢 Mostly masked",
-             "mixed": "🟡 Mixed", "exposed": "🔴 Exposed"}
-    for r in a["redaction"]:
-        print(f"  {r['scope'][:18]:<20} {icons.get(r['status'], r['status']):<16} {r['note']}")
-    print()
-
     # ── WHY AM I SEEING THIS ───────────────────────────────────────────
     print("WHY AM I SEEING THIS")
     wlabel = {"sessions": "historical session transcripts", "logs": "log files",
@@ -1079,8 +1167,10 @@ def _render_assessment(a, all_hits, full):
         print(f"  {r['family']} · {_n(r['value'])} candidate{plural}")
         print(f"    Why flagged: {flagged}")
         print(f"    Where:       {where}")
-        print("    Status:      ⚠️ candidate — active status unknown")
-        print("    Action:      rotate if still in use")
+        st_icon = {"exposed": "🔴 Exposed", "mixed": "🟡 Mixed",
+                   "protected": "🟢 Protected"}.get(r["status"], r["status"])
+        print(f"    Status:      {st_icon}")
+        print("    Action:      rotate if still in use (active status unknown)")
         print()
 
     # ── RECOMMENDED ACTIONS ────────────────────────────────────────────
@@ -1094,19 +1184,10 @@ def _render_assessment(a, all_hits, full):
     print("  masked.")
     print()
 
-    # ── APPENDIX A — telemetry (demoted, NOT findings) ─────────────────
-    print("APPENDIX A — DETECTION TELEMETRY (key-name mentions — NOT findings)")
-    for key, n in a["appendix"]["telemetry"][:15]:
-        print(f"  {key[:32]:<34} × {_n(n)}")
-    if len(a["appendix"]["telemetry"]) > 15:
-        print("  …")
-    print()
-    print("  Why this is here and not in the main report: a mention ≠ a value at rest.")
-    print("  High counts are expected in an agent home (tool outputs, HTTP headers,")
-    print("  env dumps). Actual leak hunting uses CREDENTIAL EXPOSURE BY FAMILY.")
-    print()
-
     # ── APPENDIX B — finding ledger (sample or --full complete) ────────
+    # APPENDIX A (detection telemetry) prints in --full mode only — the
+    # main report is the assessment; mentions are forensic telemetry
+    # (owner refinement: main report dropped it).
     from collections import OrderedDict
     deduped = OrderedDict()
     for h in all_hits:
@@ -1119,8 +1200,18 @@ def _render_assessment(a, all_hits, full):
         count, _ = deduped.get(key, (0, None))
         deduped[key] = (count + 1, h)
     if full:
+        # APPENDIX A — telemetry (forensic mode: mentions are NOT findings)
+        print("APPENDIX A — DETECTION TELEMETRY (key-name mentions — NOT findings)")
+        for key, n in a["appendix"]["telemetry"][:25]:
+            print(f"  {key[:32]:<34} × {_n(n)}")
+        if len(a["appendix"]["telemetry"]) > 25:
+            print("  …")
+        print()
+        print("  Mentions ≠ values at rest — detection telemetry, not findings.")
+        print("  Actual leak hunting uses CREDENTIAL EXPOSURE BY FAMILY.")
+        print()
         # COMPLETE ledger: every deduplicated reviewable row, no sampler
-        print(f"APPENDIX B — FINDING LEDGER (complete — {len(deduped)} unique candidates)")
+        print(f"APPENDIX B — FINDING LEDGER (complete — {_n(len(deduped))} unique candidates)")
         print("  Values are masked: you see the first and last 2 characters")
         print("  only. The full value exists only in the scanned file — it")
         print("  never leaves the machine.")

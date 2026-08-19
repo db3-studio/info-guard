@@ -122,6 +122,15 @@ if [ ! -f "$STATE_DIR/custom_literals.json" ]; then
     chmod 600 "$STATE_DIR/custom_literals.json"
     say "seeded $STATE_DIR/custom_literals.json (edit it, then \`info-guard build\`)"
 fi
+# Install manifest: records WHICH package version installed the engine —
+# the preflight report header and `check` show it. Rewritten on every
+# install so re-installs update the recorded version.
+IG_VERSION="$(grep -oP '_PACKAGE_VERSION = "\K[^"]+' "$HERE/bin/info-guard" || echo unknown)"
+cat > "$STATE_DIR/install.json" <<EOF
+{"version": "$IG_VERSION", "installed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+EOF
+chmod 600 "$STATE_DIR/install.json"
+say "wrote $STATE_DIR/install.json (manifest: v$IG_VERSION)"
 
 # ── 4. point Hermes at the pattern file ─────────────────────────────────
 if [ "$NO_CONFIG" = "1" ]; then

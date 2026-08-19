@@ -163,8 +163,10 @@ report is its render. v0.3.0 serializes the same object as JSON and diffs it
 Report sections, in order (each printed only when its data is non-empty):
 
 1. **Header** — `Info Guard v<version> — Preflight Security Assessment` +
-   scan metadata (read-only, values masked, generated timestamp) + a **SCOPE**
-   line (directories scanned + file count) so a clean result never reads as
+   scan metadata (read-only, values masked, generated timestamp) + an
+   **Engine** line (install state + installed version from the install
+   manifest, or NOT INSTALLED for the decide step) + a **SCOPE** line
+   (directories scanned + file count) so a clean result never reads as
    "the entire installation is secure".
 2. **STATUS** — 🔴 ACTION REQUIRED + one-line summary (candidates, not
    confirmed leaks) / 🟢 CLEAN + what it means. "No changes were made by this
@@ -176,34 +178,35 @@ Report sections, in order (each printed only when its data is non-empty):
    value-shaped material, already-masked occurrences. Plus WHAT MATTERS:
    2–3 bullets generated from the assessment (value shapes, location
    concentration, redaction working).
-4. **CREDENTIAL EXPOSURE BY FAMILY** — per family: value-findings count,
-   evidence (value shapes), priority (🔴 High = any real value at rest;
-   🟢 Protected = masked-only). Protected-only families are capped at 10 with
-   a "showing top N of M" line. Followed by **VALUES — MATCH AGAINST YOUR
-   CURRENT CREDENTIALS**: the distinct credential-shaped values as 2+2 masked
-   forms (head/tail two chars) with occurrence counts, type, and family when
-   attributable — the matching aid for "is this still my credential?" Top 15
-   by count; `--full` lists all.
-5. **EXPOSURE LOCATIONS** — credential-shaped candidates bucketed by area
-   (sessions / logs / cron / state / other) as **absolute counts** (no
-   percentages), a qualified Pattern observation ("consistent with retained
+4. **CREDENTIAL EXPOSURE BY FAMILY** — the merged master table (owner
+   refinement 2026-08-19): one row per family with **Family · Type · Qty ·
+   Value (masked 2+2) · Status** (🔴 Exposed / 🟡 Mixed / 🟢 Protected
+   circles), sorted by status group (exposed → mixed → protected) then
+   alphabetically. Qty = value-findings (or "N masked" for protected-only
+   families); Value = the top distinct value in 2+2 masked form ("+N more"
+   when the family has further distinct values; `--full` lists every
+   distinct value). Protected-only families are capped at 10 with a
+   "showing top N of M" line.
+5. **EXPOSURE LOCATIONS** — per area (sessions / logs / cron / state /
+   other): **credential-shaped candidate counts + masked counts + area
+   status** (🔴 Exposed / 🟡 Mixed / 🟢 Mostly masked — masked ≥ half of all
+   occurrences), a qualified Pattern observation ("consistent with retained
    historical exposure rather than a current logging failure" — never a
    definitive claim), and SHOW AFFECTED FILES (top 10, with credential-shaped
    breakdown when > 0).
-6. **REDACTION EFFECTIVENESS** — per scope (family OR area, e.g.
-   `logs/agent.log`): 🟢 Protected / 🟢 Mostly masked / 🟡 Mixed / 🔴 Exposed.
-7. **WHY AM I SEEING THIS** — top families: why flagged, where (area +
-   session-timestamp date range when available), status (candidate — active
-   status unknown), recommended action.
-8. **RECOMMENDED ACTIONS** — 4 numbered steps (rotate active candidates →
+6. **WHY AM I SEEING THIS** — top families: why flagged, where (area +
+   session-timestamp date range when available), **status (the redaction
+   status — Exposed/Mixed/Protected, matching the master table)**, and the
+   action ("rotate if still in use (active status unknown)").
+7. **RECOMMENDED ACTIONS** — 4 numbered steps (rotate active candidates →
    choose prevention → clean historical exposure → verify) + the explicit
    tier-partition statement + no-routine-re-run note.
-9. **APPENDIX A — DETECTION TELEMETRY** — key-name mention counts,
-   explicitly NOT findings (moved here so the main report stays risk-focused).
-10. **APPENDIX B — FINDING LEDGER** — a sample (one example per family,
-    ranked by signal; junk-display rows count-only; `— your .env key` labels)
-    or, with `--full`, the complete deduplicated ledger (same masking, no
-    cap). Source-masked rows stay count-only in both modes.
+8. **APPENDIX — FINDING LEDGER** — in the main report: a sample (one example
+   per family, ranked by signal; junk-display rows count-only; `— your .env
+   key` labels). With `--full`: **APPENDIX A — DETECTION TELEMETRY**
+   (key-name mention counts, explicitly NOT findings — forensic mode only)
+   followed by the complete deduplicated ledger (same masking, no cap).
+   Source-masked rows stay count-only in both modes.
 
 Taxonomy — a partition, stated in the report: every finding is classified
 into exactly one of **credential-shaped** (token-format values + gitleaks
