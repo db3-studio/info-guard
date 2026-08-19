@@ -49,6 +49,14 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
   reconciliation, JSON↔text number parity, watch lifecycle
   first-run/no-new/new-value/`--reset`/version-union).
 
+### Fixed
+- Battery watch-probe value is now runtime-constructed (a literal
+  `sk-newprobe…` tripped the CI gitleaks scan — token-shaped literals
+  must never appear in test files).
+- CI: hermes-agent clone step retries on GitHub HTTP 429 (rate-limited
+  blobless clones under 5-way matrix concurrency — two consecutive
+  v0.3.0 runs failed legs on it).
+
 ## [v0.2.8] - 2026-08-19
 
 ### Changed

@@ -35,7 +35,16 @@ jobs:
 
       - name: Clone hermes-agent @ ${{ matrix.ref }}
         run: |
-          git clone --quiet --filter=blob:none https://github.com/NousResearch/hermes-agent.git /tmp/hermes
+          # Retry loop: GitHub rate-limits concurrent blobless clones of
+          # this repo (HTTP 429) under 5-way matrix concurrency (seen
+          # 2026-08-19 v0.3.0 — two consecutive runs failed legs on 429).
+          for i in 1 2 3; do
+            git clone --quiet --filter=blob:none https://github.com/NousResearch/hermes-agent.git /tmp/hermes && break
+            echo "clone attempt $i failed (rate limit?), retrying…"
+            sleep 15
+            rm -rf /tmp/hermes
+          done
+          test -d /tmp/hermes/.git || { echo "clone failed after 3 attempts" >&2; exit 1; }
           git -C /tmp/hermes checkout --quiet ${{ matrix.ref }}
 
       - name: Apply patch (apply-check first — fail loud on drift)
