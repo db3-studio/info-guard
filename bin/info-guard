@@ -69,7 +69,7 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.2.5"
+_PACKAGE_VERSION = "0.2.6"
 
 VALID_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -1148,31 +1148,6 @@ def _render_assessment(a, all_hits, full):
         print(f"  {f['file'][:56]:<58} × {_n(f['total_findings'])}{extra}")
     print()
 
-    # ── WHY AM I SEEING THIS ───────────────────────────────────────────
-    print("WHY AM I SEEING THIS")
-    wlabel = {"sessions": "historical session transcripts", "logs": "log files",
-              "cron": "cron output", "state": "state files", "other": "other files"}
-    for r in a["families"][:5]:
-        if r["value"] == 0:
-            break
-        ev = (" · ".join(r["types"]) or "token-shaped") + " value"
-        areas = sorted(r["areas"].items(), key=lambda x: -x[1])
-        where = wlabel.get(areas[0][0], areas[0][0]) if areas else "unknown"
-        if r["dates"] and areas and areas[0][0] == "sessions":
-            where += f" ({r['dates'][0]}–{r['dates'][-1]})"
-        flagged = (f"{ev} associated with {r['family']}"
-                   if r["family"] != "bare-token" else
-                   f"{ev} with no key context")
-        plural = "s" if r["value"] != 1 else ""
-        print(f"  {r['family']} · {_n(r['value'])} candidate{plural}")
-        print(f"    Why flagged: {flagged}")
-        print(f"    Where:       {where}")
-        st_icon = {"exposed": "🔴 Exposed", "mixed": "🟡 Mixed",
-                   "protected": "🟢 Protected"}.get(r["status"], r["status"])
-        print(f"    Status:      {st_icon}")
-        print("    Action:      rotate if still in use (active status unknown)")
-        print()
-
     # ── RECOMMENDED ACTIONS ────────────────────────────────────────────
     print("RECOMMENDED ACTIONS")
     icons = {"high": "🔴", "medium": "🟠", "low": "🟡", "info": "🟢"}
@@ -1200,18 +1175,10 @@ def _render_assessment(a, all_hits, full):
         count, _ = deduped.get(key, (0, None))
         deduped[key] = (count + 1, h)
     if full:
-        # APPENDIX A — telemetry (forensic mode: mentions are NOT findings)
-        print("APPENDIX A — DETECTION TELEMETRY (key-name mentions — NOT findings)")
-        for key, n in a["appendix"]["telemetry"][:25]:
-            print(f"  {key[:32]:<34} × {_n(n)}")
-        if len(a["appendix"]["telemetry"]) > 25:
-            print("  …")
-        print()
-        print("  Mentions ≠ values at rest — detection telemetry, not findings.")
-        print("  Actual leak hunting uses CREDENTIAL EXPOSURE BY FAMILY.")
-        print()
-        # COMPLETE ledger: every deduplicated reviewable row, no sampler
-        print(f"APPENDIX B — FINDING LEDGER (complete — {_n(len(deduped))} unique candidates)")
+        # APPENDIX A — the complete ledger (the main report's appendix);
+        # APPENDIX B — telemetry (forensic mode only: mentions are NOT
+        # findings).
+        print(f"APPENDIX A — FINDING LEDGER (complete — {_n(len(deduped))} unique candidates)")
         print("  Values are masked: you see the first and last 2 characters")
         print("  only. The full value exists only in the scanned file — it")
         print("  never leaves the machine.")
@@ -1219,9 +1186,15 @@ def _render_assessment(a, all_hits, full):
             cls, rule, rel, line, value, masked, ctx = h
             print(f"  [{cls}] {rule}" + (f" (×{n} files/lines)" if n > 1 else ""))
             print(f"      {rel}:{line}  value={masked}")
-            if ctx:
-                print(f"      …{ctx}…")
             print()
+        print("APPENDIX B — DETECTION TELEMETRY (key-name mentions — NOT findings)")
+        for key, n in a["appendix"]["telemetry"][:25]:
+            print(f"  {key[:32]:<34} × {_n(n)}")
+        if len(a["appendix"]["telemetry"]) > 25:
+            print("  …")
+        print()
+        print("  Mentions ≠ values at rest — detection telemetry, not findings.")
+        print("  Actual leak hunting uses CREDENTIAL EXPOSURE BY FAMILY.")
     else:
         # SAMPLER: one example per family, ranked by signal, junk-display
         # rows (code refs/paths/markup) count-only
@@ -1238,7 +1211,7 @@ def _render_assessment(a, all_hits, full):
                 fam_rows[fam][2] = h
             if _value_class(h[4]) == "token-format":
                 fam_rows[fam][3] = True
-        print("APPENDIX B — FINDING LEDGER (sample — one per family; `info-guard preflight --full` for the complete ledger)")
+        print("APPENDIX A — FINDING LEDGER (sample — one per family; `info-guard preflight --full` for the complete ledger)")
         print("  Values are masked: you see the first and last 2 characters")
         print("  only. The full value exists only in the scanned file — it")
         print("  never leaves the machine. Values too short to mask partially")
@@ -1259,8 +1232,6 @@ def _render_assessment(a, all_hits, full):
             print(f"  [{cls}] {rule} (×{cnt}){label}")
             if disp is not None:
                 print(f"      {rel}:{line}  value={masked}")
-                if ctx:
-                    print(f"      …{ctx}…")
             else:
                 print("      (values are code refs / paths / markup — count-only)")
             print()

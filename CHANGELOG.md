@@ -42,6 +42,20 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 - Fixed: literal `<br>` rendering between the exec-summary card lines in the
   styled PDF renderer; "1 occurrences" pluralization in redaction notes.
 
+### Refinements (v0.2.6, same wave — second owner review)
+- **WHY AM I SEEING THIS removed** — redundant with the merged table's
+  status column (the facts stay in the assessment object).
+- **Appendix renumbering**: the finding ledger is now **APPENDIX A** in the
+  main report (and the complete-ledger form in `--full`); detection
+  telemetry moves to **APPENDIX B** (`--full` only).
+- **Ledger rows slimmed**: the context line (…`KEY=***`…) is dropped from
+  appendix items — file:line + the 2+2 masked value only.
+- Fixed (styled PDF renderer): the body was built by interpolating a Python
+  *list* into the HTML template, so the list repr (`['…', '\n…']` fragments)
+  rendered as stray characters between sections since v0.2.3 — now joined
+  properly; the EXECUTIVE SUMMARY cards get inline SVG icon badges (red/
+  orange circles, key, shield) instead of plain dots.
+
 ## [v0.2.3] - 2026-08-18
 
 ### Changed
@@ -63,7 +77,8 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 - Test battery (`test.sh`) and CI matrix covering supported Hermes versions.
 - Docs: format spec, examples.
 
-[Unreleased]: https://github.com/db3-studio/info-guard/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/db3-studio/info-guard/compare/v0.2.6...HEAD
+[v0.2.6]: https://github.com/db3-studio/info-guard/compare/v0.2.5...v0.2.6
 [v0.2.5]: https://github.com/db3-studio/info-guard/compare/v0.2.4...v0.2.5
 [v0.2.4]: https://github.com/db3-studio/info-guard/compare/v0.2.3...v0.2.4
 [v0.2.3]: https://github.com/db3-studio/info-guard/compare/v0.2.0...v0.2.3

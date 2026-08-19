@@ -383,12 +383,12 @@ pf = subprocess.run(
 pfo = pf.stdout + pf.stderr
 check("preflight: findings exit code 1", pf.returncode == 1,
       f"rc={pf.returncode} out={pfo[-300:]!r}")
-for section in ("Info Guard v0.2.5 — Preflight Security Assessment",
+for section in ("Info Guard v0.2.6 — Preflight Security Assessment",
                 "STATUS", "EXECUTIVE SUMMARY", "WHAT MATTERS",
                 "CREDENTIAL EXPOSURE BY FAMILY",
                 "EXPOSURE LOCATIONS",
-                "WHY AM I SEEING THIS", "RECOMMENDED ACTIONS",
-                "APPENDIX B — FINDING LEDGER (sample"):
+                "RECOMMENDED ACTIONS",
+                "APPENDIX A — FINDING LEDGER (sample"):
     check(f"preflight: section '{section}' present", section in pfo)
 check("preflight: SCOPE line present", "SCOPE:" in pfo)
 check("preflight: engine line present (install state + version)",
@@ -417,10 +417,12 @@ check("preflight: session-timestamp date discipline",
       "from session timestamps" in pfo)
 check("preflight: key-name tier defined in the partition note",
       "key-name" in pfo)
-check("preflight: why status = redaction status, caveat in action",
-      "active status unknown" in pfo and "candidate — active status unknown" not in pfo)
-check("preflight: appendix A absent from the main report",
-      "APPENDIX A" not in pfo)
+check("preflight: why section removed (redundant with merged table)",
+      "WHY AM I SEEING THIS" not in pfo)
+check("preflight: appendix A is the ledger, no telemetry in main report",
+      "DETECTION TELEMETRY" not in pfo)
+check("preflight: appendix rows carry no context line",
+      "…HASS_TOKEN=***…" not in pfo)
 
 # 12a2. preflight --full: complete ledger replaces the sampler
 pff = subprocess.run(
@@ -432,11 +434,11 @@ check("preflight --full: same finding exit code",
       pff.returncode == pf.returncode and pff.returncode == 1,
       f"rc={pff.returncode} (sampler rc={pf.returncode}) out={pffo[-200:]!r}")
 check("preflight --full: complete-ledger header, no sampler",
-      "APPENDIX B — FINDING LEDGER (complete" in pffo
-      and "APPENDIX B — FINDING LEDGER (sample" not in pffo,
+      "APPENDIX A — FINDING LEDGER (complete" in pffo
+      and "APPENDIX A — FINDING LEDGER (sample" not in pffo,
       "expected complete ledger header")
 check("preflight --full: telemetry appendix present (forensic mode)",
-      "APPENDIX A — DETECTION TELEMETRY" in pffo,
+      "APPENDIX B — DETECTION TELEMETRY" in pffo,
       "expected telemetry appendix in --full")
 check("preflight --full: every family row listed, not one per family",
       pffo.count("value=") >= pfo.count("value="),
@@ -468,7 +470,7 @@ ver = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
     capture_output=True, text=True, timeout=60)
 check("--version prints the package version",
-      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.2.5",
+      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.2.6",
       f"rc={ver.returncode} out={ver.stdout.strip()!r}")
 
 

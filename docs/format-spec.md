@@ -194,18 +194,15 @@ Report sections, in order (each printed only when its data is non-empty):
    historical exposure rather than a current logging failure" — never a
    definitive claim), and SHOW AFFECTED FILES (top 10, with credential-shaped
    breakdown when > 0).
-6. **WHY AM I SEEING THIS** — top families: why flagged, where (area +
-   session-timestamp date range when available), **status (the redaction
-   status — Exposed/Mixed/Protected, matching the master table)**, and the
-   action ("rotate if still in use (active status unknown)").
-7. **RECOMMENDED ACTIONS** — 4 numbered steps (rotate active candidates →
+6. **RECOMMENDED ACTIONS** — 4 numbered steps (rotate active candidates →
    choose prevention → clean historical exposure → verify) + the explicit
    tier-partition statement + no-routine-re-run note.
-8. **APPENDIX — FINDING LEDGER** — in the main report: a sample (one example
-   per family, ranked by signal; junk-display rows count-only; `— your .env
-   key` labels). With `--full`: **APPENDIX A — DETECTION TELEMETRY**
-   (key-name mention counts, explicitly NOT findings — forensic mode only)
-   followed by the complete deduplicated ledger (same masking, no cap).
+7. **APPENDIX A — FINDING LEDGER** — in the main report: a sample (one
+   example per family, ranked by signal; junk-display rows count-only;
+   `— your .env key` labels; rows show file:line + the 2+2 masked value only —
+   no context line). With `--full`: the complete deduplicated ledger (same
+   masking, no cap) followed by **APPENDIX B — DETECTION TELEMETRY**
+   (key-name mention counts, explicitly NOT findings — forensic mode only).
    Source-masked rows stay count-only in both modes.
 
 Taxonomy — a partition, stated in the report: every finding is classified
