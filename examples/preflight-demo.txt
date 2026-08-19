@@ -1,8 +1,8 @@
 [info-guard] ℹ Info Guard not detected — this run is the before-install decide step.
-[info-guard] preflight — scanning 1 dirs / ~4 files under /tmp/tmp.UHJu61ZweP (read-only, nothing written)
+[info-guard] preflight — scanning 1 dirs / ~4 files under /tmp/tmp.FFp5wX2lZ3 (read-only, nothing written)
 
 Info Guard v0.3.1 — Preflight Security Assessment
-Read-only scan of Hermes home · values masked · generated 2026-08-19 16:40 UTC
+Read-only scan of Hermes home · values masked · generated 2026-08-19 16:53 UTC
 Engine: Info Guard NOT INSTALLED — decide step (no redaction engine active)
 SCOPE: . — 4 files
 
