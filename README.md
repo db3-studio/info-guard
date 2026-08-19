@@ -71,14 +71,17 @@ it's missing, preflight explains the benefit and offers to install it
 (`go install` or the GitHub release binary into `~/.local/bin`); non-tty
 runs get the command and continue with the key-shape pass only.
 
-The report (v0.2.0+) is structured for humans and agents alike: header with
-version + timestamp, WHAT THIS IS, a BOTTOM LINE splitting candidates into
-**token-format** (looks like a real credential — the actionable set),
-**key-name mentions** (mostly harmless), and **already-masked** (no action),
-then AREAS OF CONCERN, the top token-format values, **FAMILIES WITH REAL
-VALUES AT REST** (the per-key leak pointer), top secret-family keys, files
-with most findings, a NEXT STEPS checklist, and a deduplicated details
-ledger with trimmed context. Full format contract: `docs/format-spec.md`.
+The report (v0.2.4+) is a security assessment structured for humans and
+agents alike: header with version + timestamp and a **SCOPE** line, a one-line
+STATUS, an EXECUTIVE SUMMARY (metric cards incl. the family-attributed ·
+unattributed split), **CREDENTIAL EXPOSURE BY FAMILY** with the distinct
+masked-value proof list (`VALUES — MATCH AGAINST YOUR CURRENT CREDENTIALS`),
+EXPOSURE LOCATIONS with a qualified pattern observation, REDACTION
+EFFECTIVENESS, WHY AM I SEEING THIS, RECOMMENDED ACTIONS, and two appendices
+(detection telemetry + the deduplicated finding ledger with trimmed context;
+`--full` prints the complete ledger). Tiers are a partition — every finding
+is exactly one of credential-shaped / key-name mention / already-masked.
+Full format contract: `docs/format-spec.md`.
 
 Already installed? Preflight detects it (engine marker + pattern file) and
 frames the run as a health check: findings are at-rest residue that masking

@@ -370,11 +370,11 @@ for sub in ("sessions", "logs", "cron/output"):
 #   - already-masked: literal ****** in the source
 jwt = "eyJ" + "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + "." + "a" * 15   # 52 chars: under the 64-char value cap
 dsc = "MTQ" + "5MjY4NTA5Mzk0MjQ2MDE3OQ"
-with open(os.path.join(pf_home, "sessions", "d.jsonl"), "w") as f:
+with open(os.path.join(pf_home, "sessions", "session_20260505_075138_d.jsonl"), "w") as f:
     f.write(f"HASS_TOKEN={jwt}\n")
     f.write(f"DISCORD_BOT_TOKEN={dsc}\n")
     f.write("GOOGLE_API_KEY=your-actual-key-here\n")
-    f.write("Authorization: ******\n")
+    f.write("Authorization: ***")
 env6 = dict(os.environ)
 env6["HERMES_HOME"] = pf_home
 pf = subprocess.run(
@@ -383,24 +383,36 @@ pf = subprocess.run(
 pfo = pf.stdout + pf.stderr
 check("preflight: findings exit code 1", pf.returncode == 1,
       f"rc={pf.returncode} out={pfo[-300:]!r}")
-for section in ("Info Guard v0.2.3 — Preflight Report",
-                "WHAT THIS IS", "BOTTOM LINE", "AREAS OF CONCERN",
-                "TOP TOKEN-FORMAT VALUES", "FAMILIES WITH REAL VALUES AT REST",
-                "TOP SECRET-FAMILY KEYS", "FILES WITH MOST FINDINGS",
-                "NEXT STEPS", "DETAILS"):
+for section in ("Info Guard v0.2.4 — Preflight Security Assessment",
+                "STATUS", "EXECUTIVE SUMMARY", "WHAT MATTERS",
+                "CREDENTIAL EXPOSURE BY FAMILY",
+                "VALUES — MATCH AGAINST YOUR CURRENT CREDENTIALS",
+                "EXPOSURE LOCATIONS", "REDACTION EFFECTIVENESS",
+                "WHY AM I SEEING THIS", "RECOMMENDED ACTIONS",
+                "APPENDIX A — DETECTION TELEMETRY",
+                "APPENDIX B — FINDING LEDGER (sample"):
     check(f"preflight: section '{section}' present", section in pfo)
+check("preflight: SCOPE line present", "SCOPE:" in pfo)
 check("preflight: raw values never printed",
       jwt not in pfo and dsc not in pfo and "your-actual-key-here" not in pfo,
       "a raw synthetic value appeared in the report")
-check("preflight: masked forms shown",
+check("preflight: masked forms shown (the proof)",
       "MT...OQ" in pfo and "ey...aa" in pfo,
       f"masked forms missing: {pfo[:400]!r}")
-check("preflight: token-format tier counted",
-      "look like real secrets" in pfo or "looks like real secrets" in pfo)
-check("preflight: leak pointer lists a family",
-      "DISCORD_BOT_TOKEN" in pfo and "real" in pfo)
-check("preflight: key-name tier labeled NOT leaks",
-      "NOT leak findings" in pfo)
+check("preflight: credential-shaped tier counted",
+      "credential-shaped candidates" in pfo)
+check("preflight: family table lists a family with priority",
+      "DISCORD_BOT_TOKEN" in pfo and "High" in pfo)
+check("preflight: attribution split reconciles",
+      "family-attributed" in pfo and "unattributed" in pfo)
+check("preflight: tier partition stated explicitly",
+      "mutually exclusive" in pfo)
+check("preflight: session-timestamp date discipline",
+      "from session timestamps" in pfo)
+check("preflight: key-name tier labeled NOT findings",
+      "NOT findings" in pfo)
+check("preflight: why-am-i-seeing-this action guidance",
+      "rotate if still in use" in pfo)
 
 # 12a2. preflight --full: complete ledger replaces the sampler
 pff = subprocess.run(
@@ -412,7 +424,8 @@ check("preflight --full: same finding exit code",
       pff.returncode == pf.returncode and pff.returncode == 1,
       f"rc={pff.returncode} (sampler rc={pf.returncode}) out={pffo[-200:]!r}")
 check("preflight --full: complete-ledger header, no sampler",
-      "DETAILS (complete" in pffo and "DETAILS (sample" not in pffo,
+      "APPENDIX B — FINDING LEDGER (complete" in pffo
+      and "APPENDIX B — FINDING LEDGER (sample" not in pffo,
       "expected complete ledger header")
 check("preflight --full: every family row listed, not one per family",
       pffo.count("value=") >= pfo.count("value="),
@@ -435,15 +448,16 @@ pfc = subprocess.run(
 pfco = pfc.stdout + pfc.stderr
 check("preflight: clean home exits 0", pfc.returncode == 0,
       f"rc={pfc.returncode} out={pfco[-200:]!r}")
-check("preflight: clean path has report header + CLEAN",
-      "Preflight Report" in pfco and "preflight CLEAN" in pfco)
+check("preflight: clean path has assessment header + CLEAN",
+      "Preflight Security Assessment" in pfco and "CLEAN" in pfco)
+check("preflight: clean path has SCOPE line", "SCOPE:" in pfco)
 
 # 12c. --version flag
 ver = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
     capture_output=True, text=True, timeout=60)
 check("--version prints the package version",
-      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.2.3",
+      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.2.4",
       f"rc={ver.returncode} out={ver.stdout.strip()!r}")
 
 

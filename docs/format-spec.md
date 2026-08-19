@@ -149,64 +149,73 @@ unacceptable in your threat model, keep the registry under your own
 
 Edit it, then run `info-guard build` — live within seconds, no restarts.
 
-## Preflight report format (v0.2.0+)
+## Preflight report format (v0.2.4+)
 
-`info-guard preflight` prints a structured, fully-masked report. The format
-is a contract — tests assert its sections; keep them in sync when changing
-it. Every value is masked (head/tail via `_mask_value`) or `***`; raw values
-never reach the terminal.
+`info-guard preflight` prints a structured, fully-masked security assessment.
+The format is a contract — tests assert its sections; keep them in sync when
+changing it. Every value is masked (head/tail 2+2 via `_mask_value`) or `***`;
+raw values never reach the terminal.
 
-Report sections, in order:
+The scan builds ONE in-memory assessment object (facts only, no prose); the
+report is its render. v0.3.0 serializes the same object as JSON and diffs it
+(`watch`) — the text report is never a second implementation.
 
-1. **Header** — `Info Guard v<version> — Preflight Report` + scan metadata
-   (read-only, masked, generated timestamp).
-2. **WHAT THIS IS** — one-paragraph framing of the scan scope.
-3. **BOTTOM LINE** — total candidates split into three tiers:
-   - 🔴 **token-format** (`_value_class` == `token-format`): values that
-     look like real credentials (JWT `eyJ`, GitHub `ghp_`, OpenAI `sk-`,
-     Discord `MTQ`, Firecrawl `fc-`, generated `key_`, ...)
-   - 🟡 **key-name** (everything else): lines that merely *mention* a
-     secret-sounding key — mostly harmless, but where real finds hide
-   - ⚪ **already-masked**: values that are already `***` in the source or
-     blanked by the scan's own redaction — no action
-4. **AREAS OF CONCERN** — the same three tiers with plain-language meaning
-   and action guidance.
-5. **TOP TOKEN-FORMAT VALUES** — distinct token-shaped values with
-   occurrence counts and a type guess (JWT, GitHub PAT, ...). Deduped by
-   file:line:value.
-6. **FAMILIES WITH REAL VALUES AT REST (the leak pointer)** — per key
-   family (key name, or gitleaks RuleID, or `bare-token`): how many rows
-   carry a real token-format value vs already-masked vs total. Only
-   families with ≥1 real value are listed. **This is the actionable leak
-   list** — a real value at rest in a transcript is treated as compromised.
-7. **TOP SECRET-FAMILY KEYS** — key-name *mentions* ranked by count.
-   Explicitly NOT leak findings (a mention ≠ a value at rest).
-8. **FILES WITH MOST FINDINGS** — where the hits concentrate.
-9. **NEXT STEPS** — a decision fork, not a linear checklist:
-   (1) rotate every token-format value that is still live (closes the
-   exposure; the at-rest copy becomes dead), (2) choose prevention:
-   install Info Guard (masks future occurrences — but install does NOT
-   clean what is at rest, so rotate first) OR don't install and accept
-   recurrence (re-scan periodically, rotate whenever a new live value
-   appears). Explicitly: **no routine re-run needed** — rotated rows stay
-   in the report until the files are deleted/archived. The only justified
-   re-scan is right after rotating, to confirm the rotation itself didn't
-   leak the new value into logs.
-10. **DETAILS** — a **sample, not a ledger**: one example per secret
-    family (`[cls] rule (×N)`, `file:line  value=<masked>`, trimmed
-    context window 40/80). Families are ranked by signal (gitleaks and
-    token-format first), then by count. Two kinds of rows are count-only
-    (the total stays in BOTTOM LINE, no example line): values whose 2+2
-    mask reveals nothing (code refs `${…}`, paths `/…`, markup `<…>`,
-    fragments) and values too short to mask partially. Families whose
-    key name appears in the default `.env` sources are labeled
-    `— your .env key` (key NAMES only are read, never values). The
-    escape hatch for the full detail: **`info-guard preflight --full`**
-    prints the complete deduplicated ledger — every reviewable row, same
-    masking, no sampler, no cap (source-masked rows stay count-only in
-    both modes: there is nothing to show).
+Report sections, in order (each printed only when its data is non-empty):
 
-Exit codes: **0 = clean** (also printed with the header), **1 = findings**,
+1. **Header** — `Info Guard v<version> — Preflight Security Assessment` +
+   scan metadata (read-only, values masked, generated timestamp) + a **SCOPE**
+   line (directories scanned + file count) so a clean result never reads as
+   "the entire installation is secure".
+2. **STATUS** — 🔴 ACTION REQUIRED + one-line summary (candidates, not
+   confirmed leaks) / 🟢 CLEAN + what it means. "No changes were made by this
+   scan" is prominent here.
+3. **EXECUTIVE SUMMARY** — metric cards: credential-shaped candidates with
+   the **family-attributed · unattributed split** (the family table's sum
+   always reconciles; a note appears when duplicated rows make the split
+   differ from the candidate-row total), files scanned, families with
+   value-shaped material, already-masked occurrences. Plus WHAT MATTERS:
+   2–3 bullets generated from the assessment (value shapes, location
+   concentration, redaction working).
+4. **CREDENTIAL EXPOSURE BY FAMILY** — per family: value-findings count,
+   evidence (value shapes), priority (🔴 High = any real value at rest;
+   🟢 Protected = masked-only). Protected-only families are capped at 10 with
+   a "showing top N of M" line. Followed by **VALUES — MATCH AGAINST YOUR
+   CURRENT CREDENTIALS**: the distinct credential-shaped values as 2+2 masked
+   forms (head/tail two chars) with occurrence counts, type, and family when
+   attributable — the matching aid for "is this still my credential?" Top 15
+   by count; `--full` lists all.
+5. **EXPOSURE LOCATIONS** — credential-shaped candidates bucketed by area
+   (sessions / logs / cron / state / other) as **absolute counts** (no
+   percentages), a qualified Pattern observation ("consistent with retained
+   historical exposure rather than a current logging failure" — never a
+   definitive claim), and SHOW AFFECTED FILES (top 10, with credential-shaped
+   breakdown when > 0).
+6. **REDACTION EFFECTIVENESS** — per scope (family OR area, e.g.
+   `logs/agent.log`): 🟢 Protected / 🟢 Mostly masked / 🟡 Mixed / 🔴 Exposed.
+7. **WHY AM I SEEING THIS** — top families: why flagged, where (area +
+   session-timestamp date range when available), status (candidate — active
+   status unknown), recommended action.
+8. **RECOMMENDED ACTIONS** — 4 numbered steps (rotate active candidates →
+   choose prevention → clean historical exposure → verify) + the explicit
+   tier-partition statement + no-routine-re-run note.
+9. **APPENDIX A — DETECTION TELEMETRY** — key-name mention counts,
+   explicitly NOT findings (moved here so the main report stays risk-focused).
+10. **APPENDIX B — FINDING LEDGER** — a sample (one example per family,
+    ranked by signal; junk-display rows count-only; `— your .env key` labels)
+    or, with `--full`, the complete deduplicated ledger (same masking, no
+    cap). Source-masked rows stay count-only in both modes.
+
+Taxonomy — a partition, stated in the report: every finding is classified
+into exactly one of **credential-shaped** (token-format values + gitleaks
+HIGH-CONFIDENCE — the actionable set), **key-name mention** (includes
+reference/noise rows; a future tier may split them), or **already-masked**
+(the prevention layer working). `findings = credential_shaped +
+key_name_mentions + already_masked`, exactly.
+
+Date discipline: historical date ranges come from **session filename
+timestamps** (`session_YYYYMMDD…`), never filesystem mtime.
+
+Exit codes: **0 = clean**, **1 = findings** (any credential-shaped value),
 **2 = usage error**. gitleaks is optional: without it the scan runs the
 key-shape pass only and says so.
 
