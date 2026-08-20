@@ -970,6 +970,92 @@ check("watch: combined new-value + engine event -> exit 1, both blocks",
       and "PROTECTION ENGINE REMOVED" in e6o,
       f"rc={e6.returncode} out={e6o[-250:]!r}")
 
+# ── 18. watch v2: --json / --json-out (watch/v1 schema, R4) ──
+j1 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "watch", "--json"],
+    env=env6, capture_output=True, text=True, timeout=300)
+check("watch --json: valid JSON, schema, exit 0 (clean run)",
+      j1.returncode == 0
+      and json.loads(j1.stdout).get("schema") == "info-guard/watch/v1",
+      f"rc={j1.returncode} out={j1.stdout[-200:]!r} err={j1.stderr[-120:]!r}")
+j1o = json.loads(j1.stdout)
+check("watch --json: stdout pure JSON (no chatter lines)",
+      "info-guard] watch" not in j1.stdout,
+      f"stdout={j1.stdout[-200:]!r}")
+check("watch --json: clean status + empty exposure",
+      j1o["watch"]["status"] == "clean"
+      and j1o["exposure"]["new_values"] == []
+      and j1o["exposure"]["resolved_values"] == [])
+check("watch --json: assessment before/after totals reconcile",
+      j1o["assessment"]["before"]["credential_shaped"] == 4
+      and j1o["assessment"]["after"]["credential_shaped"] == 4
+      and j1o["assessment"]["before"]["distinct_values"] == 3)
+check("watch --json: engine transition facts present",
+      "engine" in j1o and j1o["engine"]["state_before"] == j1o["engine"]["state_after"])
+check("watch --json: no raw values AND no value sha256s (R4/MAJ A3)",
+      jwt not in j1.stdout and dsc not in j1.stdout
+      and hashlib.sha256(jwt.encode()).hexdigest() not in j1.stdout
+      and hashlib.sha256(dsc.encode()).hexdigest() not in j1.stdout,
+      "raw value or value-sha256 leaked into watch JSON")
+# --json on a changed run (new value): exposure populated, exit 1
+j2_new = "sk-" + "jsonprobe123456789"
+with open(os.path.join(pf_home, "sessions", "session_20260505_075138_d.jsonl"),
+          "a") as f:
+    f.write("ANTHROPIC_API_KEY=" + j2_new + "\n")
+j2 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "watch", "--json"],
+    env=env6, capture_output=True, text=True, timeout=300)
+j2o = json.loads(j2.stdout)
+check("watch --json: changed run -> status changed, exit 1",
+      j2.returncode == 1 and j2o["watch"]["status"] == "changed")
+check("watch --json: new value row shape (masked, no sha)",
+      len(j2o["exposure"]["new_values"]) == 1
+      and j2o["exposure"]["new_values"][0]["value_masked"] == "sk...89"
+      and "value_sha256" not in j2o["exposure"]["new_values"][0])
+# --json-out: atomic 0600 write, identical object, missing path = 2
+wout = os.path.join(tmp, "watch.json")
+j3 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "watch", "--json-out", wout],
+    env=env6, capture_output=True, text=True, timeout=300)
+check("watch --json-out: file written 0600",
+      os.path.exists(wout) and (os.stat(wout).st_mode & 0o777) == 0o600)
+j3o = json.load(open(wout))
+# j2's run refreshed the baseline (j2_new became known), so compare the
+# --json-out object against a --json run on the SAME (now settled) state
+j3b = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "watch", "--json"],
+    env=env6, capture_output=True, text=True, timeout=300)
+j3bo = json.loads(j3b.stdout)
+j3bo["watch"]["generated"] = j3o["watch"]["generated"]  # same-second tolerance
+check("watch --json-out: identical object to --json stdout",
+      j3o == j3bo)
+j4 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "watch", "--json-out"],
+    env=env6, capture_output=True, text=True, timeout=60)
+check("watch --json-out: missing path is usage error 2",
+      j4.returncode == 2 and "requires a file path" in (j4.stdout + j4.stderr),
+      f"rc={j4.returncode}")
+# protection deltas in JSON (reuse prot_home: add a literal via file)
+with open(prot_cl, "w") as f:
+    f.write(json.dumps({"literals": [prot_lit_a, prot_lit_b, prot_lit_c,
+                                     "probeliteralvalue4"]}))
+j5 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "watch", "--json"],
+    env=env_prot, capture_output=True, text=True, timeout=300)
+j5o = json.loads(j5.stdout)
+check("watch --json: protection deltas in object (counts only)",
+      j5o["protection"]["custom_literals"]["added"] == 2
+      and j5o["protection"]["status"] == "changed"
+      and "probeliteralvalue4" not in j5.stdout
+      and hashlib.sha256(prot_lit_a.encode()).hexdigest() not in j5.stdout,
+      "protection raw value or sha leaked into watch JSON")
+
 
 print(f"\n[test] {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

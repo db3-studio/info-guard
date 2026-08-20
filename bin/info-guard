@@ -729,15 +729,22 @@ def cmd_watch(args):
         if p.is_dir():
             scan_dirs.append(p)
     dirs = scan_dirs
+    json_mode = opts["json"]
+
+    def say(msg):
+        # JSON mode: stdout is pure JSON — informational chatter goes
+        # to stderr (preflight precedent, review MIN E2).
+        print(msg, file=sys.stderr if json_mode else sys.stdout)
+
     if not dirs:
-        print(f"[info-guard] watch: no scan targets under {_HERMES_HOME} "
-              f"({', '.join(_PREFLIGHT_DIRS)}) — nothing to scan")
+        say(f"[info-guard] watch: no scan targets under {_HERMES_HOME} "
+            f"({', '.join(_PREFLIGHT_DIRS)}) — nothing to scan")
         return 0
     _ensure_gitleaks()
     all_hits, gitleaks_ok = _collect_hits(dirs)
     if not gitleaks_ok:
-        print("[info-guard] watch: ⚠ gitleaks not found on PATH — key-shape "
-              "pass only")
+        say("[info-guard] watch: ⚠ gitleaks not found on PATH — key-shape "
+            "pass only")
     all_hits.sort(key=lambda h: (h[2], h[3]))
     current = _watch_values(all_hits)
     # One assessment per run (A2): totals + per-file map for the
@@ -757,6 +764,19 @@ def cmd_watch(args):
             prev = json.loads(baseline_path.read_text())
         except (OSError, ValueError):
             prev = None  # broken baseline: rebuild (never crash)
+    empty_d = {"new_values": [], "resolved_values": [], "changed_values": [],
+               "new_families": [], "resolved_families": [],
+               "changed_files": []}
+
+    def emit_json(prev_obj, d_obj, pd_obj, et_obj):
+        obj = _watch_json_object(prev_obj, now, assessment_snap, d_obj,
+                                 pd_obj, et_obj)
+        if opts["json_out"]:
+            _atomic_write_json(Path(opts["json_out"]), obj)
+            say(f"[info-guard] watch: JSON written to {opts['json_out']}")
+        else:
+            print(json.dumps(obj, indent=2))
+
     if prev is not None and prev.get("schema") == "info-guard/watch-baseline/v1":
         # v1→v2 migration (R2/A4): values reconciled against the CURRENT
         # scan — keep those still present (first_seen preserved), drop
@@ -764,23 +784,31 @@ def cmd_watch(args):
         # snapshotted from current state. First v2 run is delta-free.
         _write_watch_baseline(baseline_path, current, prev,
                               protection, assessment_snap)
-        print("[info-guard] watch: baseline migrated to v2 — protection "
-              "state baselined at migration")
+        say("[info-guard] watch: baseline migrated to v2 — protection "
+            "state baselined at migration")
+        if json_mode:
+            pd0 = _protection_deltas(protection, protection)
+            et0 = _engine_transition(protection, protection)
+            emit_json(prev, empty_d, pd0, et0)
         return 0
     if prev is None:
         _write_watch_baseline(baseline_path, current, None,
                               protection, assessment_snap)
         verb = "reset — " if reset else ""
-        print(f"[info-guard] watch: baseline {verb}created — "
-              f"{_n(len(current))} known credential-shaped "
-              f"value{'s' if len(current) != 1 else ''} "
-              "(re-run to detect new ones)")
+        say(f"[info-guard] watch: baseline {verb}created — "
+            f"{_n(len(current))} known credential-shaped "
+            f"value{'s' if len(current) != 1 else ''} "
+            "(re-run to detect new ones)")
+        if json_mode:
+            pd0 = _protection_deltas(protection, protection)
+            et0 = _engine_transition(protection, protection)
+            emit_json(None, empty_d, pd0, et0)
         return 0
     if (prev.get("tool_version") != _PACKAGE_VERSION
             or prev.get("gitleaks_version") != _GITLEAKS_VERSION):
-        print("[info-guard] watch: tool/gitleaks version changed — known "
-              "values retained (union), updated rules may surface fresh "
-              "findings")
+        say("[info-guard] watch: tool/gitleaks version changed — known "
+            "values retained (union), updated rules may surface fresh "
+            "findings")
     d = _watch_deltas(current, prev, assessment)
     pd = _protection_deltas(prev.get("protection"), protection)
     et = _engine_transition(prev.get("protection"), protection)
@@ -788,69 +816,80 @@ def cmd_watch(args):
                      or d["changed_values"] or d["changed_files"]
                      or pd["status"] == "changed"
                      or et["state_before"] != et["state_after"])
+    exit_code = 1 if (d["new_values"] or et["degraded"]) else 0
     if d["new_values"]:
-        print("[info-guard] watch: NEW credential-shaped values found "
-              "(masked 2+2 · type · family · count)")
+        say("[info-guard] watch: NEW credential-shaped values found "
+            "(masked 2+2 · type · family · count)")
         for e in d["new_values"]:
-            print(f"  {e['value_masked']:<18} {e['type'][:22]:<24} "
-                  f"{_n(e['count']):>6}  {e['family']}")
+            fam = _family_label(e["family"]) if e["family"] \
+                else "(no key context)"
+            say(f"  {e['value_masked']:<18} {e['type'][:22]:<24} "
+                f"{_n(e['count']):>6}  {fam}")
     if d["resolved_values"]:
-        print("[info-guard] watch: values no longer detected "
-              "(informational):")
+        say("[info-guard] watch: values no longer detected "
+            "(informational):")
         for e in d["resolved_values"]:
-            print(f"  {e['type'][:22]:<24} {_n(e['count']):>6}  {e['family']}  "
-                  f"(first seen {str(e['first_seen'])[:10]})")
-        print("  No longer detected in the current scan scope. This does not "
-              "confirm that the credential is dead or revoked.")
+            fam = _family_label(e["family"]) if e["family"] \
+                else "(no key context)"
+            say(f"  {e['type'][:22]:<24} {_n(e['count']):>6}  {fam}  "
+                f"(first seen {str(e['first_seen'])[:10]})")
+        say("  No longer detected in the current scan scope. This does not "
+            "confirm that the credential is dead or revoked.")
     if d["changed_values"]:
-        print("[info-guard] watch: occurrence counts changed "
-              "(informational):")
+        say("[info-guard] watch: occurrence counts changed "
+            "(informational):")
         for e in d["changed_values"]:
+            fam = _family_label(e["family"]) if e["family"] \
+                else "(no key context)"
             delta = e["count"] - e["count_before"]
-            print(f"  {e['value_masked']:<18} {e['type'][:22]:<24} "
-                  f"{_n(e['count_before']):>6} → {_n(e['count']):>6} "
-                  f"({delta:+d})  {e['family']}")
+            say(f"  {e['value_masked']:<18} {e['type'][:22]:<24} "
+                f"{_n(e['count_before']):>6} → {_n(e['count']):>6} "
+                f"({delta:+d})  {fam}")
     if d["new_families"] or d["resolved_families"]:
-        print("[info-guard] watch: families — new: "
-              + (", ".join(d["new_families"]) or "—")
-              + "; resolved: " + (", ".join(d["resolved_families"]) or "—"))
+        say("[info-guard] watch: families — new: "
+            + (", ".join(_family_label(f) if f else "(no key context)"
+                         for f in d["new_families"]) or "—")
+            + "; resolved: " + (", ".join(_family_label(f) if f
+                                          else "(no key context)"
+                                          for f in d["resolved_families"])
+                                or "—"))
     if d["changed_files"]:
-        print("[info-guard] watch: files with changed counts "
-              "(informational):")
+        say("[info-guard] watch: files with changed counts "
+            "(informational):")
         for f in d["changed_files"]:
-            print(f"  {f['file']}: {_n(f['before'])} → {_n(f['after'])}")
+            say(f"  {f['file']}: {_n(f['before'])} → {_n(f['after'])}")
     if pd["status"] == "changed":
         cl = pd["custom_literals"]
         kp = pd["key_patterns"]
         rp = pd["redact_patterns"]
         mp = pd["mask_policy"]
-        print("[info-guard] watch: protection configuration changed "
-              "(counts only, informational):")
+        say("[info-guard] watch: protection configuration changed "
+            "(counts only, informational):")
         if cl["added"] or cl["removed"]:
-            print(f"  Custom literals +{cl['added']} / -{cl['removed']}")
+            say(f"  Custom literals +{cl['added']} / -{cl['removed']}")
         if kp["added"] or kp["removed"]:
-            print(f"  Key patterns +{kp['added']} / -{kp['removed']}")
+            say(f"  Key patterns +{kp['added']} / -{kp['removed']}")
         if rp["changed"]:
-            print(f"  Pattern literals {_n(rp['literal_count_before'])} → "
-                  f"{_n(rp['literal_count_after'])} · key patterns "
-                  f"{_n(rp['key_pattern_count_before'])} → "
-                  f"{_n(rp['key_pattern_count_after'])}")
+            say(f"  Pattern literals {_n(rp['literal_count_before'])} → "
+                f"{_n(rp['literal_count_after'])} · key patterns "
+                f"{_n(rp['key_pattern_count_before'])} → "
+                f"{_n(rp['key_pattern_count_after'])}")
         if mp["changed"]:
-            print("  Mask policy changed")
-        print("  Note: configuration deltas only — whether protection "
-              "improved is answered by the next preflight, not watch")
+            say("  Mask policy changed")
+        say("  Note: configuration deltas only — whether protection "
+            "improved is answered by the next preflight, not watch")
     if et["state_before"] != et["state_after"]:
         if et["state_after"] == "active" and et["state_before"] == "none":
-            print("[info-guard] watch: 🟢 Engine installed")
+            say("[info-guard] watch: 🟢 Engine installed")
         elif et["state_after"] == "active" and et["state_before"] == "partial":
-            print("[info-guard] watch: 🟢 Protection restored")
+            say("[info-guard] watch: 🟢 Protection restored")
         elif et["state_after"] == "partial" and et["state_before"] == "active":
-            print("[info-guard] watch: 🟠 Protection degraded — Hermes is "
-                  "not fully applying the configuration")
+            say("[info-guard] watch: 🟠 Protection degraded — Hermes is "
+                "not fully applying the configuration")
         elif et["state_after"] == "none" and et["state_before"] == "active":
-            print("[info-guard] watch: 🔴 PROTECTION ENGINE REMOVED — "
-                  "existing configuration remains on disk, but Hermes is "
-                  "not actively applying it")
+            say("[info-guard] watch: 🔴 PROTECTION ENGINE REMOVED — "
+                "existing configuration remains on disk, but Hermes is "
+                "not actively applying it")
     if any_delta:
         # refresh-on-delta policy (review MAJ A1): rewrite the baseline
         # with current state — values = current scan (absent ones
@@ -858,13 +897,15 @@ def cmd_watch(args):
         # delta alerts exactly once; clean runs leave it untouched.
         _write_watch_baseline(baseline_path, current, prev,
                               protection, assessment_snap)
-        print(f"[info-guard] watch: baseline refreshed — {_n(len(current))} "
-              "values now known")
-        if d["new_values"] or et["degraded"]:
-            return 1
-        return 0
-    print(f"[info-guard] watch: no new credential-shaped values since "
-          f"{_fmt_generated(prev.get('generated', ''))}")
+        say(f"[info-guard] watch: baseline refreshed — {_n(len(current))} "
+            "values now known")
+        if json_mode:
+            emit_json(prev, d, pd, et)
+        return exit_code
+    say(f"[info-guard] watch: no new credential-shaped values since "
+        f"{_fmt_generated(prev.get('generated', ''))}")
+    if json_mode:
+        emit_json(prev, d, pd, et)
     return 0
 
 
@@ -890,10 +931,12 @@ def _watch_values(all_hits):
 def _watch_deltas(current, prev, assessment):
     """Exposure deltas vs the v2 baseline (proposal §2.2). Row shape:
     new/changed carry `value_masked` (2+2 — the value is IN the scan);
-    resolved rows carry type/family/count/first_seen only — the raw
-    value is gone from the scan, and sha256 is forbidden on this
-    surface (IG D49 / review MAJ A3). Families are labeled; files are
-    per-file count diffs (baseline assessment.files vs current)."""
+    resolved rows carry type/family/count/first_seen with
+    `value_masked: null` — the raw value is gone from the scan, and
+    sha256 is forbidden on this surface (IG D49 / review MAJ A3).
+    Families are raw (None for bare-token — the terminal labels, JSON
+    stays machine-friendly); files are per-file count diffs (baseline
+    assessment.files vs current)."""
     baseline_rows = {v["value_sha256"]: v for v in prev.get("values", [])}
     known = set(baseline_rows)
     d = {"new_values": [], "resolved_values": [], "changed_values": [],
@@ -901,7 +944,7 @@ def _watch_deltas(current, prev, assessment):
     fams_new, fams_res = set(), set()
     for value, e in current.items():
         sha = e["value_sha256"]
-        fam = _family_label(e["family"]) if e["family"] else "(no key context)"
+        fam = e["family"]
         if sha not in known:
             d["new_values"].append({"value_masked": _mask_value(value),
                                     "type": e["type"], "family": fam,
@@ -917,15 +960,13 @@ def _watch_deltas(current, prev, assessment):
     cur_shas = {e["value_sha256"] for e in current.values()}
     for sha, row in baseline_rows.items():
         if sha not in cur_shas:
-            fam = _family_label(row.get("family")) if row.get("family") \
-                else "(no key context)"
             d["resolved_values"].append(
-                {"type": row.get("type"), "family": fam,
-                 "count": row.get("count", 0),
+                {"value_masked": None, "type": row.get("type"),
+                 "family": row.get("family"), "count": row.get("count", 0),
                  "first_seen": row.get("first_seen")})
-            fams_res.add(fam)
-    d["new_families"] = sorted(fams_new)
-    d["resolved_families"] = sorted(fams_res)
+            fams_res.add(row.get("family"))
+    d["new_families"] = sorted(f for f in fams_new if f)
+    d["resolved_families"] = sorted(f for f in fams_res if f)
     # per-file credential_shaped count diff (files-with-findings map,
     # absent = 0; review MIN A2)
     base_files = (prev.get("assessment") or {}).get("files") or {}
@@ -1031,6 +1072,53 @@ def _parse_watch_args(args):
         i += 1
     opts["json"] = opts["json"] or opts["json_out"] is not None
     return opts, dirs
+
+
+def _watch_json_object(prev, now, assessment_snap, d, pd, et):
+    """watch/v1 object (proposal §2.4, IG D49): the PUBLIC delta
+    result. Exposure rows carry value_masked 2+2 (resolved rows:
+    null — value gone, sha256 forbidden); protection = counts +
+    fingerprints-derived deltas only; engine = transition facts."""
+    def totals(snap):
+        if not snap:
+            return None
+        return {"credential_shaped": snap.get("credential_shaped", 0),
+                "distinct_values": snap.get("distinct_values", 0),
+                "family_attributed": snap.get("family_attributed", 0),
+                "unattributed": snap.get("unattributed", 0)}
+    before = totals((prev or {}).get("assessment"))
+    rp = pd["redact_patterns"]
+    changed = bool(d["new_values"] or d["resolved_values"]
+                   or d["changed_values"] or d["changed_files"]
+                   or pd["status"] == "changed"
+                   or et["state_before"] != et["state_after"])
+    return {
+        "schema": "info-guard/watch/v1",
+        "tool": {"name": "info-guard", "version": _PACKAGE_VERSION},
+        "watch": {"generated": now,
+                  "baseline_generated": (prev or {}).get("generated"),
+                  "status": "changed" if changed else "clean"},
+        "assessment": {"before": before, "after": totals(assessment_snap)},
+        "exposure": {"new_values": d["new_values"],
+                     "resolved_values": d["resolved_values"],
+                     "changed_values": d["changed_values"],
+                     "new_families": d["new_families"],
+                     "resolved_families": d["resolved_families"],
+                     "changed_files": d["changed_files"]},
+        "protection": {"status": pd["status"],
+                       "custom_literals": pd["custom_literals"],
+                       "key_patterns": pd["key_patterns"],
+                       "redact_patterns": {"changed": rp["changed"],
+                                           "literal_count_before": rp["literal_count_before"],
+                                           "literal_count_after": rp["literal_count_after"],
+                                           "key_pattern_count_before": rp["key_pattern_count_before"],
+                                           "key_pattern_count_after": rp["key_pattern_count_after"]},
+                       "mask_policy": pd["mask_policy"]},
+        "engine": {"state_before": et["state_before"],
+                   "state_after": et["state_after"],
+                   "version_before": et["version_before"],
+                   "version_after": et["version_after"]},
+    }
 
 
 def _sha(s):
