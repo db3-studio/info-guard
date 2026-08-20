@@ -196,7 +196,9 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 - Test battery (`test.sh`) and CI matrix covering supported Hermes versions.
 - Docs: format spec, examples.
 
-[Unreleased]: https://github.com/db3-studio/info-guard/compare/v0.2.8...HEAD
+[Unreleased]: https://github.com/db3-studio/info-guard/compare/v0.3.1...HEAD
+[v0.3.1]: https://github.com/db3-studio/info-guard/compare/v0.3.0...v0.3.1
+[v0.3.0]: https://github.com/db3-studio/info-guard/compare/v0.2.8...v0.3.0
 [v0.2.8]: https://github.com/db3-studio/info-guard/compare/v0.2.7...v0.2.8
 [v0.2.7]: https://github.com/db3-studio/info-guard/compare/v0.2.6...v0.2.7
 [v0.2.6]: https://github.com/db3-studio/info-guard/compare/v0.2.5...v0.2.6
