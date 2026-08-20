@@ -53,6 +53,10 @@ Usage:
                                     1 broken (run install.sh), 2 error.
                                     No alert channel assumed — wire the
                                     non-zero exit to your scheduler.
+  info-guard literals add VALUE...  Register custom literals (ids assigned;
+                                    --mask STYLE, --file FILE for bulk,
+                                    --json for script capture).
+  info-guard literals list [--json] List registered literals (id + masked).
 
 Sources merged by `build`:
   1. Every KEY=value pair from the env files, except:
@@ -78,6 +82,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -92,7 +97,7 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.4.1"
+_PACKAGE_VERSION = "0.4.2"
 
 # Per-subcommand usage lines (v0.4.1, IG D55): printed by
 # `info-guard <cmd> --help` (exit 0). Mirror the __doc__ usage block —
@@ -104,6 +109,8 @@ _SUBCOMMAND_USAGE = {
     "watch": "info-guard watch [DIR ...] [--reset] [--json] [--json-out FILE]   Delta monitor vs the watch baseline (cron-friendly exits)",
     "setup": "info-guard setup [--all]            Interactive bootstrap (registers custom literals, builds patterns)",
     "check": "info-guard check                    Health check / schedulable watchdog",
+    "literals": "info-guard literals add VALUE... [--mask STYLE] [--file FILE] [--json]   Register custom literals (ids assigned)\n"
+                "info-guard literals list [--json]   List registered literals (id + masked value)",
 }
 
 VALID_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -228,20 +235,22 @@ def cmd_build(env_files):
         key_patterns[k] = True
     # Hand-edited custom literals (PII — emails, names, numbers, anything the
     # user decides is sensitive). The file is a SOURCE, never clobbered by
-    # rebuilds: edit it, then `info-guard build` picks it up.
-    if CUSTOM_LITERALS.exists():
-        try:
-            for item in json.loads(CUSTOM_LITERALS.read_text()).get("literals", []) or []:
-                if isinstance(item, dict):
-                    v = item.get("value")
-                    if isinstance(v, str) and v:
-                        raw_lits.append(v)
-                        if "mask" in item:
-                            val_masks[v] = item["mask"]
-                elif isinstance(item, str) and item:
-                    raw_lits.append(item)
-        except (OSError, ValueError):
-            print(f"[info-guard] ⚠ {CUSTOM_LITERALS.name} unreadable — skipped (fail-safe)")
+    # rebuilds: edit it, then `info-guard build` picks it up. Read through
+    # the canonical loader (v0.4.2, MAJ-1) — build also triggers the lazy
+    # registry migration, so a v1 registry cannot linger for build-only users.
+    entries, ok = _load_registry()
+    if not ok:
+        print(f"[info-guard] ⚠ {CUSTOM_LITERALS.name} unreadable — skipped (fail-safe)")
+    else:
+        for item in entries:
+            if isinstance(item, dict):
+                v = item.get("value")
+                if isinstance(v, str) and v:
+                    raw_lits.append(v)
+                    if "mask" in item:
+                        val_masks[v] = item["mask"]
+            elif isinstance(item, str) and item:
+                raw_lits.append(item)
     # Longest-first so overlapping literals mask deterministically
     literals = []
     for v in sorted(set(raw_lits), key=len, reverse=True):
@@ -790,6 +799,16 @@ def cmd_watch(args):
     known_fps = {fp.removeprefix("sha256:") for fp in
                  (protection.get("custom_literals") or {})
                  .get("fingerprints", [])}
+    # value_id map (v0.4.2, IG D64/D65): sha256(value) -> registry id,
+    # built from the loader's DEDUPED entries (first-wins, NIT-3) —
+    # in-memory only; sha stays an internal comparison primitive (D56).
+    sha_id = {}
+    entries, _ok = _load_registry()
+    for item in entries:
+        if isinstance(item, dict):
+            v, i = item.get("value"), item.get("id")
+            if isinstance(v, str) and v and isinstance(i, str) and i:
+                sha_id[_sha(v)] = i
     assessment_snap = _snapshot_assessment_totals(assessment)
     baseline_path = STATE_DIR / "watch-baseline.json"
     prev = None
@@ -843,10 +862,10 @@ def cmd_watch(args):
         say("[info-guard] watch: tool/gitleaks version changed — known "
             "values retained (union), updated rules may surface fresh "
             "findings")
-    d = _watch_deltas(current, prev, assessment)
+    d = _watch_deltas(current, prev, assessment, sha_id)
     pd = _protection_deltas(prev.get("protection"), protection)
     et = _engine_transition(prev.get("protection"), protection)
-    pm = _protected_value_matches(current, prev, known_fps)
+    pm = _protected_value_matches(current, prev, known_fps, sha_id)
     pm_alarm = [m for m in pm if m["delta"] in ("new", "increased")]
     # Overlay rule (IG D54): JSON keeps protected rows in new_values /
     # changed_values AND protected_values (one event); the TERMINAL
@@ -1020,7 +1039,7 @@ def cmd_watch(args):
     say(f"[info-guard] watch: no new credential-shaped values since "
         f"{_fmt_generated(prev.get('generated', ''))}")
     if json_mode:
-        pm = _protected_value_matches(current, prev, known_fps)
+        pm = _protected_value_matches(current, prev, known_fps, sha_id)
         emit_json(prev, d, pd, et, pm)
     return 0
 
@@ -1044,35 +1063,46 @@ def _watch_values(all_hits):
     return out
 
 
-def _watch_deltas(current, prev, assessment):
+def _watch_deltas(current, prev, assessment, sha_id=None):
     """Exposure deltas vs the v2 baseline (proposal §2.2). Row shape:
     new/changed carry `value_masked` (2+2 — the value is IN the scan);
     resolved rows carry type/family/count/first_seen with
     `value_masked: null` — the raw value is gone from the scan, and
     sha256 is forbidden on this surface (IG D49 / review MAJ A3).
+    Protected values (sha in the registry set) additionally carry
+    `value_id` — the SAME id on the overlay row and the protected row
+    (IG D54 one-event rule); unregistered rows have no `value_id` key
+    at all (absent, never null); resolved rows never carry one.
     Families are raw (None for bare-token — the terminal labels, JSON
     stays machine-friendly); files are per-file count diffs (baseline
     assessment.files vs current)."""
     baseline_rows = {v["value_sha256"]: v for v in prev.get("values", [])}
     known = set(baseline_rows)
+    sha_id = sha_id or {}
     d = {"new_values": [], "resolved_values": [], "changed_values": [],
          "new_families": [], "resolved_families": [], "changed_files": []}
     fams_new, fams_res = set(), set()
     for value, e in current.items():
         sha = e["value_sha256"]
         fam = e["family"]
+        vid = sha_id.get(sha)
         if sha not in known:
-            d["new_values"].append({"value_masked": _mask_value(value),
-                                    "type": e["type"], "family": fam,
-                                    "count": e["count"]})
+            row = {"value_masked": _mask_value(value),
+                   "type": e["type"], "family": fam,
+                   "count": e["count"]}
+            if vid:
+                row["value_id"] = vid
+            d["new_values"].append(row)
             fams_new.add(fam)
         else:
             old = baseline_rows[sha]
             if old.get("count") != e["count"]:
-                d["changed_values"].append(
-                    {"value_masked": _mask_value(value), "type": e["type"],
-                     "family": fam, "count": e["count"],
-                     "count_before": old.get("count", 0)})
+                row = {"value_masked": _mask_value(value), "type": e["type"],
+                       "family": fam, "count": e["count"],
+                       "count_before": old.get("count", 0)}
+                if vid:
+                    row["value_id"] = vid
+                d["changed_values"].append(row)
     cur_shas = {e["value_sha256"] for e in current.values()}
     for sha, row in baseline_rows.items():
         if sha not in cur_shas:
@@ -1098,17 +1128,21 @@ def _watch_deltas(current, prev, assessment):
     return d
 
 
-def _protected_value_matches(current, prev, known_fps):
-    """Protected-value matches (v0.4.1, IG D53/D54): scan values whose
-    value_sha256 is in the LIVE custom_literals fingerprint set (the
-    app's known-value registry). Rows are the PUBLIC shape — masked 2+2,
-    type, family, count, count_before (increased/decreased only), delta
-    (new|increased|decreased|unchanged) — never sha256 (the sha is an
-    internal comparison primitive only, D56). A value absent from the
-    current scan never appears here: it surfaces via resolved_values.
-    Empty/unreadable registry -> empty list (fail-safe)."""
+def _protected_value_matches(current, prev, known_fps, sha_id=None):
+    """Protected-value matches (v0.4.1, IG D53/D54; value_id v0.4.2,
+    IG D64/D65): scan values whose value_sha256 is in the LIVE
+    custom_literals fingerprint set (the app's known-value registry).
+    Rows are the PUBLIC shape — masked 2+2, type, family, count,
+    count_before (increased/decreased only), delta
+    (new|increased|decreased|unchanged), value_id (the registry id of
+    the matched entry — same id the overlay row carries, D54) — never
+    sha256 (the sha is an internal comparison primitive only, D56). A
+    value absent from the current scan never appears here: it surfaces
+    via resolved_values. Empty/unreadable registry -> empty list
+    (fail-safe)."""
     if not known_fps:
         return []
+    sha_id = sha_id or {}
     baseline_rows = {v["value_sha256"]: v for v in (prev.get("values") or [])}
     rows = []
     for value, e in current.items():
@@ -1116,6 +1150,9 @@ def _protected_value_matches(current, prev, known_fps):
             continue
         row = {"value_masked": _mask_value(value), "type": e["type"],
                "family": e["family"], "count": e["count"]}
+        vid = sha_id.get(e["value_sha256"])
+        if vid:
+            row["value_id"] = vid
         old = baseline_rows.get(e["value_sha256"])
         if old is None:
             row["delta"] = "new"
@@ -1291,18 +1328,18 @@ def _snapshot_protection():
                             "mask_policy": None},
         "engine": {"engine_state": "none", "engine_version": None},
     }
-    # custom_literals.json: hand-edited entries, plain strings or
-    # {"value", "mask"} dicts. Set semantics: duplicates = one.
+    # custom_literals.json via the canonical loader (v0.4.2): normalized
+    # entries carry ids; fingerprints are sha256 of unique VALUES only —
+    # the id field must never enter the fingerprint set (D45; an id leak
+    # would fabricate added/removed counts on every migration).
     lits = []
     if CUSTOM_LITERALS.exists():
-        try:
-            for item in (json.loads(CUSTOM_LITERALS.read_text())
-                         .get("literals", []) or []):
+        entries, ok = _load_registry()
+        if ok:
+            for item in entries:
                 v = item.get("value") if isinstance(item, dict) else item
                 if isinstance(v, str) and v:
                     lits.append(v)
-        except (OSError, ValueError):
-            lits = []  # unreadable: zeros, never crash
     uniq = sorted(set(lits))
     snap["custom_literals"]["count"] = len(uniq)
     snap["custom_literals"]["fingerprints"] = [
@@ -2207,15 +2244,239 @@ def _scan_dirs(names=None):
             for p in [_HERMES_HOME / name] if p.is_dir()]
 
 
-def _load_custom_values():
-    """Existing custom literals as a list of values (dict entries keep their
-    mask; plain strings stay plain). Returns ([entries], ok)."""
+_REGISTRY_VERSION = 2
+
+
+def _new_id() -> str:
+    """Opaque 64-bit random registration id (IG D65 — no derivation
+    channel; value_id is NOT derivable from the value)."""
+    return secrets.token_hex(8)
+
+
+def _normalize_entries(raw):
+    """Add-only normalization for registry literals (v0.4.2, IG D64/D65):
+    plain strings -> {"value", "id"} · dicts without id -> +id · unknown
+    entry fields preserved verbatim · non-string entries preserved
+    verbatim (never dropped from the file; remain non-matchable as
+    before) · duplicates collapse by value, first entry wins (D45 set
+    semantics — one registration per unique value) · duplicate ids
+    repaired deterministically (later entry gets a fresh id + stderr
+    warning, never echoes the raw value).
+    Returns (entries, n_new_ids, need_write)."""
+    entries, seen, ids = [], set(), set()
+    n_new, need = 0, False
+    for item in raw:
+        if isinstance(item, dict):
+            v = item.get("value")
+            if isinstance(v, str) and v:
+                if v in seen:
+                    continue
+                seen.add(v)
+                e = dict(item)  # preserve unknown fields (add-only)
+                if not e.get("id"):
+                    e["id"] = _new_id()
+                    n_new += 1
+                    need = True
+                elif e["id"] in ids:
+                    print(f"[info-guard] warning: duplicate literal id "
+                          f"repaired — entry for {_mask_value(v)}",
+                          file=sys.stderr)
+                    e["id"] = _new_id()
+                    n_new += 1
+                    need = True
+                ids.add(e["id"])
+                entries.append(e)
+            else:
+                entries.append(dict(item))  # verbatim (MIN-1)
+        elif isinstance(item, str) and item:
+            if item in seen:
+                continue
+            seen.add(item)
+            entries.append({"value": item, "id": _new_id()})
+            ids.add(entries[-1]["id"])
+            n_new += 1
+            need = True
+        else:
+            entries.append(item)  # non-string preserved verbatim (MIN-1)
+    return entries, n_new, need
+
+
+def _load_registry():
+    """Canonical registry loader (v0.4.2, IG D64/D65) — the ONE reader
+    every stage uses (snapshot, setup, build, watch, literals):
+    load → normalize (add-only) → validate (dup-id repair) → migrate
+    (write only when stale; idempotent) → return ([entries], ok).
+
+    Contract:
+    - missing file -> ([], True)  — empty registry is a valid, writable
+      state (first-run `setup` must register; CRIT-1)
+    - unreadable/parse-error -> ([], False)  — caller keeps the
+      no-clobber guard; never crash, never clobber
+    - migration: `version` missing or < 2 -> one atomic rewrite to
+      v2 (unknown top-level keys preserved verbatim — MIN-2) with a
+      one-time stderr note; `version` > 2 -> read-only pass-through
+      (entries as-is, no writes, one stderr warning — MIN-5)
+    - ALL chatter goes to stderr (stdout purity: watch --json /
+      literals --json on the first post-upgrade run — MAJ-2)."""
     if not CUSTOM_LITERALS.exists():
         return [], True
     try:
-        return json.loads(CUSTOM_LITERALS.read_text()).get("literals", []) or [], True
+        doc = json.loads(CUSTOM_LITERALS.read_text())
     except (OSError, ValueError):
         return [], False
+    if not isinstance(doc, dict):
+        return [], False
+    raw = doc.get("literals", []) or []
+    if not isinstance(raw, list):
+        raw = []
+    version = doc.get("version", 1)
+    if version > _REGISTRY_VERSION:
+        print(f"[info-guard] ⚠ {CUSTOM_LITERALS.name} version {version} is "
+              f"newer than this app understands (v{_REGISTRY_VERSION}) — "
+              f"loaded read-only", file=sys.stderr)
+        return [e for e in raw if isinstance(e, (str, dict))], True
+    entries, n_new, need = _normalize_entries(raw)
+    if need or version != _REGISTRY_VERSION:
+        out = dict(doc)  # preserve unknown top-level keys (MIN-2)
+        out["version"] = _REGISTRY_VERSION
+        out["literals"] = entries
+        _atomic_write_json(CUSTOM_LITERALS, out)
+        print(f"[info-guard] {CUSTOM_LITERALS.name} migrated to "
+              f"v{_REGISTRY_VERSION} — {_n(n_new)} "
+              f"entr{'y' if n_new == 1 else 'ies'} got ids",
+              file=sys.stderr)
+    return entries, True
+
+
+def cmd_literals(args):
+    """literals subcommand group (v0.4.2, IG D69): add/list registry
+    entries. Every mutation goes through the canonical _load_registry()
+    normalize/write path — no second implementation (external review
+    requirement 3). D55 rules: --help anywhere -> usage exit 0 (global
+    handler); unknown --* flags -> verbatim stderr warning + continue;
+    usage errors -> exit 2. Result lines on stdout, ALL chatter on
+    stderr (MAJ-2)."""
+    if not args:
+        print(_SUBCOMMAND_USAGE["literals"], file=sys.stderr)
+        return 2
+    sub, rest = args[0], args[1:]
+    if sub == "add":
+        return _literals_add(rest)
+    if sub == "list":
+        return _literals_list(rest)
+    print(f"[info-guard] unknown literals subcommand: {sub} "
+          f"(try `info-guard literals --help`)", file=sys.stderr)
+    return 2
+
+
+def _literals_add(args):
+    json_mode, mask, file_path, values = False, None, None, []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--json":
+            json_mode = True
+        elif a == "--mask":
+            if i + 1 >= len(args):
+                print("[info-guard] usage: --mask STYLE required",
+                      file=sys.stderr)
+                return 2
+            mask = args[i + 1]  # applies to every value; last wins (MIN-4)
+            i += 1
+        elif a == "--file":
+            if i + 1 >= len(args):
+                print("[info-guard] usage: --file FILE required",
+                      file=sys.stderr)
+                return 2
+            file_path = args[i + 1]
+            i += 1
+        elif a.startswith("--"):
+            print(f"[info-guard] Warning: unknown option '{a}'",
+                  file=sys.stderr)
+        else:
+            values.append(a)
+        i += 1
+    if file_path:
+        try:
+            with open(file_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        values.append(line)
+        except OSError:
+            print(f"[info-guard] ✗ cannot read {file_path}", file=sys.stderr)
+            return 2
+    if not values:
+        print(_SUBCOMMAND_USAGE["literals"], file=sys.stderr)
+        return 2
+    existing, ok = _load_registry()
+    if not ok:
+        print(f"[info-guard] ⚠ existing {CUSTOM_LITERALS.name} unreadable — "
+              f"will not overwrite", file=sys.stderr)
+        return 1
+    pre = set()
+    for item in existing:
+        sig = item if isinstance(item, str) else item.get("value")
+        if isinstance(sig, str) and sig:
+            pre.add(sig)
+    merged, seen = [], set()
+    for item in existing + [{"value": v, "mask": mask} if mask else v
+                            for v in values]:
+        sig = item if isinstance(item, str) else item.get("value")
+        if sig in seen:
+            continue
+        seen.add(sig)
+        merged.append(item)
+    entries, _n, _w = _normalize_entries(merged)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(CUSTOM_LITERALS, {"version": 2, "literals": entries})
+    by_value = {}
+    for item in entries:
+        if isinstance(item, dict) and isinstance(item.get("value"), str):
+            by_value[item["value"]] = item.get("id")
+    added, duplicates = [], []
+    for v in values:
+        rec = {"value_masked": _mask_value(v), "id": by_value.get(v)}
+        (duplicates if v in pre else added).append(rec)
+    if json_mode:
+        print(json.dumps({"added": added, "duplicates": duplicates}, indent=2))
+    else:
+        for rec in added + duplicates:
+            print(f"value {rec['id']}")
+    return 0
+
+
+def _literals_list(args):
+    json_mode = False
+    for a in args:
+        if a == "--json":
+            json_mode = True
+        elif a.startswith("--"):
+            print(f"[info-guard] Warning: unknown option '{a}'",
+                  file=sys.stderr)
+    entries, ok = _load_registry()
+    if not ok:
+        print(f"[info-guard] ⚠ {CUSTOM_LITERALS.name} unreadable",
+              file=sys.stderr)
+        print(json.dumps({"literals": []}, indent=2) if json_mode else "")
+        return 0
+    rows = []
+    for item in entries:
+        if isinstance(item, dict):
+            v = item.get("value")
+            if isinstance(v, str) and v:
+                rows.append((v, item.get("id") or ""))
+        elif isinstance(item, str) and item:
+            rows.append((item, ""))
+    rows.sort(key=lambda r: r[0])
+    if json_mode:
+        print(json.dumps({"literals": [{"value_masked": _mask_value(v),
+                                        "id": i} for v, i in rows]},
+                         indent=2))
+    else:
+        for v, i in rows:
+            print(f"{i or '-':<16} {_mask_value(v)}")
+    return 0
 
 
 def cmd_setup(args):
@@ -2295,8 +2556,9 @@ def cmd_setup(args):
             ans = ans or ("y" if default else "n")
         if ans == "y":
             env_sources.append(str(cand))
-    # write custom_literals.json (merge, never clobber)
-    existing, ok = _load_custom_values()
+    # write custom_literals.json (merge, never clobber) — through the
+    # canonical normalize path so new entries get ids at write time
+    existing, ok = _load_registry()
     if not ok:
         print(f"[info-guard] ⚠ existing {CUSTOM_LITERALS.name} unreadable — "
               f"will not overwrite; new values skipped")
@@ -2310,8 +2572,9 @@ def cmd_setup(args):
                 continue
             seen.add(sig)
             merged.append(item)
+        entries, _n_new, _need = _normalize_entries(merged)
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        _atomic_write_json(CUSTOM_LITERALS, {"literals": merged})
+        _atomic_write_json(CUSTOM_LITERALS, {"version": 2, "literals": entries})
         print(f"[info-guard] wrote {len(added)} new literal(s) → {CUSTOM_LITERALS}")
     elif not env_sources:
         print("[info-guard] nothing new to register — no changes made")
@@ -2469,6 +2732,8 @@ def main(argv):
         return cmd_setup(rest)
     if cmd == "check":
         return cmd_check(rest)
+    if cmd == "literals":
+        return cmd_literals(rest)
     print(f"[info-guard] unknown command: {cmd} (try `info-guard --help`)")
     return 2
 

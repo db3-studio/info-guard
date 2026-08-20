@@ -228,7 +228,18 @@ optional install) is left alone — it's a standalone tool.
 
 ## Add your own secrets
 
-Edit `<hermes-home>/state/info-guard/custom_literals.json`:
+The sanctioned way (v0.4.2) — registers the value, assigns its `value_id`
+(printed), and writes the file for you:
+
+```bash
+./bin/info-guard literals add "someone@example.com"
+./bin/info-guard literals add "anything-sensitive" --mask full
+./bin/info-guard literals list
+```
+
+You can still edit `<hermes-home>/state/info-guard/custom_literals.json`
+directly (plain strings or `{"value", "mask"}` dicts are fine — the app
+assigns `id` fields on the next load; nothing you add is ever stripped):
 
 ```json
 {"literals": ["someone@example.com", {"value": "anything-sensitive", "mask": "full"}]}
@@ -236,7 +247,8 @@ Edit `<hermes-home>/state/info-guard/custom_literals.json`:
 
 Then `./bin/info-guard build`. Live within seconds — no restarts, survives
 rebuilds. Email addresses, phone numbers, API tokens, names, anything you
-decide is sensitive.
+decide is sensitive. The `id` on each entry is the `value_id` that
+`watch --json` emits on protected rows — the join key for alert consumers.
 
 `info-guard build` also pulls every secret-shaped `KEY=value` from your
 `.env` files into the pattern file automatically (non-secret keys — hosts,

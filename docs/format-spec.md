@@ -138,16 +138,56 @@ is that anything able to write that path controls redaction. If that is
 unacceptable in your threat model, keep the registry under your own
 `$HERMES_HOME` and enforce the permissions there.
 
-## Custom literals (the PII workflow)
+## Custom literals (the PII workflow) — registry v2 (v0.4.2, IG D64–D69)
 
 `<state>/custom_literals.json` — hand-edited, survives rebuilds, masking only
-(never part of detection):
+(never part of detection). Registry v2 shape:
 
 ```json
-{"literals": ["someone@example.com", {"value": "anything-you-want", "mask": "full"}]}
+{"version": 2, "literals": [
+  "someone@example.com",
+  {"value": "anything-you-want", "mask": "full", "id": "3f2a91c4e8b6d705"}
+]}
 ```
 
-Edit it, then run `info-guard build` — live within seconds, no restarts.
+**`id`** — an opaque 16-hex random registration id (v0.4.2). The app
+assigns it: plain-string entries and id-less dicts get one on the next
+load, and the file is rewritten once (lazy migration, one-time stderr
+note). This is the `value_id` that watch/v1 JSON carries on protected
+rows — the consumer's join key into this file (see
+`docs/watch-schema.md`).
+
+**File contract (add-only):** the app may normalize the file to add
+ids, but it NEVER strips anything — unknown entry fields (e.g. `mask`,
+`note`), non-string entries, and unknown top-level keys are preserved
+verbatim; duplicate values collapse to the first entry (one
+registration per unique value, so one value = one id in practice);
+duplicate ids are repaired deterministically with a stderr warning.
+Unreadable files are never overwritten. Old (v0.4.1 and earlier)
+binaries still read a v2 file (dict entries + `version` key tolerated).
+
+**The sanctioned add path is the CLI** (v0.4.2, IG D69 — every mutation
+goes through the same canonical loader/writer):
+
+```
+info-guard literals add VALUE... [--mask STYLE] [--file FILE] [--json]
+info-guard literals list [--json]
+```
+
+`literals add` prints the assigned id per value; duplicate values return
+the existing id (no new entry); `--mask` applies to every value in the
+invocation (last flag wins); `--file` reads line-delimited values
+(blank lines and `#` comments skipped); explicit registration accepts
+any non-empty string (no 8-char floor — short/PIN-class values are
+legal; `setup`'s floor is unchanged). `literals list` may perform the
+one-time migration write when the registry is stale — a read command
+that normalizes once; `--json` output stays pure (all chatter on
+stderr). Exit codes: 0 success, 1 unreadable registry (no write), 2
+usage. D55 rules apply (`--help` → usage exit 0 anywhere; unknown
+`--*` flags → verbatim warning + continue).
+
+Hand-editing still works: edit the file, then `info-guard build` — live
+within seconds, no restarts.
 
 ## Preflight report format (v0.2.4+)
 

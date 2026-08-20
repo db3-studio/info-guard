@@ -20,6 +20,11 @@ jobs:
         ref: [3c27eb623, 720f0443a, df4b65147, 7339f5f, 9f13bbbf]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # full history + tags: the battery's downgrade assertion
+          # (value_id D5) extracts `git show v0.4.1:bin/info-guard`
+          # (IG D64–D69, MIN-3)
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5

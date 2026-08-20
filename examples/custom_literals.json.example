@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "literals": [
     "someone@example.com",
     "+1-555-010-1234",

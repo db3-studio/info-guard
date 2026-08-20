@@ -14,7 +14,10 @@ added v0.4.1 (2026-08-20, IG D51–D56)** — additive only, schema stays
 amended the row shape pre-build (review MAJ A3): exposure rows carry
 `value_masked` (2+2) — **`value_sha256` is FORBIDDEN in this object**
 (the private 0600 baseline keeps sha256; this is the public surface, and
-sha256 of low-entropy values is brute-forceable).
+sha256 of low-entropy values is brute-forceable). **`value_id` added
+v0.4.2 (2026-08-20, IG D64–D69)** — additive opaque registration ids on
+protected rows (protected_values + the overlaid new/changed rows), so
+consumers can join an alert to the exact `custom_literals.json` entry.
 
 ## Architecture
 
@@ -37,7 +40,7 @@ in-memory delta object — never a second implementation.
 ```json
 {
   "schema": "info-guard/watch/v1",
-  "tool": {"name": "info-guard", "version": "0.4.1"},
+  "tool": {"name": "info-guard", "version": "0.4.2"},
   "watch": {
     "generated": "2026-08-20T16:53:00Z",
     "baseline_generated": "2026-08-19T16:53:00Z",
@@ -50,13 +53,18 @@ in-memory delta object — never a second implementation.
                "family_attributed": 9, "unattributed": 1}
   },
   "exposure": {
-    "new_values": [],
+    "new_values": [{"value_masked": "sk...90", "type": "API key",
+                    "family": "HASS_TOKEN", "count": 2,
+                    "value_id": "3f2a91c4e8b6d705"}],
     "resolved_values": [],
     "changed_values": [],
-    "new_families": [],
+    "new_families": ["HASS_TOKEN"],
     "resolved_families": [],
     "changed_files": [],
-    "protected_values": []
+    "protected_values": [{"value_masked": "sk...90", "type": "API key",
+                          "family": "HASS_TOKEN", "count": 2,
+                          "delta": "new",
+                          "value_id": "3f2a91c4e8b6d705"}]
   },
   "protection": {
     "status": "unchanged",
@@ -71,7 +79,7 @@ in-memory delta object — never a second implementation.
   },
   "engine": {
     "state_before": "active", "state_after": "active",
-    "version_before": "0.3.1", "version_after": "0.4.1"
+    "version_before": "0.3.1", "version_after": "0.4.2"
   }
 }
 ```
@@ -133,19 +141,55 @@ family name, or `null` for bare tokens (the terminal renders
   matches a `custom_literals.json` fingerprint (the app's known-value
   registry). Row shape `{value_masked (2+2), type, family, count,
   count_before? (increased/decreased only), delta ∈ {new, increased,
-  decreased, unchanged}}` — **never sha256** (same surface rule as every
-  exposure row). `new`/`increased` → **exit 1**; `decreased`/`unchanged`
-  → informational (exit 0). A value absent from the scan never appears
-  here — it surfaces via `resolved_values`. Present on every run (empty
-  array when the registry is empty or nothing matches; first-run and
-  migration emits are empty — the next run reports). **Overlay rule:** a
-  protected value also appears in `new_values`/`changed_values` — that is
-  ONE event; the terminal renders it once (PROTECTED block only).
+  decreased, unchanged}, value_id (v0.4.2)}` — **never sha256** (same
+  surface rule as every exposure row). `new`/`increased` → **exit 1**;
+  `decreased`/`unchanged` → informational (exit 0). A value absent from
+  the scan never appears here — it surfaces via `resolved_values`
+  (which **never carries a `value_id`** — a resolved row is not
+  registry-joinable; a consumer cannot build a "protected value stopped
+  appearing" join). Present on every run (empty array when the registry
+  is empty or nothing matches; first-run and migration emits are empty —
+  the next run reports). **Overlay rule:** a protected value also
+  appears in `new_values`/`changed_values` — that is ONE event; the
+  terminal renders it once (PROTECTED block only).
   Vocabulary: **protected value** = user-declared via the registry ·
   **detection** = appeared in scan · **increased** = more occurrences
   than baseline · **confirmed leak** = never claimed by watch. Matching
   is exact-value and limited to the credential-shaped scan domain (a
   PII-only literal never matches, by design).
+
+### `value_id` (v0.4.2, additive — IG D64–D69)
+
+An opaque 16-hex random identifier assigned to each `custom_literals.json`
+entry at registration (registry v2 — `{"version": 2, "literals":
+[{"value", "mask"?, "id"}]}`). On machine surfaces it appears on
+protected rows only:
+
+- `exposure.protected_values[]` — every row carries the matched entry's
+  `value_id`.
+- `exposure.new_values[]` / `exposure.changed_values[]` — the overlaid
+  protected row carries the **SAME** `value_id` (one event, one id —
+  IG D54); unregistered rows have **no `value_id` key at all** (absent,
+  never null).
+
+**Definition:** `value_id` is a stable opaque identifier for a
+**registered literal entry**, not for the literal value itself. The
+stability contract is *same persisted registry entry → same ID* — across
+runs, rebuilds, file moves, and literal reorder. Deleting and re-adding
+a value is a NEW registration and gets a NEW id. Duplicates collapse by
+value (set semantics — one registration per unique value), so in
+practice one value = one id.
+
+**Join path:** `value_id` ↔ the matching entry in
+`<state>/info-guard/custom_literals.json` (0600, same user — the
+consumer's registry lookup is a plain file read; no pepper, no crypto).
+
+**Not a security token, not a leak verdict:** the id proves *which
+registered value matched* — it is not a credential, not a hash of one,
+and watch never claims a leak (D52 vocabulary unchanged). The terminal,
+the baseline, error paths, and debug output never carry `value_id`
+(D66 surface rule); raw values and sha256 stay off every surface
+(D49/D56).
 - `new_families` / `resolved_families` — family-name rollups of the
   above (raw names, sorted, bare-token excluded).
 - `changed_files` — `{file, before, after}` per file whose

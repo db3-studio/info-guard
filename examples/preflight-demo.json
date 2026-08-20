@@ -2,14 +2,14 @@
   "schema": "info-guard/assessment/v1",
   "tool": {
     "name": "info-guard",
-    "version": "0.4.1",
+    "version": "0.4.2",
     "gitleaks": "8.30.1",
     "installed": false,
     "engine_state": "none",
     "engine_version": null
   },
   "scan": {
-    "generated": "2026-08-20T17:03:24Z",
+    "generated": "2026-08-20T20:55:00Z",
     "dirs": [
       "."
     ],

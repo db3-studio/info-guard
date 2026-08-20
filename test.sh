@@ -384,7 +384,7 @@ pf = subprocess.run(
 pfo = pf.stdout + pf.stderr
 check("preflight: findings exit code 1", pf.returncode == 1,
       f"rc={pf.returncode} out={pfo[-300:]!r}")
-for section in ("Info Guard v0.4.1 — Preflight Security Assessment",
+for section in ("Info Guard v0.4.2 — Preflight Security Assessment",
                 "STATUS", "EXECUTIVE SUMMARY", "WHAT MATTERS",
                 "CREDENTIAL EXPOSURE BY FAMILY",
                 "EXPOSURE LOCATIONS",
@@ -481,7 +481,7 @@ ver = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
     capture_output=True, text=True, timeout=60)
 check("--version prints the package version",
-      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.4.1",
+      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.4.2",
       f"rc={ver.returncode} out={ver.stdout.strip()!r}")
 
 # 12d. detection gaps (v0.3.1): Authorization family + dot-structured
@@ -1335,6 +1335,274 @@ check("watch after setup: value history intact (2 values)",
       and s2bl["protection"]["custom_literals"]["count"] >= 2,
       f"values={len(s2bl['values'])} custom={s2bl['protection']['custom_literals']['count']}")
 
+
+# ── 20. value_id: registry v2 + literals CLI + watch identity (v0.4.2, IG D64–D69) ──
+vid_home = os.path.join(tmp, "vid-home")
+for sub in ("sessions", "logs", "cron/output"):
+    os.makedirs(os.path.join(vid_home, sub), exist_ok=True)
+os.makedirs(os.path.join(vid_home, "state", "info-guard"), exist_ok=True)
+vid_cl = os.path.join(vid_home, "state", "info-guard", "custom_literals.json")
+env_vid = dict(os.environ)
+env_vid["HERMES_HOME"] = vid_home
+def vid_run(*args, **kw):
+    return subprocess.run(
+        [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard")] + list(args),
+        env=env_vid, capture_output=True, text=True, timeout=300, **kw)
+vid_a = "sk-battery-probe-alpha-1234567890"
+vid_b = "sk-battery-probe-beta-1234567890"
+
+# D1 migration: v1 plain-string registry -> ids + version 2, one write
+open(vid_cl, "w").write(json.dumps({"literals": [vid_a, {"value": vid_b, "mask": "full"}]}))
+m1 = vid_run("watch")
+m1o = m1.stdout + m1.stderr
+reg1 = json.load(open(vid_cl))
+check("value_id D1: v1 registry migrated to v2 with ids",
+      m1.returncode == 0 and reg1.get("version") == 2
+      and all(isinstance(e, dict) and len(e.get("id", "")) == 16
+              for e in reg1["literals"]) and "migrated to v2" in m1o,
+      f"rc={m1.returncode} reg={reg1!r}")
+reg_mtime = os.stat(vid_cl).st_mtime_ns
+vid_run("watch", "--json")
+check("value_id D1: second load performs no write (idempotent)",
+      os.stat(vid_cl).st_mtime_ns == reg_mtime)
+# D1b CRIT-1: fresh home with NO registry -> setup --all still registers
+vid2_home = os.path.join(tmp, "vid-home2")
+for sub in ("sessions", "logs", "cron/output"):
+    os.makedirs(os.path.join(vid2_home, sub), exist_ok=True)
+with open(os.path.join(vid2_home, "sessions", "s.jsonl"), "w") as f:
+    f.write(f"HASS_TOKEN={vid_a}\n")
+env_vid2 = dict(os.environ)
+env_vid2["HERMES_HOME"] = vid2_home
+sx = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "setup", "--all"], env=env_vid2, capture_output=True, text=True,
+    timeout=300)
+check("value_id D1: setup on fresh home still registers (CRIT-1)",
+      sx.returncode == 0 and os.path.exists(os.path.join(
+          vid2_home, "state", "info-guard", "custom_literals.json")),
+      f"rc={sx.returncode}")
+# D1c CRIT-1: unreadable registry + setup --all -> file bytes unchanged
+vid3_home = os.path.join(tmp, "vid-home3")
+os.makedirs(os.path.join(vid3_home, "state", "info-guard"), exist_ok=True)
+os.makedirs(os.path.join(vid3_home, "sessions"), exist_ok=True)
+with open(os.path.join(vid3_home, "sessions", "s.jsonl"), "w") as f:
+    f.write(f"HASS_TOKEN={vid_a}\n")
+vid3_cl = os.path.join(vid3_home, "state", "info-guard",
+                       "custom_literals.json")
+open(vid3_cl, "w").write("garbage{")
+env_vid3 = dict(os.environ)
+env_vid3["HERMES_HOME"] = vid3_home
+before3 = open(vid3_cl).read()
+sx3 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "setup", "--all"], env=env_vid3, capture_output=True, text=True,
+    timeout=300)
+check("value_id D1: unreadable registry never clobbered (CRIT-1)",
+      sx3.returncode == 0 and open(vid3_cl).read() == before3
+      and "unreadable" in (sx3.stdout + sx3.stderr),
+      f"rc={sx3.returncode}")
+# D2 stability: same entry -> same id across runs AND literal reorder
+with open(os.path.join(vid_home, "sessions", "a.jsonl"), "w") as f:
+    f.write(f"HASS_TOKEN={vid_a}\n")
+v1 = vid_run("watch", "--json")
+v1j = json.loads(v1.stdout)
+pv1 = [r for r in v1j["exposure"]["protected_values"] if r["delta"] == "new"]
+ov1 = [r["value_id"] for r in v1j["exposure"]["new_values"]
+       if r.get("value_id")]
+check("value_id D2: new protected value carries value_id on BOTH surfaces",
+      len(pv1) == 1 and len(pv1[0].get("value_id", "")) == 16
+      and ov1 == [pv1[0]["value_id"]],
+      f"pv={pv1!r} ov={ov1!r}")
+id_a = pv1[0]["value_id"]
+# reorder the registry (same persisted ids) -> same id on next run
+open(vid_cl, "w").write(json.dumps({"version": 2, "literals": [
+    {"value": vid_b, "id": reg1["literals"][1]["id"]},
+    {"value": vid_a, "id": id_a}]}))
+v2 = vid_run("watch", "--json")
+v2j = json.loads(v2.stdout)
+pv2 = [r for r in v2j["exposure"]["protected_values"]]
+check("value_id D2: id survives literal reorder + clean run",
+      len(pv2) == 1 and pv2[0]["delta"] == "unchanged"
+      and pv2[0]["value_id"] == id_a,
+      f"pv={pv2!r}")
+check("value_id D2: unchanged row has no overlay row (one-event rule)",
+      all("value_id" not in r for r in
+          v2j["exposure"]["new_values"] + v2j["exposure"]["changed_values"]))
+# D3 duplicate-id repair: different values, same id -> later repaired
+open(vid_cl, "w").write(json.dumps({"literals": [
+    {"value": vid_a, "id": "collide12345678"},
+    {"value": vid_b, "id": "collide12345678"}]}))
+r3 = vid_run("literals", "list")
+reg3 = json.load(open(vid_cl))
+ids3 = [e["id"] for e in reg3["literals"]]
+check("value_id D3: duplicate ids repaired deterministically",
+      len(ids3) == len(set(ids3))
+      and "duplicate literal id repaired" in r3.stderr
+      and vid_a not in r3.stderr and vid_b not in r3.stderr,
+      f"ids={ids3} err={r3.stderr[:200]!r}")
+# D4 preservation: unknown fields, non-string entries, top-level keys
+open(vid_cl, "w").write(json.dumps(
+    {"_topnote": "keep me", "literals": [
+        {"value": vid_a, "mask": "full", "note": "user note"}, 42, True]}))
+vid_run("literals", "list")
+reg4 = json.load(open(vid_cl))
+check("value_id D4: unknown fields, non-strings, top keys preserved",
+      reg4.get("_topnote") == "keep me"
+      and reg4["literals"][0].get("note") == "user note"
+      and 42 in reg4["literals"] and True in reg4["literals"])
+check("value_id D4: registry stays 0600 after migration rewrite",
+      (os.stat(vid_cl).st_mode & 0o777) == 0o600)
+# D4b MIN-5: version > 2 -> read-only pass-through, no write
+open(vid_cl, "w").write(json.dumps({"version": 3, "literals": [vid_a]}))
+m4 = os.stat(vid_cl).st_mtime_ns
+r4b = vid_run("literals", "list")
+check("value_id D4: version>2 loaded read-only with warning (MIN-5)",
+      os.stat(vid_cl).st_mtime_ns == m4
+      and "newer than this app understands" in r4b.stderr)
+# D5 downgrade: the ACTUAL v0.4.1 reader parses a migrated v2 registry
+vid5_home = os.path.join(tmp, "vid-home5")
+for sub in ("sessions", "logs", "cron/output"):
+    os.makedirs(os.path.join(vid5_home, sub), exist_ok=True)
+os.makedirs(os.path.join(vid5_home, "state", "info-guard"), exist_ok=True)
+open(os.path.join(vid5_home, "state", "info-guard",
+                  "custom_literals.json"), "w").write(json.dumps(
+    {"version": 2, "literals": [
+        {"value": vid_a, "id": "1111111111111111"},
+        {"value": vid_b, "id": "2222222222222222", "mask": "full"}]}))
+with open(os.path.join(vid5_home, "sessions", "a.jsonl"), "w") as f:
+    f.write(f"HASS_TOKEN={vid_a}\n")
+env_vid5 = dict(os.environ)
+env_vid5["HERMES_HOME"] = vid5_home
+old_bin = os.path.join(tmp, "info-guard-0.4.1")
+old_dl = subprocess.run(["git", "show", "v0.4.1:bin/info-guard"],
+                        capture_output=True, text=True, cwd=os.getcwd())
+if old_dl.returncode == 0:
+    open(old_bin, "w").write(old_dl.stdout)
+    os.chmod(old_bin, 0o755)
+    d5 = subprocess.run([sys.executable, old_bin, "watch", "--json"],
+                        env=env_vid5, capture_output=True, text=True,
+                        timeout=300)
+    d5ok = d5.returncode == 0
+    if d5ok:
+        try:
+            d5j = json.loads(d5.stdout)
+            d5bl = json.load(open(os.path.join(
+                vid5_home, "state", "info-guard", "watch-baseline.json")))
+            # first-run JSON has no count (added/removed only); the
+            # v0.4.1 reader proves it parsed the v2 registry via the
+            # baseline's protection snapshot count + a clean parse
+            d5ok = (d5j["tool"]["version"] == "0.4.1"
+                    and d5j["schema"] == "info-guard/watch/v1"
+                    and d5bl.get("protection", {}).get(
+                        "custom_literals", {}).get("count") == 2)
+        except (ValueError, KeyError, OSError):
+            d5ok = False
+    check("value_id D5: v0.4.1 reader parses migrated v2 registry",
+          d5ok, f"rc={d5.returncode} out={d5.stdout[:200]!r}")
+else:
+    check("value_id D5: v0.4.1 reader parses migrated v2 registry",
+          False, "tag v0.4.1 unavailable (CI: git fetch --tags)")
+# D6 MAJ-2: first command on a v1 registry is watch --json -> stdout pure
+vid6_home = os.path.join(tmp, "vid-home6")
+for sub in ("sessions", "logs", "cron/output"):
+    os.makedirs(os.path.join(vid6_home, sub), exist_ok=True)
+os.makedirs(os.path.join(vid6_home, "state", "info-guard"), exist_ok=True)
+open(os.path.join(vid6_home, "state", "info-guard",
+                  "custom_literals.json"), "w").write(
+    json.dumps({"literals": [vid_a]}))
+env_vid6 = dict(os.environ)
+env_vid6["HERMES_HOME"] = vid6_home
+d6 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "watch", "--json"], env=env_vid6, capture_output=True, text=True,
+    timeout=300)
+check("value_id D6: watch --json stdout pure on post-upgrade first run",
+      d6.returncode == 0 and json.loads(d6.stdout) is not None
+      and "migrated to v2" in d6.stderr and "migrated to v2" not in d6.stdout,
+      f"rc={d6.returncode} out={d6.stdout[:200]!r}")
+d6b = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "literals", "list", "--json"], env=env_vid6, capture_output=True,
+    text=True, timeout=300)
+check("value_id D6: literals list --json stdout pure after migration",
+      d6b.returncode == 0 and json.loads(d6b.stdout) is not None
+      and "migrated" not in d6b.stdout)
+# D6c value_id absent from baseline + terminal (D66 surface rule)
+vid_term = vid_run("watch")
+check("value_id D6: value_id absent from terminal + baseline",
+      "value_id" not in (vid_term.stdout + vid_term.stderr)
+      and "value_id" not in open(os.path.join(
+          vid_home, "state", "info-guard", "watch-baseline.json")).read())
+# D7 literals CLI contract
+open(vid_cl, "w").write(json.dumps({"version": 2, "literals": []}))
+l1 = vid_run("literals", "add", vid_a, vid_b, "--mask", "full")
+check("value_id D7: literals add prints an id per value",
+      l1.returncode == 0 and len(l1.stdout.strip().splitlines()) == 2
+      and all(len(line.split()[1]) == 16 for line in l1.stdout.strip().splitlines()),
+      f"rc={l1.returncode} out={l1.stdout!r}")
+l1j = json.loads(vid_run("literals", "add", vid_a, "--json").stdout)
+check("value_id D7: duplicate add returns existing id",
+      len(l1j["duplicates"]) == 1 and len(l1j["added"]) == 0
+      and len(l1j["duplicates"][0]["id"]) == 16,
+      f"out={l1j!r}")
+reg7 = json.load(open(vid_cl))
+check("value_id D7: --mask applies to every value in invocation",
+      all(e.get("mask") == "full" for e in reg7["literals"]
+          if e["value"] in (vid_a, vid_b)))
+bulk = os.path.join(tmp, "bulk.txt")
+with open(bulk, "w") as f:
+    f.write(f"# comment\n{vid_a}\n\nsk-zeta-value-98765\n")
+l2 = vid_run("literals", "add", "--file", bulk, "--json")
+l2j = json.loads(l2.stdout)
+check("value_id D7: --file bulk add (comments/blank skipped)",
+      l2.returncode == 0 and len(l2j["added"]) == 1
+      and l2j["added"][0]["value_masked"] == "sk...65",
+      f"rc={l2.returncode} out={l2j!r}")
+l3 = vid_run("literals", "list")
+l3_masks = [line.split()[1] for line in l3.stdout.strip().splitlines()]
+check("value_id D7: literals list sorted by value",
+      l3.returncode == 0 and l3_masks == ["sk...90", "sk...90", "sk...65"],
+      f"out={l3.stdout!r}")
+l4 = vid_run("literals", "add")
+check("value_id D7: literals add with no values = usage 2",
+      l4.returncode == 2)
+l5 = vid_run("literals", "add", "--file", os.path.join(tmp, "missing.txt"))
+check("value_id D7: missing --file = exit 2", l5.returncode == 2)
+l6 = vid_run("literals", "--help")
+check("value_id D7: literals --help = usage + exit 0",
+      l6.returncode == 0 and "literals add" in l6.stdout)
+l7 = vid_run("literals", "add", vid_a, "--frob")
+check("value_id D7: unknown flag = verbatim warning + run proceeds",
+      "Warning: unknown option '--frob'" in l7.stderr
+      and l7.returncode == 0)
+# D8 build: reads v2 registry (ids) correctly + v1 registry migrates via build
+vid8_home = os.path.join(tmp, "vid-home8")
+os.makedirs(os.path.join(vid8_home, "state", "info-guard"), exist_ok=True)
+open(os.path.join(vid8_home, ".env"), "w").write("")  # build needs a source
+env_vid8 = dict(os.environ)
+env_vid8["HERMES_HOME"] = vid8_home
+open(os.path.join(vid8_home, "state", "info-guard",
+                  "custom_literals.json"), "w").write(json.dumps(
+    {"version": 2, "literals": [
+        {"value": vid_a, "id": "3333333333333333", "mask": "full"}]}))
+b8 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "build"], env=env_vid8, capture_output=True, text=True, timeout=300)
+check("value_id D8: build reads migrated v2 registry correctly",
+      b8.returncode == 0 and "1 literals (1 full-mask)" in b8.stdout,
+      f"rc={b8.returncode} out={b8.stdout!r}")
+open(os.path.join(vid8_home, "state", "info-guard",
+                  "custom_literals.json"), "w").write(
+    json.dumps({"literals": [vid_b]}))
+b8b = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "build"], env=env_vid8, capture_output=True, text=True, timeout=300)
+reg8 = json.load(open(os.path.join(vid8_home, "state", "info-guard",
+                                   "custom_literals.json")))
+check("value_id D8: build triggers migration of a v1 registry (MAJ-1)",
+      b8b.returncode == 0 and reg8.get("version") == 2
+      and len(reg8["literals"][0].get("id", "")) == 16,
+      f"rc={b8b.returncode} reg={reg8!r}")
 
 print(f"\n[test] {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
