@@ -712,11 +712,12 @@ def cmd_preflight(args):
 
 
 def cmd_watch(args):
-    """Watch mode: re-run the scan and report NEW credential-shaped
-    values since the baseline (value sha256 only, 0600 state file).
-    First run (or --reset) creates the baseline; exit 1 when new values
-    appear — cron-friendly. The baseline is union-kept across
-    tool/gitleaks version changes (known values never re-alert)."""
+    """Watch mode: re-run the scan and report deltas since the baseline
+    (value sha256 only, 0600 state file). First run (or --reset)
+    creates the baseline; exit 1 when new values appear — cron-friendly.
+    The baseline is union-kept across tool/gitleaks version changes
+    (known values never re-alert). v2: exposure + protection + engine
+    deltas (see format-spec watch contract)."""
     reset = "--reset" in (args or [])
     names = [a for a in (args or []) if not a.startswith("--")]
     dirs = []
@@ -735,6 +736,16 @@ def cmd_watch(args):
               "pass only")
     all_hits.sort(key=lambda h: (h[2], h[3]))
     current = _watch_values(all_hits)
+    # One assessment per run (A2): totals + per-file map for the
+    # baseline snapshot, later rendered by watch/v1 JSON.
+    total_files = sum(1 for d in dirs for _ in d.rglob("*") if _.is_file())
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+        "+00:00", "Z")
+    assessment = _build_assessment(
+        all_hits, [str(d.relative_to(_HERMES_HOME)) for d in dirs],
+        total_files, gitleaks_ok, now)
+    protection = _snapshot_protection()
+    assessment_snap = _snapshot_assessment_totals(assessment)
     baseline_path = STATE_DIR / "watch-baseline.json"
     prev = None
     if not reset and baseline_path.exists():
@@ -742,8 +753,19 @@ def cmd_watch(args):
             prev = json.loads(baseline_path.read_text())
         except (OSError, ValueError):
             prev = None  # broken baseline: rebuild (never crash)
+    if prev is not None and prev.get("schema") == "info-guard/watch-baseline/v1":
+        # v1→v2 migration (R2/A4): values reconciled against the CURRENT
+        # scan — keep those still present (first_seen preserved), drop
+        # absent ones (v1 never surfaced them); protection/assessment
+        # snapshotted from current state. First v2 run is delta-free.
+        _write_watch_baseline(baseline_path, current, prev,
+                              protection, assessment_snap)
+        print("[info-guard] watch: baseline migrated to v2 — protection "
+              "state baselined at migration")
+        return 0
     if prev is None:
-        _write_watch_baseline(baseline_path, current, None)
+        _write_watch_baseline(baseline_path, current, None,
+                              protection, assessment_snap)
         verb = "reset — " if reset else ""
         print(f"[info-guard] watch: baseline {verb}created — "
               f"{_n(len(current))} known credential-shaped "
@@ -764,7 +786,8 @@ def cmd_watch(args):
             fam = _family_label(e["family"]) if e["family"] else "(no key context)"
             print(f"  {_mask_value(v):<18} {e['type'][:22]:<24} "
                   f"{_n(e['count']):>6}  {fam}")
-        _write_watch_baseline(baseline_path, current, prev)
+        _write_watch_baseline(baseline_path, current, prev,
+                              protection, assessment_snap)
         print(f"[info-guard] watch: baseline updated — {_n(len(current))} "
               "values now known")
         return 1
@@ -796,11 +819,100 @@ def _sha(s):
     return hashlib.sha256(s.encode()).hexdigest()
 
 
-def _write_watch_baseline(path, current, prev):
-    """Write the watch baseline: {schema, generated, tool_version,
+def _snapshot_protection():
+    """Protection-config snapshot for the watch baseline: fingerprints
+    ONLY — sha256 of exact unique literal values / key patterns / mask
+    policy / engine facts (proposal §2.1, IG D45). Raw literals never
+    appear, not even masked (guidance's explicit don't). Missing or
+    broken files -> zeros/None, never crash (fail-safe precedent)."""
+    snap = {
+        "custom_literals": {"count": 0, "fingerprints": []},
+        "redact_patterns": {"literal_count": 0, "key_pattern_count": 0,
+                            "literals_fingerprint": None,
+                            "key_patterns_fingerprint": None,
+                            "mask_policy": None},
+        "engine": {"engine_state": "none", "engine_version": None},
+    }
+    # custom_literals.json: hand-edited entries, plain strings or
+    # {"value", "mask"} dicts. Set semantics: duplicates = one.
+    lits = []
+    if CUSTOM_LITERALS.exists():
+        try:
+            for item in (json.loads(CUSTOM_LITERALS.read_text())
+                         .get("literals", []) or []):
+                v = item.get("value") if isinstance(item, dict) else item
+                if isinstance(v, str) and v:
+                    lits.append(v)
+        except (OSError, ValueError):
+            lits = []  # unreadable: zeros, never crash
+    uniq = sorted(set(lits))
+    snap["custom_literals"]["count"] = len(uniq)
+    snap["custom_literals"]["fingerprints"] = [
+        "sha256:" + _sha(v) for v in uniq]
+    # redact_patterns.json: machine-generated by `build` / `matcher
+    # build`. Set fingerprints over sorted unique values — regeneration
+    # may reorder, so order-insensitivity is the R1 contract.
+    if MATCHER.exists():
+        try:
+            data = json.loads(MATCHER.read_text())
+            rp_lits = []
+            for item in data.get("literals", []) or []:
+                v = item.get("value") if isinstance(item, dict) else item
+                if isinstance(v, str) and v:
+                    rp_lits.append(v)
+            kp = data.get("key_patterns", {}) or {}
+            mask = data.get("mask") or {}
+            rp = snap["redact_patterns"]
+            rp["literal_count"] = len(set(rp_lits))
+            rp["key_pattern_count"] = len(kp)
+            if rp_lits:
+                rp["literals_fingerprint"] = "sha256:" + _sha(
+                    json.dumps(sorted(set(rp_lits))))
+            if kp:
+                rp["key_patterns_fingerprint"] = "sha256:" + _sha(
+                    json.dumps(sorted(kp)))
+            if all(k in mask for k in ("head", "tail", "floor")):
+                rp["mask_policy"] = {"head": mask["head"],
+                                     "tail": mask["tail"],
+                                     "floor": mask["floor"]}
+        except (OSError, ValueError):
+            pass  # unreadable: zeros/None, never crash
+    # engine facts (same derivation as the assessment tool block)
+    inst = _installation_status()
+    manifest = _install_manifest()
+    snap["engine"]["engine_state"] = (
+        "active" if inst["engine"] else ("partial" if inst["partial"]
+                                         else "none"))
+    snap["engine"]["engine_version"] = (
+        manifest.get("version") if manifest and inst["engine"] else None)
+    return snap
+
+
+def _snapshot_assessment_totals(assessment):
+    """Totals + per-file credential_shaped map for the baseline's
+    assessment block (derived from the ONE in-memory assessment watch
+    builds per run — no second scan). Files with zero credential-shaped
+    findings are omitted; the diff defaults absent files to 0."""
+    t = assessment["totals"]
+    files = {}
+    for f in assessment.get("affected_files", []) or []:
+        if f.get("credential_shaped"):
+            files[f["file"]] = f["credential_shaped"]
+    return {"credential_shaped": t["credential_shaped"],
+            "distinct_values": t["distinct_values"],
+            "family_attributed": t["family_attributed"],
+            "unattributed": t["unattributed"],
+            "files": files}
+
+
+def _write_watch_baseline(path, current, prev, protection=None,
+                          assessment=None):
+    """Write the watch baseline v2: {schema, generated, tool_version,
     gitleaks_version, values:[{value_sha256, type, family, count,
-    first_seen}]}. Union semantics: rows known in prev keep their
-    first_seen; new rows get today. 0600 via _atomic_write_json."""
+    first_seen}], protection, assessment}. Union semantics: rows known
+    in prev keep their first_seen; new rows get today. Values absent
+    from the current scan are DROPPED (resolved — the scan is the
+    truth). 0600 via _atomic_write_json."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
         "+00:00", "Z")
     prev_by_sha = {}
@@ -814,11 +926,16 @@ def _write_watch_baseline(path, current, prev):
         row["first_seen"] = old.get("first_seen", now) if old else now
         values.append(row)
     values.sort(key=lambda v: (v["first_seen"], v["value_sha256"]))
-    _atomic_write_json(path, {"schema": "info-guard/watch-baseline/v1",
-                              "generated": now,
-                              "tool_version": _PACKAGE_VERSION,
-                              "gitleaks_version": _GITLEAKS_VERSION,
-                              "values": values})
+    doc = {"schema": "info-guard/watch-baseline/v2",
+           "generated": now,
+           "tool_version": _PACKAGE_VERSION,
+           "gitleaks_version": _GITLEAKS_VERSION,
+           "values": values}
+    if protection is not None:
+        doc["protection"] = protection
+    if assessment is not None:
+        doc["assessment"] = assessment
+    _atomic_write_json(path, doc)
 
 
 def _fmt_generated(iso):

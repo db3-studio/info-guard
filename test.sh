@@ -45,6 +45,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import hashlib
 
 CHECKOUT = sys.argv[1]
 sys.path.insert(0, CHECKOUT)
@@ -590,8 +591,19 @@ check("watch: baseline file 0600",
       os.path.exists(bl) and (os.stat(bl).st_mode & 0o777) == 0o600)
 bobj = json.load(open(bl))
 check("watch: baseline schema + sha256-only rows",
-      bobj.get("schema") == "info-guard/watch-baseline/v1"
+      bobj.get("schema") == "info-guard/watch-baseline/v2"
       and all(len(v["value_sha256"]) == 64 for v in bobj["values"]))
+check("watch: baseline v2 protection block present/sane",
+      "protection" in bobj
+      and "custom_literals" in bobj["protection"]
+      and "redact_patterns" in bobj["protection"]
+      and "engine" in bobj["protection"]
+      and bobj["protection"]["redact_patterns"]["literal_count"] == 0)
+check("watch: baseline v2 assessment block present/sane",
+      "assessment" in bobj
+      and bobj["assessment"]["credential_shaped"] == 2
+      and bobj["assessment"]["distinct_values"] == 2
+      and isinstance(bobj["assessment"]["files"], dict))
 check("watch: baseline knows both fixture values",
       len(bobj["values"]) == 2)
 check("watch: baseline contains no raw values",
@@ -640,6 +652,73 @@ check("watch: version change union-keeps + notice",
       w5.returncode == 0 and "union" in w5o
       and len(json.load(open(bl))["values"]) == 3,
       f"rc={w5.returncode} out={w5o[-200:]!r}")
+
+# ── 14b. v1→v2 migration: matching + stale v1 fixtures (R2/A4) ──
+mig_home = os.path.join(tmp, "mig-home")
+for sub in ("sessions", "logs", "cron/output"):
+    os.makedirs(os.path.join(mig_home, sub), exist_ok=True)
+with open(os.path.join(mig_home, "sessions", "session_20260505_075138_d.jsonl"),
+          "w") as f:
+    f.write(f"HASS_TOKEN={jwt}\n")
+    f.write(f"DISCORD_BOT_TOKEN={dsc}\n")
+    f.write("GOOGLE_API_KEY=your-actual-key-here\n")
+    f.write("API_KEY: ***")
+mig_bl = os.path.join(mig_home, "state", "info-guard", "watch-baseline.json")
+os.makedirs(os.path.dirname(mig_bl), exist_ok=True)
+jwt_sha = hashlib.sha256(jwt.encode()).hexdigest()
+dsc_sha = hashlib.sha256(dsc.encode()).hexdigest()
+stale_sha = hashlib.sha256(b"stale-value-not-in-any-scan").hexdigest()
+v1_rows = [
+    {"value_sha256": jwt_sha, "type": "JWT", "family": "HASS_TOKEN",
+     "count": 1, "first_seen": "2026-08-19T00:00:00Z"},
+    {"value_sha256": dsc_sha, "type": "Discord bot token",
+     "family": "DISCORD_BOT_TOKEN", "count": 1,
+     "first_seen": "2026-08-19T00:00:00Z"},
+]
+def write_v1(rows):
+    open(mig_bl, "w").write(json.dumps({
+        "schema": "info-guard/watch-baseline/v1",
+        "generated": "2026-08-19T00:00:00Z", "tool_version": "0.3.1",
+        "gitleaks_version": "8.30.1", "values": rows}))
+env_mig = dict(os.environ)
+env_mig["HERMES_HOME"] = mig_home
+# case (a): v1 baseline matching the current scan -> migrated in place
+write_v1(v1_rows)
+m1 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env_mig, capture_output=True, text=True, timeout=300)
+m1o = m1.stdout + m1.stderr
+check("watch: v1→v2 migration notice, exit 0 (matching fixture)",
+      m1.returncode == 0 and "migrated to v2" in m1o,
+      f"rc={m1.returncode} out={m1o[-200:]!r}")
+m1obj = json.load(open(mig_bl))
+check("watch: migrated baseline schema v2 + blocks present",
+      m1obj.get("schema") == "info-guard/watch-baseline/v2"
+      and "protection" in m1obj and "assessment" in m1obj)
+check("watch: migration preserves values + first_seen",
+      len(m1obj["values"]) == 2
+      and all(v["first_seen"] == "2026-08-19T00:00:00Z"
+              for v in m1obj["values"]))
+# case (b): stale v1 baseline (extra value absent from scan) ->
+# reconciled at migration (stale dropped), first v2 run delta-free
+write_v1(v1_rows + [{"value_sha256": stale_sha, "type": "API key",
+                     "family": None, "count": 3,
+                     "first_seen": "2026-08-19T00:00:00Z"}])
+m2 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env_mig, capture_output=True, text=True, timeout=300)
+m2o = m2.stdout + m2.stderr
+check("watch: stale v1 reconciled at migration (delta-free, exit 0)",
+      m2.returncode == 0 and "migrated to v2" in m2o
+      and len(json.load(open(mig_bl))["values"]) == 2
+      and "NEW credential" not in m2o,
+      f"rc={m2.returncode} out={m2o[-200:]!r}")
+m3 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env_mig, capture_output=True, text=True, timeout=300)
+check("watch: first v2 run after migration is delta-free",
+      m3.returncode == 0 and "no new" in (m3.stdout + m3.stderr),
+      f"rc={m3.returncode}")
 
 
 print(f"\n[test] {PASS} passed, {FAIL} failed")
