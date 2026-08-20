@@ -384,7 +384,7 @@ pf = subprocess.run(
 pfo = pf.stdout + pf.stderr
 check("preflight: findings exit code 1", pf.returncode == 1,
       f"rc={pf.returncode} out={pfo[-300:]!r}")
-for section in ("Info Guard v0.3.1 — Preflight Security Assessment",
+for section in ("Info Guard v0.4.0 — Preflight Security Assessment",
                 "STATUS", "EXECUTIVE SUMMARY", "WHAT MATTERS",
                 "CREDENTIAL EXPOSURE BY FAMILY",
                 "EXPOSURE LOCATIONS",
@@ -481,7 +481,7 @@ ver = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
     capture_output=True, text=True, timeout=60)
 check("--version prints the package version",
-      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.3.1",
+      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.4.0",
       f"rc={ver.returncode} out={ver.stdout.strip()!r}")
 
 # 12d. detection gaps (v0.3.1): Authorization family + dot-structured

@@ -161,28 +161,57 @@ the report is its render. The object is the contract:
 `docs/assessment-schema.md` (schema `info-guard/assessment/v1`). The text
 report is never a second implementation.
 
-### `--json` / `--json-out` / `watch` (v0.3.0)
+### `--json` / `--json-out` (v0.3.0) and `watch` (v0.3.0 → v2 in v0.4.0)
 
 - `preflight --json` serializes the SAME object to stdout — no chatter
   (the object's `tool` block carries engine state). `--json-out FILE`
   writes it atomically (temp + fsync + rename, **0600**) and implies JSON
   mode. Exit codes unchanged: 0 = clean, 1 = findings, 2 = usage error.
-- `preflight watch` re-runs the scan and diffs the credential-shaped
-  DISTINCT-VALUE set (sha256 of each value) against
-  `<state>/info-guard/watch-baseline.json` (schema
-  `info-guard/watch-baseline/v1`, 0600, **value sha256 only — raw values
-  never persisted**). First run (or `--reset`) creates the baseline,
-  exit 0. Later runs: no new values → one-line status, exit 0; new values
-  → masked NEW VALUES block (2+2 · type · family · count) + baseline
-  update, exit 1 — cron-friendly. On tool/gitleaks version change the
-  baseline is **union-kept** (known values never re-alert) with a notice;
-  a broken/unreadable baseline is rebuilt, never a crash.
+- `watch` (v2, v0.4.0) re-runs the scan and reports **deltas on three
+  tracks** against `<state>/info-guard/watch-baseline.json` (schema
+  `info-guard/watch-baseline/v2`, 0600 — **value sha256 only; raw values
+  never persisted**; schema v1 baselines are migrated in place, delta-free):
+  1. **Exposure** — `new_values` (masked 2+2 · type · family · count,
+     exit 1), `resolved_values` (informational — "No longer detected in
+     the current scan scope. This does not confirm that the credential
+     is dead or revoked"), `changed_values` (±occurrences, informational),
+     family rollups, per-file count changes.
+  2. **Protection configuration** — custom literals / key patterns
+     added/removed (fingerprint-set diffs), redact_patterns whole-set
+     fingerprint change, mask-policy change. Counts + fingerprints ONLY —
+     raw literals never appear, not even masked. Wording contract:
+     configuration deltas, never effectiveness ("protection configuration
+     changed", never "protection improved").
+  3. **Engine state** — transitions between `active` / `partial` /
+     `none` with explicit blocks (installed / restored / degraded /
+     removed).
+- **Exit codes (contract, v0.4.0):** NEW values = 1 · `active→partial`
+  = 1 (degraded) · `active→none` = 1 (engine removed — config remains on
+  disk, not applied) · `none→active` / `partial→active` = 0 ·
+  config-only / resolved / changed = 0 · usage = 2. `partial` is never
+  ambiguous — degraded protection alerts exactly like removal (matches
+  `check`).
+- **Baseline lifecycle:** first run (or `--reset`) creates it; on
+  tool/gitleaks version change it is **union-kept** (known values never
+  re-alert) with a notice; a broken/unreadable baseline is rebuilt,
+  never a crash. **Refresh-on-delta:** the baseline is rewritten at the
+  end of any run that observed a delta (exposure, protection, or engine)
+  with current state — every delta alerts exactly once; clean runs leave
+  it untouched. `setup` stamps the protection/assessment snapshot into
+  an existing baseline (values preserved) so a deliberate config change
+  after setup doesn't alarm on the next watch.
+- `watch --json` / `--json-out FILE` emit the delta object (schema
+  `info-guard/watch/v1`, doc `docs/watch-schema.md`) — the PUBLIC delta
+  result: exposure rows are masked 2+2 (`value_sha256` is FORBIDDEN
+  there; the private baseline keeps sha256), protection rows are counts
+  only. JSON mode keeps stdout pure JSON (informational lines go to
+  stderr), 0600 atomic writes, missing `--json-out` path = usage error 2.
 - The baseline lives under `<state>/info-guard/`, which is not in the
   default scan set (`sessions`, `logs`, `cron/output`) — Info Guard never
   scans its own artifacts. Passing explicit dirs that include it is the
   caller's choice.
-- `scan.generated` is ISO-8601 UTC; the text renderer reformats for
-  display (renderer owns language).
+- `scan.generated` / `watch.generated` are ISO-8601 UTC; the text
+  renderer reformats for display (renderer owns language).
 
 Report sections, in order (each printed only when its data is non-empty):
 

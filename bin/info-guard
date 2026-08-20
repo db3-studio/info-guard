@@ -22,13 +22,24 @@ Usage:
                                     docs/assessment-schema.md) to stdout;
                                     --json-out FILE: write it atomically
                                     (0600). The text report is unchanged.
-  info-guard watch [DIR ...]        Re-run the scan and report NEW
-                                    credential-shaped values since the
-                                    baseline (<state>/watch-baseline.json —
-                                    value sha256 only, 0600). First run
-                                    creates the baseline; exit 1 when new
-                                    values appear (cron-friendly); --reset
-                                    clears the baseline.
+  info-guard watch [DIR ...]        Re-run the scan and report deltas
+                                    since the baseline (<state>/
+                                    watch-baseline.json — value sha256
+                                    only, 0600): exposure (new /
+                                    resolved / changed values, families,
+                                    files), protection configuration
+                                    (literals / key patterns / mask
+                                    policy, counts only), engine state
+                                    transitions. First run creates the
+                                    baseline; exit 1 on new values or a
+                                    degraded engine (cron-friendly);
+                                    config-only changes exit 0.
+                                    --reset clears the baseline.
+                                    --json: emit the delta object
+                                    (schema info-guard/watch/v1, see
+                                    docs/watch-schema.md) to stdout;
+                                    --json-out FILE: write it atomically
+                                    (0600).
   info-guard setup [--all]          Interactive bootstrap: reviews preflight
                                     candidates one by one (masked only),
                                     registers the ones you confirm as custom
@@ -81,7 +92,7 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.3.1"
+_PACKAGE_VERSION = "0.4.0"
 
 VALID_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 

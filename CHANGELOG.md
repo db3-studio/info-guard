@@ -6,6 +6,49 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [v0.4.0] - 2026-08-20
+
+### Added
+- **`watch` v2 — three-track delta monitoring** (external design guidance
+  + independent plan review, 2026-08-20; user GO):
+  1. **Exposure deltas** — beyond new values: `resolved_values`
+     (informational — "No longer detected in the current scan scope.
+     This does not confirm that the credential is dead or revoked"),
+     `changed_values` (±occurrences), family rollups, and per-file count
+     changes. New values still exit 1.
+  2. **Protection configuration deltas** — custom literals / key
+     patterns added/removed (fingerprint-set diffs, duplicates = one),
+     redact_patterns fingerprint change, mask-policy change. Counts and
+     fingerprints ONLY — raw literals never appear, not even masked.
+     Wording contract: configuration deltas, never effectiveness.
+  3. **Engine state transitions** — `active` / `partial` / `none` with
+     explicit blocks (installed / restored / degraded / removed).
+- **Explicit exit-code contract** — NEW values = 1 · `active→partial`
+  (degraded) = 1 · `active→none` (engine removed) = 1 · `none→active` /
+  `partial→active` = 0 · config-only / resolved / changed = 0 ·
+  usage = 2. `partial` is never ambiguous — degraded protection alerts
+  exactly like removal (matches `check`).
+- **`watch --json` / `--json-out`** — the delta object (schema
+  `info-guard/watch/v1`, new `docs/watch-schema.md`): exposure rows
+  masked 2+2 (no `value_sha256` — public surface), protection counts
+  only, engine transition facts. JSON mode keeps stdout pure JSON;
+  `--json-out` writes atomically 0600; missing path = usage error 2.
+- **Baseline v2** (`watch-baseline/v2`, 0600) — values + protection
+  fingerprint snapshot + assessment totals (incl. per-file counts).
+  v1 baselines migrate in place, **delta-free** (values reconciled
+  against the current scan). **Refresh-on-delta:** the baseline is
+  rewritten after any run that observed a delta — every delta alerts
+  exactly once; clean runs leave it untouched.
+- **`setup` stamping** — setup refreshes the protection/assessment
+  snapshot in an existing baseline (values preserved), so a deliberate
+  config change after setup doesn't alarm on the next watch.
+- Battery: 149 checks (was 104; +45: baseline v2 + migration matrix
+  (fresh/stale v1), exposure deltas (resolved/changed/families/files),
+  protection deltas (literals/key-patterns/mask, build→build stability),
+  engine transition matrix + exit codes, watch JSON (schema, no-raw/no-
+  sha greps, 0600, usage=2), setup stamping).
+- Demo re-pinned from actual output (v0.4.0 header + timestamps).
+
 ## [v0.3.1] - 2026-08-19
 
 ### Fixed
@@ -196,7 +239,8 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 - Test battery (`test.sh`) and CI matrix covering supported Hermes versions.
 - Docs: format spec, examples.
 
-[Unreleased]: https://github.com/db3-studio/info-guard/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/db3-studio/info-guard/compare/v0.4.0...HEAD
+[v0.4.0]: https://github.com/db3-studio/info-guard/compare/v0.3.1...v0.4.0
 [v0.3.1]: https://github.com/db3-studio/info-guard/compare/v0.3.0...v0.3.1
 [v0.3.0]: https://github.com/db3-studio/info-guard/compare/v0.2.8...v0.3.0
 [v0.2.8]: https://github.com/db3-studio/info-guard/compare/v0.2.7...v0.2.8
