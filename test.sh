@@ -826,7 +826,7 @@ p2 = subprocess.run(
 p2o = p2.stdout + p2.stderr
 check("watch: duplicate literal is one (no fabricated delta)",
       p2.returncode == 0 and "Custom literals +1" not in p2o
-      and "protection configuration changed" not in p2o,
+      and "PROTECTION CHANGED" not in p2o,
       f"rc={p2.returncode} out={p2o[-250:]!r}")
 # key pattern added
 write_prot([prot_lit_a, prot_lit_b, prot_lit_c],
@@ -872,7 +872,7 @@ p5 = subprocess.run(
     env=env_prot, capture_output=True, text=True, timeout=300)
 p5o = p5.stdout + p5.stderr
 check("watch: build→build stability — no protection delta (R1)",
-      p5.returncode == 0 and "protection configuration changed" not in p5o,
+      p5.returncode == 0 and "PROTECTION CHANGED" not in p5o,
       f"rc={p5.returncode} out={p5o[-250:]!r}")
 # literal removed (-1)
 write_prot([prot_lit_a, prot_lit_b], ["PROBE_KEY_A", "PROBE_KEY_B"],
@@ -966,7 +966,7 @@ with open(os.path.join(eng_home, "sessions", "session_20260505_075138_d.jsonl"),
 e6 = run_eng_watch()
 e6o = e6.stdout + e6.stderr
 check("watch: combined new-value + engine event -> exit 1, both blocks",
-      e6.returncode == 1 and "NEW credential" in e6o
+      e6.returncode == 1 and "EXPOSURE CHANGED" in e6o
       and "PROTECTION ENGINE REMOVED" in e6o,
       f"rc={e6.returncode} out={e6o[-250:]!r}")
 
@@ -1088,7 +1088,7 @@ s2 = subprocess.run(
     env=env_stamp, capture_output=True, text=True, timeout=300)
 s2o = s2.stdout + s2.stderr
 check("watch after setup: no protection deltas, exit 0",
-      s2.returncode == 0 and "protection configuration changed" not in s2o,
+      s2.returncode == 0 and "PROTECTION CHANGED" not in s2o,
       f"rc={s2.returncode} out={s2o[-250:]!r}")
 s2bl = json.load(open(os.path.join(stamp_home, "state", "info-guard",
                                    "watch-baseline.json")))

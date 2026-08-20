@@ -817,36 +817,53 @@ def cmd_watch(args):
                      or pd["status"] == "changed"
                      or et["state_before"] != et["state_after"])
     exit_code = 1 if (d["new_values"] or et["degraded"]) else 0
+    if any_delta:
+        # Changed run: header + per-track summaries + blocks (proposal
+        # §2.3 guidance UX). All values masked 2+2 or counts only.
+        say("Info Guard Watch")
+        say("────────────────────────────────────────────")
+        parts = []
+        if d["new_values"]:
+            parts.append(f"+{_n(len(d['new_values']))} new value"
+                         f"{'s' if len(d['new_values']) != 1 else ''}")
+        if d["resolved_values"]:
+            parts.append(f"{_n(len(d['resolved_values']))} resolved")
+        if d["changed_values"]:
+            n_occ = sum(e["count"] - e["count_before"]
+                        for e in d["changed_values"])
+            parts.append(f"+{_n(len(d['changed_values']))} value"
+                         f"{'s' if len(d['changed_values']) != 1 else ''} "
+                         f"{(n_occ and ('+' + _n(n_occ))) or '0'} "
+                         f"occurrence{'s' if abs(n_occ) != 1 else ''}")
+        if parts:
+            say("🔴 EXPOSURE CHANGED (" + ", ".join(parts) + ")")
     if d["new_values"]:
-        say("[info-guard] watch: NEW credential-shaped values found "
-            "(masked 2+2 · type · family · count)")
+        say("  NEW VALUES (masked 2+2 · type · family · count)")
         for e in d["new_values"]:
             fam = _family_label(e["family"]) if e["family"] \
                 else "(no key context)"
-            say(f"  {e['value_masked']:<18} {e['type'][:22]:<24} "
+            say(f"    {e['value_masked']:<18} {e['type'][:22]:<24} "
                 f"{_n(e['count']):>6}  {fam}")
     if d["resolved_values"]:
-        say("[info-guard] watch: values no longer detected "
-            "(informational):")
+        say("  RESOLVED (informational — not confirmed dead/revoked)")
         for e in d["resolved_values"]:
             fam = _family_label(e["family"]) if e["family"] \
                 else "(no key context)"
-            say(f"  {e['type'][:22]:<24} {_n(e['count']):>6}  {fam}  "
+            say(f"    {e['type'][:22]:<24} {_n(e['count']):>6}  {fam}  "
                 f"(first seen {str(e['first_seen'])[:10]})")
         say("  No longer detected in the current scan scope. This does not "
             "confirm that the credential is dead or revoked.")
     if d["changed_values"]:
-        say("[info-guard] watch: occurrence counts changed "
-            "(informational):")
+        say("  CHANGED COUNTS (informational)")
         for e in d["changed_values"]:
             fam = _family_label(e["family"]) if e["family"] \
                 else "(no key context)"
             delta = e["count"] - e["count_before"]
-            say(f"  {e['value_masked']:<18} {e['type'][:22]:<24} "
+            say(f"    {e['value_masked']:<18} {e['type'][:22]:<24} "
                 f"{_n(e['count_before']):>6} → {_n(e['count']):>6} "
                 f"({delta:+d})  {fam}")
     if d["new_families"] or d["resolved_families"]:
-        say("[info-guard] watch: families — new: "
+        say("  FAMILIES — new: "
             + (", ".join(_family_label(f) if f else "(no key context)"
                          for f in d["new_families"]) or "—")
             + "; resolved: " + (", ".join(_family_label(f) if f
@@ -854,17 +871,27 @@ def cmd_watch(args):
                                           for f in d["resolved_families"])
                                 or "—"))
     if d["changed_files"]:
-        say("[info-guard] watch: files with changed counts "
-            "(informational):")
+        say("  FILES WITH CHANGED COUNTS (informational)")
         for f in d["changed_files"]:
-            say(f"  {f['file']}: {_n(f['before'])} → {_n(f['after'])}")
+            say(f"    {f['file']}: {_n(f['before'])} → {_n(f['after'])}")
     if pd["status"] == "changed":
         cl = pd["custom_literals"]
         kp = pd["key_patterns"]
         rp = pd["redact_patterns"]
         mp = pd["mask_policy"]
-        say("[info-guard] watch: protection configuration changed "
-            "(counts only, informational):")
+        lit_delta = rp["literal_count_after"] - rp["literal_count_before"]
+        kp_delta = (rp["key_pattern_count_after"]
+                    - rp["key_pattern_count_before"])
+        summ_bits = []
+        if cl["added"] or cl["removed"]:
+            summ_bits.append(f"custom literals +{cl['added']} / "
+                             f"-{cl['removed']}")
+        if rp["changed"]:
+            summ_bits.append(f"{lit_delta:+d} literals")
+            summ_bits.append(f"{kp_delta:+d} key patterns")
+        if mp["changed"]:
+            summ_bits.append("mask policy")
+        say("🟢 PROTECTION CHANGED (" + ", ".join(summ_bits) + ")")
         if cl["added"] or cl["removed"]:
             say(f"  Custom literals +{cl['added']} / -{cl['removed']}")
         if kp["added"] or kp["removed"]:
@@ -879,18 +906,22 @@ def cmd_watch(args):
         say("  Note: configuration deltas only — whether protection "
             "improved is answered by the next preflight, not watch")
     if et["state_before"] != et["state_after"]:
+        say(f"🟠 ENGINE STATE ({et['state_before']} → {et['state_after']})")
         if et["state_after"] == "active" and et["state_before"] == "none":
-            say("[info-guard] watch: 🟢 Engine installed")
+            say("  🟢 Engine installed")
         elif et["state_after"] == "active" and et["state_before"] == "partial":
-            say("[info-guard] watch: 🟢 Protection restored")
+            say("  🟢 Protection restored")
         elif et["state_after"] == "partial" and et["state_before"] == "active":
-            say("[info-guard] watch: 🟠 Protection degraded — Hermes is "
-                "not fully applying the configuration")
+            say("  🟠 Protection degraded — Hermes is not fully applying "
+                "the configuration")
         elif et["state_after"] == "none" and et["state_before"] == "active":
-            say("[info-guard] watch: 🔴 PROTECTION ENGINE REMOVED — "
-                "existing configuration remains on disk, but Hermes is "
-                "not actively applying it")
+            say("  🔴 PROTECTION ENGINE REMOVED — existing configuration "
+                "remains on disk, but Hermes is not actively applying it")
     if any_delta:
+        say("────────────────────────────────────────────")
+        say(f"Last baseline: {_fmt_generated(prev.get('generated', ''))}")
+        say(f"Current scan:  {_fmt_generated(now)}")
+        say("Run `info-guard preflight` for the complete assessment.")
         # refresh-on-delta policy (review MAJ A1): rewrite the baseline
         # with current state — values = current scan (absent ones
         # dropped), protection/assessment snapshots refreshed. Every
