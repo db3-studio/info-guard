@@ -109,7 +109,9 @@ Every value row follows one shape: `{value_masked, type, family, count}`
 (2+2 masked value — mirroring the assessment's `top_values`). For
 `resolved_values`, `value_masked` is `null`: the value is no longer in
 the scan, and only its sha256 was ever persisted (raw values never enter
-the baseline) — there is nothing left to mask. `family` is the raw
+the baseline) — there is nothing left to mask. Resolved rows additionally
+carry `first_seen` (the baseline's first-seen timestamp for that value —
+date-only, no leak surface). `family` is the raw
 family name, or `null` for bare tokens (the terminal renders
 `(no key context)`; the JSON stays machine-friendly).
 

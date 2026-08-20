@@ -200,6 +200,12 @@ report is never a second implementation.
   it untouched. `setup` stamps the protection/assessment snapshot into
   an existing baseline (values preserved) so a deliberate config change
   after setup doesn't alarm on the next watch.
+- **Baseline v2 note:** the baseline's `assessment` block carries a
+  private per-file `credential_shaped` map (files-with-findings only,
+  absent = 0 in the diff) in addition to the totals — an internal 0600
+  extension of the watch/v1 contract (which exposes file-level facts
+  only as `exposure.changed_files`); documented in full in
+  `docs/watch-schema.md`.
 - `watch --json` / `--json-out FILE` emit the delta object (schema
   `info-guard/watch/v1`, doc `docs/watch-schema.md`) — the PUBLIC delta
   result: exposure rows are masked 2+2 (`value_sha256` is FORBIDDEN

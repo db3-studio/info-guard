@@ -771,6 +771,39 @@ check("watch: changed value shown with delta",
 check("watch: changed-files line present",
       "sessions/session_20260505_075138_d.jsonl" in c1o,
       f"out={c1o[-250:]!r}")
+# negative changed-count: rewrite the file with FEWER occurrences of a
+# known value (baseline count 2 -> 1, -1) — informational, exit 0
+with open(os.path.join(pf_home, "sessions", "session_20260505_075138_d.jsonl"),
+          "w") as f:
+    f.write(f"HASS_TOKEN={jwt}\n")
+    f.write(f"DISCORD_BOT_TOKEN={dsc}\n")
+    f.write("ANTHROPIC_API_KEY=" + sk_new + "\n")
+c2 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env6, capture_output=True, text=True, timeout=300)
+c2o = c2.stdout + c2.stderr
+check("watch: count decrease rendered (negative delta, exit 0)",
+      c2.returncode == 0 and "(-2)" in c2o and "ey...aa" in c2o,
+      f"rc={c2.returncode} out={c2o[-250:]!r}")
+# absolute scan dir outside $HERMES_HOME (evidence-review MIN: relative_to
+# crash) — must scan cleanly, never traceback
+abs_dir = os.path.join(tmp, "abs-watch-dir")
+os.makedirs(abs_dir, exist_ok=True)
+with open(os.path.join(abs_dir, "notes.txt"), "w") as f:
+    f.write(f"HASS_TOKEN={jwt}\n")
+abs_home = os.path.join(tmp, "abs-home")
+os.makedirs(abs_home, exist_ok=True)
+env_abs = dict(os.environ)
+env_abs["HERMES_HOME"] = abs_home
+c3 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "watch", abs_dir],
+    env=env_abs, capture_output=True, text=True, timeout=300)
+c3o = c3.stdout + c3.stderr
+check("watch: absolute dir outside HERMES_HOME scans cleanly (no crash)",
+      c3.returncode == 0 and "Traceback" not in c3o
+      and "baseline created" in c3o,
+      f"rc={c3.returncode} out={c3o[-250:]!r}")
 
 # ── 16. watch v2: protection-config deltas (counts + fingerprints only) ──
 prot_home = os.path.join(tmp, "prot-home")
@@ -988,8 +1021,8 @@ check("watch --json: clean status + empty exposure",
       and j1o["exposure"]["new_values"] == []
       and j1o["exposure"]["resolved_values"] == [])
 check("watch --json: assessment before/after totals reconcile",
-      j1o["assessment"]["before"]["credential_shaped"] == 4
-      and j1o["assessment"]["after"]["credential_shaped"] == 4
+      j1o["assessment"]["before"]["credential_shaped"] == 3
+      and j1o["assessment"]["after"]["credential_shaped"] == 3
       and j1o["assessment"]["before"]["distinct_values"] == 3)
 check("watch --json: engine transition facts present",
       "engine" in j1o and j1o["engine"]["state_before"] == j1o["engine"]["state_after"])

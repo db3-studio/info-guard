@@ -764,7 +764,9 @@ def cmd_watch(args):
     now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
         "+00:00", "Z")
     assessment = _build_assessment(
-        all_hits, [str(d.relative_to(_HERMES_HOME)) for d in dirs],
+        all_hits,
+        [str(d.relative_to(_HERMES_HOME)) if _HERMES_HOME in d.parents
+         else str(d) for d in dirs],
         total_files, gitleaks_ok, now)
     protection = _snapshot_protection()
     assessment_snap = _snapshot_assessment_totals(assessment)
@@ -917,7 +919,15 @@ def cmd_watch(args):
         say("  Note: configuration deltas only — whether protection "
             "improved is answered by the next preflight, not watch")
     if et["state_before"] != et["state_after"]:
-        say(f"🟠 ENGINE STATE ({et['state_before']} → {et['state_after']})")
+        if et["state_after"] == "active" and et["state_before"] in ("none",
+                                                                    "partial"):
+            eng_hdr = "🟢"
+        elif et["state_after"] == "partial" and et["state_before"] == "active":
+            eng_hdr = "🟠"
+        else:
+            eng_hdr = "🔴"
+        say(f"{eng_hdr} ENGINE STATE ({et['state_before']} → "
+            f"{et['state_after']})")
         if et["state_after"] == "active" and et["state_before"] == "none":
             say("  🟢 Engine installed")
         elif et["state_after"] == "active" and et["state_before"] == "partial":
@@ -1950,7 +1960,9 @@ def _collect_hits(dirs, redact=True):
             if not p.is_file():
                 continue
             for hit in _key_scan(p):
-                all_hits.append((hit[0], hit[1], str(p.relative_to(_HERMES_HOME)), *hit[2:]))
+                all_hits.append((hit[0], hit[1],
+                                 os.path.relpath(str(p), str(_HERMES_HOME)),
+                                 *hit[2:]))
         ghits, ok = _gitleaks_scan(d, redact=redact)
         gitleaks_ok = gitleaks_ok and ok
         for cls, rule, fname, line, value, masked, ctx in ghits:
