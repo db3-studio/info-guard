@@ -772,6 +772,119 @@ check("watch: changed-files line present",
       "sessions/session_20260505_075138_d.jsonl" in c1o,
       f"out={c1o[-250:]!r}")
 
+# ── 16. watch v2: protection-config deltas (counts + fingerprints only) ──
+prot_home = os.path.join(tmp, "prot-home")
+for sub in ("sessions", "logs", "cron/output"):
+    os.makedirs(os.path.join(prot_home, sub), exist_ok=True)
+with open(os.path.join(prot_home, "sessions", "session_20260505_075138_d.jsonl"),
+          "w") as f:
+    f.write(f"HASS_TOKEN={jwt}\n")
+    f.write(f"DISCORD_BOT_TOKEN={dsc}\n")
+os.makedirs(os.path.join(prot_home, "state", "info-guard"), exist_ok=True)
+prot_bl = os.path.join(prot_home, "state", "info-guard", "watch-baseline.json")
+prot_cl = os.path.join(prot_home, "state", "info-guard", "custom_literals.json")
+prot_rp = os.path.join(prot_home, "state", "info-guard", "redact_patterns.json")
+env_prot = dict(os.environ)
+env_prot["HERMES_HOME"] = prot_home
+prot_lit_a = "probeliteralvalue1"   # low-entropy fragments — gitleaks-safe
+prot_lit_b = "probeliteralvalue2"
+prot_lit_c = "probeliteralvalue3"
+def write_prot(lits, keys, mask):
+    open(prot_cl, "w").write(json.dumps({"literals": lits}))
+    open(prot_rp, "w").write(json.dumps(
+        {"mask": mask, "literals": lits,
+         "key_patterns": {k: True for k in keys}}))
+write_prot([prot_lit_a, prot_lit_b], ["PROBE_KEY_A"], {"head": 2, "tail": 2, "floor": 12})
+p0 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env_prot, capture_output=True, text=True, timeout=300)
+check("watch: protection baseline created (counts in snapshot)",
+      p0.returncode == 0
+      and json.load(open(prot_bl))["protection"]["custom_literals"]["count"] == 2
+      and json.load(open(prot_bl))["protection"]["redact_patterns"]["literal_count"] == 2,
+      f"rc={p0.returncode}")
+# literal added (+1) — hand-edit custom_literals.json (the source file)
+write_prot([prot_lit_a, prot_lit_b, prot_lit_c], ["PROBE_KEY_A"],
+           {"head": 2, "tail": 2, "floor": 12})
+p1 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env_prot, capture_output=True, text=True, timeout=300)
+p1o = p1.stdout + p1.stderr
+check("watch: custom literal added -> +1, exit 0 (config-only)",
+      p1.returncode == 0 and "Custom literals +1" in p1o
+      and "configuration deltas" in p1o,
+      f"rc={p1.returncode} out={p1o[-250:]!r}")
+check("watch: raw protection literal never printed",
+      prot_lit_c not in p1o and prot_lit_c not in json.dumps(
+          json.load(open(prot_bl))))
+# duplicate literal = one (set semantics — no fabricated counts)
+write_prot([prot_lit_a, prot_lit_b, prot_lit_c, prot_lit_c], ["PROBE_KEY_A"],
+           {"head": 2, "tail": 2, "floor": 12})
+p2 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env_prot, capture_output=True, text=True, timeout=300)
+p2o = p2.stdout + p2.stderr
+check("watch: duplicate literal is one (no fabricated delta)",
+      p2.returncode == 0 and "Custom literals +1" not in p2o
+      and "protection configuration changed" not in p2o,
+      f"rc={p2.returncode} out={p2o[-250:]!r}")
+# key pattern added
+write_prot([prot_lit_a, prot_lit_b, prot_lit_c],
+           ["PROBE_KEY_A", "PROBE_KEY_B"], {"head": 2, "tail": 2, "floor": 12})
+p3 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env_prot, capture_output=True, text=True, timeout=300)
+p3o = p3.stdout + p3.stderr
+check("watch: key pattern added -> +1",
+      p3.returncode == 0 and "Key patterns +1" in p3o,
+      f"rc={p3.returncode} out={p3o[-250:]!r}")
+# mask flip — hand-edit the fixture redact_patterns.json mask block
+# (cmd_build hardcodes the policy, so the battery edits the file)
+write_prot([prot_lit_a, prot_lit_b, prot_lit_c],
+           ["PROBE_KEY_A", "PROBE_KEY_B"], {"head": 3, "tail": 2, "floor": 12})
+p4 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env_prot, capture_output=True, text=True, timeout=300)
+p4o = p4.stdout + p4.stderr
+check("watch: mask policy flip detected",
+      p4.returncode == 0 and "Mask policy changed" in p4o,
+      f"rc={p4.returncode} out={p4o[-250:]!r}")
+# build→build stability (R1): two identical builds -> the FIRST watch
+# reports the (real) config change and refreshes; the SECOND watch
+# after another identical build must show NO delta (no churn)
+env_file = os.path.join(prot_home, ".env")
+with open(env_file, "w") as f:
+    f.write("PROBE_ENV_SECRET=probeenvsecretvalue9\n")
+for _ in range(2):
+    subprocess.run(
+        [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+         "build", env_file],
+        env=env_prot, capture_output=True, text=True, timeout=120)
+subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env_prot, capture_output=True, text=True, timeout=300)  # reports + refreshes
+subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "build",
+     env_file],
+    env=env_prot, capture_output=True, text=True, timeout=120)
+p5 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env_prot, capture_output=True, text=True, timeout=300)
+p5o = p5.stdout + p5.stderr
+check("watch: build→build stability — no protection delta (R1)",
+      p5.returncode == 0 and "protection configuration changed" not in p5o,
+      f"rc={p5.returncode} out={p5o[-250:]!r}")
+# literal removed (-1)
+write_prot([prot_lit_a, prot_lit_b], ["PROBE_KEY_A", "PROBE_KEY_B"],
+           {"head": 3, "tail": 2, "floor": 12})
+p6 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env_prot, capture_output=True, text=True, timeout=300)
+p6o = p6.stdout + p6.stderr
+check("watch: custom literal removed -> -1",
+      p6.returncode == 0 and "Custom literals +0 / -1" in p6o,
+      f"rc={p6.returncode} out={p6o[-250:]!r}")
+
 
 print(f"\n[test] {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

@@ -778,8 +778,10 @@ def cmd_watch(args):
               "values retained (union), updated rules may surface fresh "
               "findings")
     d = _watch_deltas(current, prev, assessment)
+    pd = _protection_deltas(prev.get("protection"), protection)
     any_delta = bool(d["new_values"] or d["resolved_values"]
-                     or d["changed_values"] or d["changed_files"])
+                     or d["changed_values"] or d["changed_files"]
+                     or pd["status"] == "changed")
     if d["new_values"]:
         print("[info-guard] watch: NEW credential-shaped values found "
               "(masked 2+2 · type · family · count)")
@@ -811,6 +813,26 @@ def cmd_watch(args):
               "(informational):")
         for f in d["changed_files"]:
             print(f"  {f['file']}: {_n(f['before'])} → {_n(f['after'])}")
+    if pd["status"] == "changed":
+        cl = pd["custom_literals"]
+        kp = pd["key_patterns"]
+        rp = pd["redact_patterns"]
+        mp = pd["mask_policy"]
+        print("[info-guard] watch: protection configuration changed "
+              "(counts only, informational):")
+        if cl["added"] or cl["removed"]:
+            print(f"  Custom literals +{cl['added']} / -{cl['removed']}")
+        if kp["added"] or kp["removed"]:
+            print(f"  Key patterns +{kp['added']} / -{kp['removed']}")
+        if rp["changed"]:
+            print(f"  Pattern literals {_n(rp['literal_count_before'])} → "
+                  f"{_n(rp['literal_count_after'])} · key patterns "
+                  f"{_n(rp['key_pattern_count_before'])} → "
+                  f"{_n(rp['key_pattern_count_after'])}")
+        if mp["changed"]:
+            print("  Mask policy changed")
+        print("  Note: configuration deltas only — whether protection "
+              "improved is answered by the next preflight, not watch")
     if any_delta:
         # refresh-on-delta policy (review MAJ A1): rewrite the baseline
         # with current state — values = current scan (absent ones
@@ -899,6 +921,50 @@ def _watch_deltas(current, prev, assessment):
     return d
 
 
+def _protection_deltas(prev_protection, protection):
+    """Protection-config deltas vs the baseline snapshot. Counts +
+    fingerprints only — never values (guidance's explicit don't).
+    Custom literals and key patterns diff by exact fingerprint sets
+    (duplicates = one, order-insensitive); redact_patterns whole-set
+    fingerprints detect regeneration/order changes; mask policy
+    compared structurally (IG D45)."""
+    def fp_set(block, key):
+        return set((block or {}).get(key, []) or [])
+    d = {"status": "unchanged",
+         "custom_literals": {"added": 0, "removed": 0},
+         "key_patterns": {"added": 0, "removed": 0},
+         "redact_patterns": {"changed": False, "literal_count_before": 0,
+                             "literal_count_after": 0,
+                             "key_pattern_count_before": 0,
+                             "key_pattern_count_after": 0},
+         "mask_policy": {"changed": False}}
+    pb = prev_protection or {}
+    cl_b = fp_set(pb.get("custom_literals"), "fingerprints")
+    cl_a = fp_set(protection.get("custom_literals"), "fingerprints")
+    d["custom_literals"]["added"] = len(cl_a - cl_b)
+    d["custom_literals"]["removed"] = len(cl_b - cl_a)
+    rp_b = pb.get("redact_patterns") or {}
+    rp_a = protection.get("redact_patterns") or {}
+    kp_b = fp_set(rp_b, "key_pattern_fingerprints")
+    kp_a = fp_set(rp_a, "key_pattern_fingerprints")
+    d["key_patterns"]["added"] = len(kp_a - kp_b)
+    d["key_patterns"]["removed"] = len(kp_b - kp_a)
+    d["redact_patterns"] = {
+        "changed": (rp_a.get("literals_fingerprint") != rp_b.get("literals_fingerprint")
+                    or rp_a.get("key_patterns_fingerprint") != rp_b.get("key_patterns_fingerprint")),
+        "literal_count_before": rp_b.get("literal_count", 0),
+        "literal_count_after": rp_a.get("literal_count", 0),
+        "key_pattern_count_before": rp_b.get("key_pattern_count", 0),
+        "key_pattern_count_after": rp_a.get("key_pattern_count", 0)}
+    d["mask_policy"]["changed"] = (rp_a.get("mask_policy")
+                                   != rp_b.get("mask_policy"))
+    changed = (d["custom_literals"]["added"] or d["custom_literals"]["removed"]
+               or d["key_patterns"]["added"] or d["key_patterns"]["removed"]
+               or d["redact_patterns"]["changed"] or d["mask_policy"]["changed"])
+    d["status"] = "changed" if changed else "unchanged"
+    return d
+
+
 def _sha(s):
     return hashlib.sha256(s.encode()).hexdigest()
 
@@ -914,6 +980,7 @@ def _snapshot_protection():
         "redact_patterns": {"literal_count": 0, "key_pattern_count": 0,
                             "literals_fingerprint": None,
                             "key_patterns_fingerprint": None,
+                            "key_pattern_fingerprints": [],
                             "mask_policy": None},
         "engine": {"engine_state": "none", "engine_version": None},
     }
@@ -955,6 +1022,11 @@ def _snapshot_protection():
             if kp:
                 rp["key_patterns_fingerprint"] = "sha256:" + _sha(
                     json.dumps(sorted(kp)))
+                # per-pattern fingerprints: the whole-set fingerprint
+                # detects change but cannot produce the added/removed
+                # counts watch/v1 contracts — exact diff needs the set.
+                rp["key_pattern_fingerprints"] = [
+                    "sha256:" + _sha(k) for k in sorted(kp)]
             if all(k in mask for k in ("head", "tail", "floor")):
                 rp["mask_policy"] = {"head": mask["head"],
                                      "tail": mask["tail"],
