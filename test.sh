@@ -885,6 +885,91 @@ check("watch: custom literal removed -> -1",
       p6.returncode == 0 and "Custom literals +0 / -1" in p6o,
       f"rc={p6.returncode} out={p6o[-250:]!r}")
 
+# ── 17. watch v2: engine-state transitions + exit-code matrix ──
+eng_home = os.path.join(tmp, "eng-home")
+for sub in ("sessions", "logs", "cron/output"):
+    os.makedirs(os.path.join(eng_home, sub), exist_ok=True)
+with open(os.path.join(eng_home, "sessions", "session_20260505_075138_d.jsonl"),
+          "w") as f:
+    f.write(f"HASS_TOKEN={jwt}\n")
+    f.write(f"DISCORD_BOT_TOKEN={dsc}\n")
+os.makedirs(os.path.join(eng_home, "state", "info-guard"), exist_ok=True)
+env_eng = dict(os.environ)
+env_eng["HERMES_HOME"] = eng_home
+ENGINE_MARKERS = {  # mirrors bin/info-guard _ENGINE_MARKERS (L1761)
+    "agent/redact.py": "_redact_registry_patterns",
+    "hermes_cli/config.py": "redact_patterns",
+    "hermes_cli/main.py": "HERMES_REDACT_PATTERNS",
+    "cli.py": "HERMES_REDACT_PATTERNS",
+    "gateway/run.py": "HERMES_REDACT_PATTERNS",
+}
+def set_engine(n_markers):
+    base = os.path.join(eng_home, "hermes-agent")
+    if n_markers == 0:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+        return
+    os.makedirs(base, exist_ok=True)
+    for i, (rel, marker) in enumerate(sorted(ENGINE_MARKERS.items())):
+        p = os.path.join(base, rel)
+        if i < n_markers:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            open(p, "w").write("# probe\n" + marker + "\n")
+        elif os.path.exists(p):
+            os.unlink(p)
+def run_eng_watch():
+    return subprocess.run(
+        [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+         "watch"], env=env_eng, capture_output=True, text=True, timeout=300)
+e0 = run_eng_watch()  # baseline with engine none
+check("watch: engine baseline created (state none, version null)",
+      e0.returncode == 0
+      and json.load(open(os.path.join(eng_home, "state", "info-guard",
+                                      "watch-baseline.json")))
+          ["protection"]["engine"]["engine_state"] == "none"
+      and json.load(open(os.path.join(eng_home, "state", "info-guard",
+                                      "watch-baseline.json")))
+          ["protection"]["engine"]["engine_version"] is None,
+      f"rc={e0.returncode}")
+set_engine(5)
+e1 = run_eng_watch()
+check("watch: none→active — Engine installed, exit 0",
+      e1.returncode == 0 and "Engine installed" in (e1.stdout + e1.stderr),
+      f"rc={e1.returncode} out={(e1.stdout + e1.stderr)[-250:]!r}")
+set_engine(0)
+e2 = run_eng_watch()
+e2o = e2.stdout + e2.stderr
+check("watch: active→none — engine removed block, exit 1",
+      e2.returncode == 1 and "PROTECTION ENGINE REMOVED" in e2o,
+      f"rc={e2.returncode} out={e2o[-250:]!r}")
+set_engine(5)
+e3 = run_eng_watch()
+check("watch: none→active (reinstall), exit 0",
+      e3.returncode == 0 and "Engine installed" in (e3.stdout + e3.stderr),
+      f"rc={e3.returncode}")
+set_engine(3)
+e4 = run_eng_watch()
+e4o = e4.stdout + e4.stderr
+check("watch: active→partial — degraded block, exit 1",
+      e4.returncode == 1 and "Protection degraded" in e4o,
+      f"rc={e4.returncode} out={e4o[-250:]!r}")
+set_engine(5)
+e5 = run_eng_watch()
+check("watch: partial→active — Protection restored, exit 0",
+      e5.returncode == 0 and "Protection restored" in (e5.stdout + e5.stderr),
+      f"rc={e5.returncode}")
+# combined run: engine event + new value -> exit 1, both blocks
+set_engine(0)
+with open(os.path.join(eng_home, "sessions", "session_20260505_075138_d.jsonl"),
+          "a") as f:
+    f.write("ANTHROPIC_API_KEY=sk-" + "comboengine1234567" + "\n")
+e6 = run_eng_watch()
+e6o = e6.stdout + e6.stderr
+check("watch: combined new-value + engine event -> exit 1, both blocks",
+      e6.returncode == 1 and "NEW credential" in e6o
+      and "PROTECTION ENGINE REMOVED" in e6o,
+      f"rc={e6.returncode} out={e6o[-250:]!r}")
+
 
 print(f"\n[test] {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

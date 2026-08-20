@@ -714,17 +714,21 @@ def cmd_preflight(args):
 def cmd_watch(args):
     """Watch mode: re-run the scan and report deltas since the baseline
     (value sha256 only, 0600 state file). First run (or --reset)
-    creates the baseline; exit 1 when new values appear — cron-friendly.
-    The baseline is union-kept across tool/gitleaks version changes
-    (known values never re-alert). v2: exposure + protection + engine
-    deltas (see format-spec watch contract)."""
-    reset = "--reset" in (args or [])
-    names = [a for a in (args or []) if not a.startswith("--")]
-    dirs = []
-    for name in names or _PREFLIGHT_DIRS:
+    creates the baseline; exit 1 on new values and degraded engine
+    transitions — cron-friendly. The baseline is union-kept across
+    tool/gitleaks version changes (known values never re-alert). v2:
+    exposure + protection + engine deltas + --json/--json-out (see
+    format-spec watch contract)."""
+    opts, dirs = _parse_watch_args(args)
+    if dirs is None:
+        return 2  # usage error (--json-out without a path)
+    reset = opts["reset"]
+    scan_dirs = []
+    for name in dirs or _PREFLIGHT_DIRS:
         p = _HERMES_HOME / name
         if p.is_dir():
-            dirs.append(p)
+            scan_dirs.append(p)
+    dirs = scan_dirs
     if not dirs:
         print(f"[info-guard] watch: no scan targets under {_HERMES_HOME} "
               f"({', '.join(_PREFLIGHT_DIRS)}) — nothing to scan")
@@ -779,9 +783,11 @@ def cmd_watch(args):
               "findings")
     d = _watch_deltas(current, prev, assessment)
     pd = _protection_deltas(prev.get("protection"), protection)
+    et = _engine_transition(prev.get("protection"), protection)
     any_delta = bool(d["new_values"] or d["resolved_values"]
                      or d["changed_values"] or d["changed_files"]
-                     or pd["status"] == "changed")
+                     or pd["status"] == "changed"
+                     or et["state_before"] != et["state_after"])
     if d["new_values"]:
         print("[info-guard] watch: NEW credential-shaped values found "
               "(masked 2+2 · type · family · count)")
@@ -833,6 +839,18 @@ def cmd_watch(args):
             print("  Mask policy changed")
         print("  Note: configuration deltas only — whether protection "
               "improved is answered by the next preflight, not watch")
+    if et["state_before"] != et["state_after"]:
+        if et["state_after"] == "active" and et["state_before"] == "none":
+            print("[info-guard] watch: 🟢 Engine installed")
+        elif et["state_after"] == "active" and et["state_before"] == "partial":
+            print("[info-guard] watch: 🟢 Protection restored")
+        elif et["state_after"] == "partial" and et["state_before"] == "active":
+            print("[info-guard] watch: 🟠 Protection degraded — Hermes is "
+                  "not fully applying the configuration")
+        elif et["state_after"] == "none" and et["state_before"] == "active":
+            print("[info-guard] watch: 🔴 PROTECTION ENGINE REMOVED — "
+                  "existing configuration remains on disk, but Hermes is "
+                  "not actively applying it")
     if any_delta:
         # refresh-on-delta policy (review MAJ A1): rewrite the baseline
         # with current state — values = current scan (absent ones
@@ -842,7 +860,9 @@ def cmd_watch(args):
                               protection, assessment_snap)
         print(f"[info-guard] watch: baseline refreshed — {_n(len(current))} "
               "values now known")
-        return 1 if d["new_values"] else 0
+        if d["new_values"] or et["degraded"]:
+            return 1
+        return 0
     print(f"[info-guard] watch: no new credential-shaped values since "
           f"{_fmt_generated(prev.get('generated', ''))}")
     return 0
@@ -963,6 +983,54 @@ def _protection_deltas(prev_protection, protection):
                or d["redact_patterns"]["changed"] or d["mask_policy"]["changed"])
     d["status"] = "changed" if changed else "unchanged"
     return d
+
+
+def _engine_transition(prev_protection, protection):
+    """Engine-state transition vs the baseline snapshot (proposal §2.5,
+    IG D47). Returns {state_before, state_after, version_before,
+    version_after, degraded} — degraded=True for active→partial and
+    active→none (both exit 1); recoveries and installs exit 0."""
+    e_b = (prev_protection or {}).get("engine") or {}
+    e_a = (protection or {}).get("engine") or {}
+    before = e_b.get("engine_state") or "none"
+    after = e_a.get("engine_state") or "none"
+    return {"state_before": before, "state_after": after,
+            "version_before": e_b.get("engine_version"),
+            "version_after": e_a.get("engine_version"),
+            "degraded": (before, after) in (("active", "partial"),
+                                            ("active", "none"))}
+
+
+def _parse_watch_args(args):
+    """watch argument parser (preflight precedent, L650-675): bare
+    names = scan dirs; --reset; --json; --json-out FILE (requires a
+    value -> stderr + exit 2; implies --json, file wins). Unknown --*
+    flags are ignored (preflight precedent). Returns (opts, dirs) or
+    (opts, None) when usage is invalid (caller returns 2)."""
+    opts = {"reset": False, "json": False, "json_out": None}
+    dirs = []
+    a = list(args or [])
+    i = 0
+    while i < len(a):
+        x = a[i]
+        if x == "--reset":
+            opts["reset"] = True
+        elif x == "--json":
+            opts["json"] = True
+        elif x == "--json-out":
+            i += 1
+            if i >= len(a):
+                print("[info-guard] watch: --json-out requires a file "
+                      "path", file=sys.stderr)
+                return opts, None
+            opts["json_out"] = a[i]
+        elif x.startswith("--"):
+            pass  # unknown flags ignored (preflight precedent)
+        else:
+            dirs.append(x)
+        i += 1
+    opts["json"] = opts["json"] or opts["json_out"] is not None
+    return opts, dirs
 
 
 def _sha(s):
