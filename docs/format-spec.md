@@ -167,15 +167,17 @@ report is never a second implementation.
   (the object's `tool` block carries engine state). `--json-out FILE`
   writes it atomically (temp + fsync + rename, **0600**) and implies JSON
   mode. Exit codes unchanged: 0 = clean, 1 = findings, 2 = usage error.
-- `watch` (v2, v0.4.0) re-runs the scan and reports **deltas on three
-  tracks** against `<state>/info-guard/watch-baseline.json` (schema
+- `watch` (v2, v0.4.0; protected-value matching v0.4.1) re-runs the scan
+  and reports **deltas on four tracks** against
+  `<state>/info-guard/watch-baseline.json` (schema
   `info-guard/watch-baseline/v2`, 0600 — **value sha256 only; raw values
   never persisted**; schema v1 baselines are migrated in place, delta-free):
   1. **Exposure** — `new_values` (masked 2+2 · type · family · count,
      exit 1), `resolved_values` (informational — "No longer detected in
      the current scan scope. This does not confirm that the credential
      is dead or revoked"), `changed_values` (±occurrences, informational),
-     family rollups, per-file count changes.
+     family rollups, per-file count changes, and **`protected_values`**
+     (v0.4.1 — see item 4).
   2. **Protection configuration** — custom literals / key patterns
      added/removed (fingerprint-set diffs), redact_patterns whole-set
      fingerprint change, mask-policy change. Counts + fingerprints ONLY —
@@ -185,12 +187,39 @@ report is never a second implementation.
   3. **Engine state** — transitions between `active` / `partial` /
      `none` with explicit blocks (installed / restored / degraded /
      removed).
-- **Exit codes (contract, v0.4.0):** NEW values = 1 · `active→partial`
-  = 1 (degraded) · `active→none` = 1 (engine removed — config remains on
+  4. **Protected values (v0.4.1, IG D51–D56)** — scan values whose
+     exact sha256 matches a `custom_literals.json` entry (the app's
+     known-value registry — NOT the house `known_secrets.json`, which is
+     HMAC-peppered leak_scan state and stays out of the public product).
+     Vocabulary: **protected value** = user-declared via the registry ·
+     **detection** = the value appeared in the scan · **increased** =
+     more occurrences than baseline · **confirmed leak** = never claimed
+     by watch. Wording: "PROTECTED VALUE RE-DETECTED", never "known
+     secret detected", never "leak". Matching is **exact-value only**
+     (case-sensitive) and operates on the scan's **credential-shaped
+     value set** (the same domain as the baseline) — a declared literal
+     that is not credential-shaped (e.g. a PII-only email) never matches,
+     by design. Count = matching occurrences across the watch scan scope;
+     deltas: `new` (not in baseline) / `increased` / `decreased` /
+     `unchanged`; a value absent from the scan surfaces only via
+     `resolved_values`, never as a protected row. **Overlay rule:** JSON
+     keeps the row in `new_values`/`changed_values` AND
+     `protected_values` (one event); the terminal renders protected rows
+     only in the PROTECTED block. Live-registry semantics: declaring a
+     literal takes effect on the next run, no `--reset` needed.
+- **Exit codes (contract, v0.4.0; protected row v0.4.1):** NEW values =
+  1 · **protected value `new`/`increased` = 1** · `active→partial` = 1
+  (degraded) · `active→none` = 1 (engine removed — config remains on
   disk, not applied) · `none→active` / `partial→active` = 0 ·
-  config-only / resolved / changed = 0 · usage = 2. `partial` is never
-  ambiguous — degraded protection alerts exactly like removal (matches
-  `check`).
+  config-only / resolved / **non-protected** changed = 0 · usage = 2.
+  `partial` is never ambiguous — degraded protection alerts exactly like
+  removal (matches `check`).
+- **CLI contract (v0.4.1, IG D55):** every subcommand accepts
+  `-h`/`--help` → prints its usage line, exit 0. Unknown `--*` flags are
+  tolerated (preflight precedent) but never silent: stderr
+  `Warning: unknown option '<flag>'` (flag echoed verbatim), then the run
+  proceeds — a typo (`--jason`) is visible in cron logs. Single-dash
+  tokens remain scan-dir names (documented limitation).
 - **Baseline lifecycle:** first run (or `--reset`) creates it; on
   tool/gitleaks version change it is **union-kept** (known values never
   re-alert) with a notice; a broken/unreadable baseline is rebuilt,

@@ -92,7 +92,19 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.4.0"
+_PACKAGE_VERSION = "0.4.1"
+
+# Per-subcommand usage lines (v0.4.1, IG D55): printed by
+# `info-guard <cmd> --help` (exit 0). Mirror the __doc__ usage block —
+# keep both in sync when a command's options change.
+_SUBCOMMAND_USAGE = {
+    "build": "info-guard build [ENV_FILE ...]    Build redact_patterns.json from .env sources",
+    "status": "info-guard status                  Show a summary of the current pattern file",
+    "preflight": "info-guard preflight [DIR ...] [--full] [--json] [--json-out FILE]   Zero-config leak scan (read-only, masked)",
+    "watch": "info-guard watch [DIR ...] [--reset] [--json] [--json-out FILE]   Delta monitor vs the watch baseline (cron-friendly exits)",
+    "setup": "info-guard setup [--all]            Interactive bootstrap (registers custom literals, builds patterns)",
+    "check": "info-guard check                    Health check / schedulable watchdog",
+}
 
 VALID_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -679,7 +691,10 @@ def cmd_preflight(args):
                 return 2
             json_out = a[i]
         elif x.startswith("--"):
-            pass  # --full / --json handled above; unknown flags ignored
+            # --full / --json handled above; other unknown flags are
+            # tolerated but never silent (IG D55).
+            if x not in ("--full", "--json"):
+                print(f"Warning: unknown option '{x}'", file=sys.stderr)
         else:
             names.append(x)
         i += 1
@@ -769,6 +784,12 @@ def cmd_watch(args):
          else str(d) for d in dirs],
         total_files, gitleaks_ok, now)
     protection = _snapshot_protection()
+    # Live protected-value registry (v0.4.1, IG D52/D53): custom_literals
+    # fingerprints from the CURRENT snapshot — declaring a literal takes
+    # effect on the next run; no --reset needed (acceptance A3).
+    known_fps = {fp.removeprefix("sha256:") for fp in
+                 (protection.get("custom_literals") or {})
+                 .get("fingerprints", [])}
     assessment_snap = _snapshot_assessment_totals(assessment)
     baseline_path = STATE_DIR / "watch-baseline.json"
     prev = None
@@ -781,9 +802,9 @@ def cmd_watch(args):
                "new_families": [], "resolved_families": [],
                "changed_files": []}
 
-    def emit_json(prev_obj, d_obj, pd_obj, et_obj):
+    def emit_json(prev_obj, d_obj, pd_obj, et_obj, pm_obj=None):
         obj = _watch_json_object(prev_obj, now, assessment_snap, d_obj,
-                                 pd_obj, et_obj)
+                                 pd_obj, et_obj, pm_obj)
         if opts["json_out"]:
             _atomic_write_json(Path(opts["json_out"]), obj)
             say(f"[info-guard] watch: JSON written to {opts['json_out']}")
@@ -825,34 +846,75 @@ def cmd_watch(args):
     d = _watch_deltas(current, prev, assessment)
     pd = _protection_deltas(prev.get("protection"), protection)
     et = _engine_transition(prev.get("protection"), protection)
+    pm = _protected_value_matches(current, prev, known_fps)
+    pm_alarm = [m for m in pm if m["delta"] in ("new", "increased")]
+    # Overlay rule (IG D54): JSON keeps protected rows in new_values /
+    # changed_values AND protected_values (one event); the TERMINAL
+    # renders them only in the PROTECTED block — the NEW VALUES / CHANGED
+    # COUNTS display views below skip them (MAJ-1).
+    base_rows = {v["value_sha256"]: v for v in (prev.get("values") or [])}
+
+    def _disp_row(value, e):
+        return {"value_masked": _mask_value(value), "type": e["type"],
+                "family": e["family"], "count": e["count"]}
+
+    display_new = [_disp_row(v, e) for v, e in current.items()
+                   if e["value_sha256"] not in base_rows
+                   and e["value_sha256"] not in known_fps]
+    display_changed = []
+    for v, e in current.items():
+        if e["value_sha256"] in base_rows and e["value_sha256"] not in known_fps:
+            old = base_rows[e["value_sha256"]].get("count", 0)
+            if old != e["count"]:
+                row = _disp_row(v, e)
+                row["count_before"] = old
+                display_changed.append(row)
     any_delta = bool(d["new_values"] or d["resolved_values"]
                      or d["changed_values"] or d["changed_files"]
                      or pd["status"] == "changed"
                      or et["state_before"] != et["state_after"])
-    exit_code = 1 if (d["new_values"] or et["degraded"]) else 0
+    exit_code = 1 if (d["new_values"] or et["degraded"] or pm_alarm) else 0
     if any_delta:
         # Changed run: header + per-track summaries + blocks (proposal
         # §2.3 guidance UX). All values masked 2+2 or counts only.
         say("Info Guard Watch")
         say("────────────────────────────────────────────")
+        if pm_alarm:
+            say("🔴 PROTECTED VALUE RE-DETECTED")
+            for m in pm_alarm:
+                fam = _family_label(m["family"]) if m["family"] \
+                    else "(no key context)"
+                if m["delta"] == "increased":
+                    occ = (f"+{_n(m['count'] - m['count_before'])} "
+                           f"occurrence{'s' if m['count'] - m['count_before'] != 1 else ''} "
+                           "since baseline")
+                else:
+                    occ = (f"{_n(m['count'])} occurrence"
+                           f"{'s' if m['count'] != 1 else ''} (first detected)")
+                say(f"    {m['value_masked']:<18} {m['type'][:22]:<24} "
+                    f"{occ:<36} {fam}")
+        if pm:
+            say(f"  {_n(len(pm))} protected value"
+                f"{'s' if len(pm) != 1 else ''} present "
+                f"({_n(len(pm_alarm))} re-detected)")
         parts = []
-        if d["new_values"]:
-            parts.append(f"+{_n(len(d['new_values']))} new value"
-                         f"{'s' if len(d['new_values']) != 1 else ''}")
+        if display_new:
+            parts.append(f"+{_n(len(display_new))} new value"
+                         f"{'s' if len(display_new) != 1 else ''}")
         if d["resolved_values"]:
             parts.append(f"{_n(len(d['resolved_values']))} resolved")
-        if d["changed_values"]:
+        if display_changed:
             n_occ = sum(e["count"] - e["count_before"]
-                        for e in d["changed_values"])
-            parts.append(f"+{_n(len(d['changed_values']))} value"
-                         f"{'s' if len(d['changed_values']) != 1 else ''} "
+                        for e in display_changed)
+            parts.append(f"+{_n(len(display_changed))} value"
+                         f"{'s' if len(display_changed) != 1 else ''} "
                          f"{(n_occ and ('+' + _n(n_occ))) or '0'} "
                          f"occurrence{'s' if abs(n_occ) != 1 else ''}")
         if parts:
             say("🔴 EXPOSURE CHANGED (" + ", ".join(parts) + ")")
-    if d["new_values"]:
+    if display_new:
         say("  NEW VALUES (masked 2+2 · type · family · count)")
-        for e in d["new_values"]:
+        for e in display_new:
             fam = _family_label(e["family"]) if e["family"] \
                 else "(no key context)"
             say(f"    {e['value_masked']:<18} {e['type'][:22]:<24} "
@@ -866,14 +928,15 @@ def cmd_watch(args):
                 f"(first seen {str(e['first_seen'])[:10]})")
         say("  No longer detected in the current scan scope. This does not "
             "confirm that the credential is dead or revoked.")
-    if d["changed_values"]:
+    if display_changed:
         say("  CHANGED COUNTS (informational)")
-        for e in d["changed_values"]:
+        for e in display_changed:
             fam = _family_label(e["family"]) if e["family"] \
                 else "(no key context)"
-            delta = e["count"] - e["count_before"]
+            cb = e["count_before"]
+            delta = e["count"] - cb
             say(f"    {e['value_masked']:<18} {e['type'][:22]:<24} "
-                f"{_n(e['count_before']):>6} → {_n(e['count']):>6} "
+                f"{_n(cb):>6} → {_n(e['count']):>6} "
                 f"({delta:+d})  {fam}")
     if d["new_families"] or d["resolved_families"]:
         say("  FAMILIES — new: "
@@ -952,12 +1015,13 @@ def cmd_watch(args):
         say(f"[info-guard] watch: baseline refreshed — {_n(len(current))} "
             "values now known")
         if json_mode:
-            emit_json(prev, d, pd, et)
+            emit_json(prev, d, pd, et, pm)
         return exit_code
     say(f"[info-guard] watch: no new credential-shaped values since "
         f"{_fmt_generated(prev.get('generated', ''))}")
     if json_mode:
-        emit_json(prev, d, pd, et)
+        pm = _protected_value_matches(current, prev, known_fps)
+        emit_json(prev, d, pd, et, pm)
     return 0
 
 
@@ -1032,6 +1096,37 @@ def _watch_deltas(current, prev, assessment):
             d["changed_files"].append({"file": rel, "before": before,
                                        "after": after})
     return d
+
+
+def _protected_value_matches(current, prev, known_fps):
+    """Protected-value matches (v0.4.1, IG D53/D54): scan values whose
+    value_sha256 is in the LIVE custom_literals fingerprint set (the
+    app's known-value registry). Rows are the PUBLIC shape — masked 2+2,
+    type, family, count, count_before (increased/decreased only), delta
+    (new|increased|decreased|unchanged) — never sha256 (the sha is an
+    internal comparison primitive only, D56). A value absent from the
+    current scan never appears here: it surfaces via resolved_values.
+    Empty/unreadable registry -> empty list (fail-safe)."""
+    if not known_fps:
+        return []
+    baseline_rows = {v["value_sha256"]: v for v in (prev.get("values") or [])}
+    rows = []
+    for value, e in current.items():
+        if e["value_sha256"] not in known_fps:
+            continue
+        row = {"value_masked": _mask_value(value), "type": e["type"],
+               "family": e["family"], "count": e["count"]}
+        old = baseline_rows.get(e["value_sha256"])
+        if old is None:
+            row["delta"] = "new"
+        elif old.get("count", 0) != e["count"]:
+            row["delta"] = ("increased" if e["count"] > old.get("count", 0)
+                            else "decreased")
+            row["count_before"] = old.get("count", 0)
+        else:
+            row["delta"] = "unchanged"
+        rows.append(row)
+    return rows
 
 
 def _protection_deltas(prev_protection, protection):
@@ -1118,7 +1213,10 @@ def _parse_watch_args(args):
                 return opts, None
             opts["json_out"] = a[i]
         elif x.startswith("--"):
-            pass  # unknown flags ignored (preflight precedent)
+            # Unknown flags are tolerated (preflight precedent) but NEVER
+            # silent: warn verbatim so a typo (--jason) is visible in
+            # cron logs (IG D55).
+            print(f"Warning: unknown option '{x}'", file=sys.stderr)
         else:
             dirs.append(x)
         i += 1
@@ -1126,7 +1224,7 @@ def _parse_watch_args(args):
     return opts, dirs
 
 
-def _watch_json_object(prev, now, assessment_snap, d, pd, et):
+def _watch_json_object(prev, now, assessment_snap, d, pd, et, pm=None):
     """watch/v1 object (proposal §2.4, IG D49): the PUBLIC delta
     result. Exposure rows carry value_masked 2+2 (resolved rows:
     null — value gone, sha256 forbidden); protection = counts +
@@ -1156,7 +1254,8 @@ def _watch_json_object(prev, now, assessment_snap, d, pd, et):
                      "changed_values": d["changed_values"],
                      "new_families": d["new_families"],
                      "resolved_families": d["resolved_families"],
-                     "changed_files": d["changed_files"]},
+                     "changed_files": d["changed_files"],
+                     "protected_values": pm or []},
         "protection": {"status": pd["status"],
                        "custom_literals": pd["custom_literals"],
                        "key_patterns": pd["key_patterns"],
@@ -2351,6 +2450,12 @@ def main(argv):
         print(f"info-guard {_PACKAGE_VERSION}")
         return 0
     cmd, rest = argv[0], argv[1:]
+    # -h/--help anywhere in the subcommand args wins (plan B1; evidence
+    # review MIN-1): `watch --reset --help` prints usage, never resets.
+    if rest and any(a in ("-h", "--help") for a in rest) \
+            and cmd in _SUBCOMMAND_USAGE:
+        print(_SUBCOMMAND_USAGE[cmd])
+        return 0
     if cmd == "build":
         cmd_build(rest)
         return 0

@@ -8,7 +8,9 @@ baseline snapshot and the current scan, across three tracks — exposure
 (values), protection configuration (fingerprints/counts), and engine
 state (transitions).
 
-**Status:** shipped with v0.4.0 (2026-08-20). Independent AI plan review
+**Status:** shipped with v0.4.0 (2026-08-20); **`exposure.protected_values`
+added v0.4.1 (2026-08-20, IG D51–D56)** — additive only, schema stays
+`watch/v1`. Independent AI plan review
 amended the row shape pre-build (review MAJ A3): exposure rows carry
 `value_masked` (2+2) — **`value_sha256` is FORBIDDEN in this object**
 (the private 0600 baseline keeps sha256; this is the public surface, and
@@ -35,7 +37,7 @@ in-memory delta object — never a second implementation.
 ```json
 {
   "schema": "info-guard/watch/v1",
-  "tool": {"name": "info-guard", "version": "0.4.0"},
+  "tool": {"name": "info-guard", "version": "0.4.1"},
   "watch": {
     "generated": "2026-08-20T16:53:00Z",
     "baseline_generated": "2026-08-19T16:53:00Z",
@@ -53,7 +55,8 @@ in-memory delta object — never a second implementation.
     "changed_values": [],
     "new_families": [],
     "resolved_families": [],
-    "changed_files": []
+    "changed_files": [],
+    "protected_values": []
   },
   "protection": {
     "status": "unchanged",
@@ -68,7 +71,7 @@ in-memory delta object — never a second implementation.
   },
   "engine": {
     "state_before": "active", "state_after": "active",
-    "version_before": "0.3.1", "version_after": "0.4.0"
+    "version_before": "0.3.1", "version_after": "0.4.1"
   }
 }
 ```
@@ -123,7 +126,26 @@ family name, or `null` for bare tokens (the terminal renders
   detector-classification change all read as resolved.
 - `changed_values` — present on both sides, occurrence count differs.
   Rows carry `count` (now) and `count_before`; the terminal renders
-  `+N/-N`. **Informational (exit 0).**
+  `+N/-N`. **Informational (exit 0)** — applies to **non-protected**
+  changed values; protected rows are overlaid (below).
+- `protected_values` — **(v0.4.1, additive, IG D51–D56)** the
+  protected-value overlay: every current-scan value whose exact sha256
+  matches a `custom_literals.json` fingerprint (the app's known-value
+  registry). Row shape `{value_masked (2+2), type, family, count,
+  count_before? (increased/decreased only), delta ∈ {new, increased,
+  decreased, unchanged}}` — **never sha256** (same surface rule as every
+  exposure row). `new`/`increased` → **exit 1**; `decreased`/`unchanged`
+  → informational (exit 0). A value absent from the scan never appears
+  here — it surfaces via `resolved_values`. Present on every run (empty
+  array when the registry is empty or nothing matches; first-run and
+  migration emits are empty — the next run reports). **Overlay rule:** a
+  protected value also appears in `new_values`/`changed_values` — that is
+  ONE event; the terminal renders it once (PROTECTED block only).
+  Vocabulary: **protected value** = user-declared via the registry ·
+  **detection** = appeared in scan · **increased** = more occurrences
+  than baseline · **confirmed leak** = never claimed by watch. Matching
+  is exact-value and limited to the credential-shaped scan domain (a
+  PII-only literal never matches, by design).
 - `new_families` / `resolved_families` — family-name rollups of the
   above (raw names, sorted, bare-token excluded).
 - `changed_files` — `{file, before, after}` per file whose
@@ -171,7 +193,8 @@ manifest). Exit-code contract (IG D47) — transitions that alert:
 | engine `active→none` (removed) | **1** |
 | engine unchanged | 0 |
 | NEW credential-shaped values | **1** |
-| config-only / resolved / changed values | 0 |
+| protected value `new` / `increased` | **1** |
+| config-only / resolved / non-protected changed values | 0 |
 | usage error | 2 |
 
 `partial` is never ambiguous: degraded protection alerts exactly like

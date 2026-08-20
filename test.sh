@@ -384,7 +384,7 @@ pf = subprocess.run(
 pfo = pf.stdout + pf.stderr
 check("preflight: findings exit code 1", pf.returncode == 1,
       f"rc={pf.returncode} out={pfo[-300:]!r}")
-for section in ("Info Guard v0.4.0 — Preflight Security Assessment",
+for section in ("Info Guard v0.4.1 — Preflight Security Assessment",
                 "STATUS", "EXECUTIVE SUMMARY", "WHAT MATTERS",
                 "CREDENTIAL EXPOSURE BY FAMILY",
                 "EXPOSURE LOCATIONS",
@@ -481,7 +481,7 @@ ver = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
     capture_output=True, text=True, timeout=60)
 check("--version prints the package version",
-      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.4.0",
+      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.4.1",
       f"rc={ver.returncode} out={ver.stdout.strip()!r}")
 
 # 12d. detection gaps (v0.3.1): Authorization family + dot-structured
@@ -804,6 +804,211 @@ check("watch: absolute dir outside HERMES_HOME scans cleanly (no crash)",
       c3.returncode == 0 and "Traceback" not in c3o
       and "baseline created" in c3o,
       f"rc={c3.returncode} out={c3o[-250:]!r}")
+
+# ── 15b. watch v0.4.1: protected-value matching (IG D51–D56, A1–A6) ──
+kv_home = os.path.join(tmp, "kv-home")
+for sub in ("sessions", "logs", "cron/output"):
+    os.makedirs(os.path.join(kv_home, sub), exist_ok=True)
+kv_dir = os.path.join(kv_home, "state", "info-guard")
+os.makedirs(kv_dir, exist_ok=True)
+kv_cl = os.path.join(kv_dir, "custom_literals.json")
+kv_bl = os.path.join(kv_dir, "watch-baseline.json")
+kv_file = os.path.join(kv_home, "sessions", "session_20260505_075138_d.jsonl")
+env_kv = dict(os.environ)
+env_kv["HERMES_HOME"] = kv_home
+dsc_mask = dsc[:2] + "..." + dsc[-2:]
+# registry BEFORE the baseline (MIN-6): jwt declared protected; dsc
+# declared but absent from the scan until the A6 fixture
+with open(kv_cl, "w") as f:
+    f.write(json.dumps({"literals": [jwt, dsc]}))
+def kv_watch(*args):
+    return subprocess.run(
+        [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+         "watch"] + list(args),
+        env=env_kv, capture_output=True, text=True, timeout=300)
+with open(kv_file, "w") as f:
+    f.write(f"HASS_TOKEN={jwt}\n")
+k0 = kv_watch()
+check("watch A3: baseline created with declared registry (exit 0)",
+      k0.returncode == 0 and "baseline created" in (k0.stdout + k0.stderr),
+      f"rc={k0.returncode}")
+# A1: protected value count increase -> exit 1, one block, overlay
+with open(kv_file, "a") as f:
+    f.write(f"HASS_TOKEN={jwt}\n")
+k1 = kv_watch()
+k1o = k1.stdout + k1.stderr
+check("watch A1: protected count increase -> exit 1",
+      k1.returncode == 1, f"rc={k1.returncode} out={k1o[-250:]!r}")
+check("watch A1: PROTECTED block exactly once, masked + occurrences",
+      k1o.count("PROTECTED VALUE RE-DETECTED") == 1
+      and "ey...aa" in k1o and "occurrences since baseline" in k1o,
+      f"out={k1o[-250:]!r}")
+check("watch A1: info line present",
+      "1 protected value present (1 re-detected)" in k1o,
+      f"out={k1o[-250:]!r}")
+check("watch A1: overlay — protected row NOT in CHANGED COUNTS block",
+      "\n  CHANGED COUNTS (informational)" not in k1o,
+      f"out={k1o[-250:]!r}")
+# A1 JSON: one more occurrence -> --json carries the increased row
+with open(kv_file, "a") as f:
+    f.write(f"HASS_TOKEN={jwt}\n")
+k1j = kv_watch("--json")
+k1jo = json.loads(k1j.stdout)
+pv_inc = [r for r in k1jo["exposure"]["protected_values"]
+          if r["delta"] == "increased"]
+check("watch A1: JSON increased row — both arrays, no sha256",
+      k1j.returncode == 1
+      and len(pv_inc) == 1
+      and pv_inc[0]["value_masked"] == "ey...aa"
+      and pv_inc[0]["count"] > pv_inc[0]["count_before"]
+      and "count_before" in pv_inc[0]
+      and any(r["value_masked"] == "ey...aa"
+              for r in k1jo["exposure"]["changed_values"])
+      and "value_sha256" not in json.dumps(k1jo),
+      f"out={k1j.stdout[-250:]!r}")
+# A6: fresh protected value (feedback-#4 headline case) -> delta new
+with open(kv_file, "a") as f:
+    f.write(f"DISCORD_BOT_TOKEN={dsc}\n")
+k2 = kv_watch()
+k2o = k2.stdout + k2.stderr
+check("watch A6: fresh protected value -> exit 1, one block, first detected",
+      k2.returncode == 1
+      and k2o.count("PROTECTED VALUE RE-DETECTED") == 1
+      and "first detected" in k2o,
+      f"rc={k2.returncode} out={k2o[-250:]!r}")
+check("watch A6: overlay — fresh protected row NOT in NEW VALUES block",
+      "NEW VALUES" not in k2o, f"out={k2o[-250:]!r}")
+# A6 JSON: another fresh protected value via --json
+sk_p = "sk-" + "protectedprobe123456"
+sk_p_mask = sk_p[:2] + "..." + sk_p[-2:]
+with open(kv_cl, "w") as f:
+    f.write(json.dumps({"literals": [jwt, dsc, sk_p]}))
+with open(kv_file, "a") as f:
+    f.write("ANTHROPIC_API_KEY=" + sk_p + "\n")
+k3 = kv_watch("--json")
+k3jo = json.loads(k3.stdout)
+pv_new = [r for r in k3jo["exposure"]["protected_values"]
+          if r["delta"] == "new"]
+check("watch A6: JSON delta new — both arrays, no count_before",
+      k3.returncode == 1
+      and len(pv_new) == 1
+      and pv_new[0]["value_masked"] == sk_p_mask
+      and "count_before" not in pv_new[0]
+      and any(r["value_masked"] == sk_p_mask
+              for r in k3jo["exposure"]["new_values"]),
+      f"out={k3.stdout[-250:]!r}")
+# A2: protected value MOVES files, total count unchanged -> unchanged,
+# exit 0, no PROTECTED block, info line (changed run via changed_files)
+mv_home = os.path.join(tmp, "mv-home")
+for sub in ("sessions", "logs", "cron/output"):
+    os.makedirs(os.path.join(mv_home, sub), exist_ok=True)
+mv_dir = os.path.join(mv_home, "state", "info-guard")
+os.makedirs(mv_dir, exist_ok=True)
+mv_a = os.path.join(mv_home, "sessions", "a.jsonl")
+mv_b = os.path.join(mv_home, "sessions", "b.jsonl")
+env_mv = dict(os.environ)
+env_mv["HERMES_HOME"] = mv_home
+with open(os.path.join(mv_dir, "custom_literals.json"), "w") as f:
+    f.write(json.dumps({"literals": [jwt]}))
+with open(mv_a, "w") as f:
+    f.write(f"HASS_TOKEN={jwt}\n")
+def mv_watch(*args):
+    return subprocess.run(
+        [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+         "watch"] + list(args),
+        env=env_mv, capture_output=True, text=True, timeout=300)
+check("watch A2: baseline (exit 0)", mv_watch().returncode == 0)
+os.unlink(mv_a)
+with open(mv_b, "w") as f:
+    f.write(f"HASS_TOKEN={jwt}\n")
+k4 = mv_watch()
+k4o = k4.stdout + k4.stderr
+check("watch A2: move w/o count change -> exit 0, no PROTECTED block",
+      k4.returncode == 0
+      and "PROTECTED VALUE RE-DETECTED" not in k4o
+      and "FILES WITH CHANGED COUNTS" in k4o,
+      f"rc={k4.returncode} out={k4o[-250:]!r}")
+check("watch A2: info line present (0 re-detected)",
+      "1 protected value present (0 re-detected)" in k4o,
+      f"out={k4o[-250:]!r}")
+k4j = json.loads(mv_watch("--json").stdout)
+check("watch A2: JSON delta unchanged, clean status",
+      k4j["watch"]["status"] == "clean"
+      and len(k4j["exposure"]["protected_values"]) == 1
+      and k4j["exposure"]["protected_values"][0]["delta"] == "unchanged",
+      f"out={json.dumps(k4j)[:250]!r}")
+# A3: live registry — literal added AFTER the baseline matches next run
+# (pf_home already has a baseline), no --reset
+with open(os.path.join(pf_home, "state", "info-guard",
+                       "custom_literals.json"), "w") as f:
+    f.write(json.dumps({"literals": [jwt]}))
+l1 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "watch"], env=env6, capture_output=True, text=True, timeout=300)
+l1o = l1.stdout + l1.stderr
+check("watch A3: live registry — config delta only, exit 0, no reset",
+      l1.returncode == 0 and "Custom literals +1" in l1o
+      and "PROTECTED VALUE RE-DETECTED" not in l1o,
+      f"rc={l1.returncode} out={l1o[-250:]!r}")
+l2j = json.loads(subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "watch", "--json"], env=env6, capture_output=True, text=True,
+    timeout=300).stdout)
+check("watch A3: protected_values populated after live add (unchanged)",
+      any(r["value_masked"] == "ey...aa" and r["delta"] == "unchanged"
+          for r in l2j["exposure"]["protected_values"]))
+# A5: --help per subcommand + unknown-flag warning (IG D55)
+h1 = kv_watch("--help")
+check("watch --help: usage + exit 0, no scan run",
+      h1.returncode == 0 and "info-guard watch" in h1.stdout
+      and "baseline created" not in h1.stdout
+      and "no new" not in h1.stdout,
+      f"rc={h1.returncode} out={h1.stdout[:200]!r}")
+h2 = kv_watch("--reset", "--help")
+check("watch --help: positional (--reset --help) prints usage, no reset",
+      h2.returncode == 0 and "info-guard watch" in h2.stdout
+      and "baseline reset" not in (h2.stdout + h2.stderr)
+      and "unknown option" not in (h2.stdout + h2.stderr),
+      f"rc={h2.returncode} out={h2.stdout[:200]!r}")
+u1 = kv_watch("--jason")
+check("watch unknown flag: verbatim stderr warning, run proceeds",
+      "Warning: unknown option '--jason'" in u1.stderr
+      and u1.returncode == 0,
+      f"rc={u1.returncode} err={u1.stderr[:120]!r}")
+ph1 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "preflight", "--help"], env=env_kv, capture_output=True, text=True,
+    timeout=120)
+check("preflight --help: usage + exit 0",
+      ph1.returncode == 0 and "info-guard preflight" in ph1.stdout,
+      f"rc={ph1.returncode} out={ph1.stdout[:200]!r}")
+pu1 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "preflight", "--frob"], env=env_kv, capture_output=True, text=True,
+    timeout=300)
+check("preflight unknown flag: verbatim stderr warning + run proceeds",
+      "Warning: unknown option '--frob'" in pu1.stderr
+      and pu1.returncode == 1
+      and "Traceback" not in (pu1.stdout + pu1.stderr),
+      f"rc={pu1.returncode} err={pu1.stderr[:120]!r}")
+# A4: surface audit — raw protected values + value sha256s never escape
+wout_kv = os.path.join(tmp, "kv-watch.json")
+kv_watch("--json-out", wout_kv)
+kv_out_json = k1j.stdout + k3.stdout
+surfaces = {
+    "terminal": k1o + k2o + k4o,
+    "json stdout": kv_out_json,
+    "json-out file": open(wout_kv).read(),
+    "baseline": json.dumps(json.load(open(kv_bl))),
+    "stderr/warnings": u1.stderr + pu1.stderr,
+}
+for sname, blob in surfaces.items():
+    check(f"watch A4: raw protected values absent from {sname}",
+          jwt not in blob and dsc not in blob and sk_p not in blob)
+check("watch A4: value sha256s absent from watch/v1 JSON",
+      hashlib.sha256(jwt.encode()).hexdigest() not in kv_out_json
+      and hashlib.sha256(dsc.encode()).hexdigest() not in kv_out_json
+      and hashlib.sha256(sk_p.encode()).hexdigest() not in kv_out_json)
 
 # ── 16. watch v2: protection-config deltas (counts + fingerprints only) ──
 prot_home = os.path.join(tmp, "prot-home")

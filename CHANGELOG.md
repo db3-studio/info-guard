@@ -6,6 +6,42 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [v0.4.1] - 2026-08-20
+
+### Added
+- **`watch` protected-value matching** (home-consumer feedback
+  `v0.4.0-feedback.txt` → proposal review GO with amendments; independent
+  plan review; IG D51–D56):
+  1. **Registry matching** — scan values whose exact sha256 matches a
+     `custom_literals.json` entry (the app's known-value registry) are
+     classified as **protected values** and reported in a new
+     `exposure.protected_values` array (additive; schema stays
+     `watch/v1`). Live-registry semantics: declaring a literal takes
+     effect on the next run — no `--reset` needed.
+  2. **Exit-code fix (the substantive gap)** — a protected value whose
+     occurrences increase since baseline (`delta: increased`) or appears
+     for the first time (`delta: new`) is now a 🔴 **PROTECTED VALUE
+     RE-DETECTED** event → **exit 1**. Previously such a reappearance
+     landed in `changed_values` with exit 0 — exactly what the house's
+     leak_scan CONFIRMED tier alerts on. `decreased`/`unchanged` stay
+     informational (exit 0); a value moving files with unchanged total
+     count produces no event (value-level monitor, documented).
+  3. **Terminology contract** — "protected value" (user-declared via the
+     registry) · "detection" · "increased"; watch never claims
+     "confirmed leak". Matching is exact-value only and limited to the
+     credential-shaped scan domain (PII-only literals never match, by
+     design).
+- **Per-subcommand `--help`** — every subcommand prints its usage line and
+  exits 0.
+- **Unknown-flag warnings** — unknown `--*` flags on `watch`/`preflight`
+  are still tolerated but never silent: stderr
+  `Warning: unknown option '--foo'` (a typo like `--jason` is now visible
+  in cron logs).
+- Battery: +26 checks (151 → 177): protected-value matrix (new /
+  increased / decreased / unchanged / live-registry), overlay rule,
+  surface audit (raw values + sha256 absent from every surface), CLI
+  contract (incl. positional --help, evidence-review MIN-1).
+
 ## [v0.4.0] - 2026-08-20
 
 ### Added
