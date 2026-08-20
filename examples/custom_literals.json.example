@@ -6,8 +6,8 @@
     "012-34-5678",
     "alex-rivera-example",
     "example-provider-token-abcdefghijklmnop",
-    {"value": "a-string-only-you-know-is-sensitive", "mask": "full"},
-    {"value": "keep-more-visible-value", "mask": {"head": 4, "tail": 2, "floor": 10}},
-    {"value": "short-token-abc", "mask": {"head": 1, "tail": 1, "floor": 6}}
+    {"value": "a-string-only-you-know-is-sensitive", "mask": "full", "id": "3f2a91c4e8b6d705"},
+    {"value": "keep-more-visible-value", "mask": {"head": 4, "tail": 2, "floor": 10}, "id": "7c81e635f9d2a4b0"},
+    {"value": "short-token-abc", "mask": {"head": 1, "tail": 1, "floor": 6}, "id": "a5d0b3e8f1c29467"}
   ]
 }

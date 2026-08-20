@@ -1560,8 +1560,8 @@ check("value_id D7: --file bulk add (comments/blank skipped)",
       f"rc={l2.returncode} out={l2j!r}")
 l3 = vid_run("literals", "list")
 l3_masks = [line.split()[1] for line in l3.stdout.strip().splitlines()]
-check("value_id D7: literals list sorted by value",
-      l3.returncode == 0 and l3_masks == ["sk...90", "sk...90", "sk...65"],
+check("value_id D7: literals list sorted by value (full-mask entries ***)",
+      l3.returncode == 0 and l3_masks == ["***", "***", "sk...65"],
       f"out={l3.stdout!r}")
 l4 = vid_run("literals", "add")
 check("value_id D7: literals add with no values = usage 2",
@@ -1603,6 +1603,50 @@ check("value_id D8: build triggers migration of a v1 registry (MAJ-1)",
       b8b.returncode == 0 and reg8.get("version") == 2
       and len(reg8["literals"][0].get("id", "")) == 16,
       f"rc={b8b.returncode} reg={reg8!r}")
+# D10 evidence-review MIN-1: top-level keys survive writer paths; no-op add
+# never rewrites
+open(vid_cl, "w").write(json.dumps(
+    {"version": 2, "_note": "user comment", "literals": []}))
+vid_run("literals", "add", "sk-topkey-probe-value-1234567890")
+reg10 = json.load(open(vid_cl))
+check("value_id D10: top-level keys preserved through literals add",
+      reg10.get("_note") == "user comment", f"reg={reg10!r}")
+m10 = os.stat(vid_cl).st_mtime_ns
+vid_run("literals", "add", "sk-topkey-probe-value-1234567890")
+check("value_id D10: duplicate-only add never rewrites the file",
+      os.stat(vid_cl).st_mtime_ns == m10)
+vid10_home = os.path.join(tmp, "vid-home10")
+for sub in ("sessions", "logs", "cron/output"):
+    os.makedirs(os.path.join(vid10_home, sub), exist_ok=True)
+os.makedirs(os.path.join(vid10_home, "state", "info-guard"), exist_ok=True)
+with open(os.path.join(vid10_home, "sessions", "s.jsonl"), "w") as f:
+    f.write(f"HASS_TOKEN={vid_a}\n")
+open(os.path.join(vid10_home, "state", "info-guard",
+                  "custom_literals.json"), "w").write(json.dumps(
+    {"version": 2, "_note": "setup key", "literals": []}))
+env_vid10 = dict(os.environ)
+env_vid10["HERMES_HOME"] = vid10_home
+s10 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "setup", "--all"], env=env_vid10, capture_output=True, text=True,
+    timeout=300)
+reg10b = json.load(open(os.path.join(vid10_home, "state", "info-guard",
+                                     "custom_literals.json")))
+check("value_id D10: top-level keys preserved through setup --all",
+      s10.returncode == 0 and reg10b.get("_note") == "setup key",
+      f"rc={s10.returncode} reg={reg10b!r}")
+# D11 evidence-review MIN-2: empty value rejected
+e11 = vid_run("literals", "add", "")
+check("value_id D11: empty value rejected with usage exit 2",
+      e11.returncode == 2 and "empty values rejected" in e11.stderr,
+      f"rc={e11.returncode} err={e11.stderr[:120]!r}")
+# D12 evidence-review NIT-1: full-mask entry lists as ***
+vid_run("literals", "add", "sk-fullmask-probe-1234567890", "--mask", "full")
+l12 = vid_run("literals", "list", "--json")
+l12j = json.loads(l12.stdout)
+check("value_id D12: full-mask entry lists as ***",
+      any(r["value_masked"] == "***" for r in l12j["literals"]),
+      f"out={l12j!r}")
 
 print(f"\n[test] {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

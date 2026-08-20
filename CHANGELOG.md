@@ -6,6 +6,58 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [v0.4.2] - 2026-08-20
+
+### Added
+- **Opaque alert identity (`value_id`)** (house feature request → external
+  report review APPROVE with amendments → independent plan review GO WITH
+  AMENDMENTS; IG D64–D69) — consumers can now join a watch alert to the
+  exact registered value:
+  1. **`value_id` on watch JSON** — `exposure.protected_values[]` rows
+     carry the matched registry entry's opaque 16-hex id, and the
+     overlaid `new_values[]`/`changed_values[]` row carries the **same**
+     id (one event, one id — IG D54). Unregistered rows have no
+     `value_id` key; `resolved_values` rows never carry one. The
+     terminal, baseline, and error paths never show ids (surface rule
+     IG D66). `value_id` is a **registration identity** — same persisted
+     registry entry → same id across runs/rebuilds/reorder; delete +
+     re-add = new id. Not a security token, not a leak verdict (D52
+     unchanged).
+  2. **Registry v2** — `custom_literals.json` gains a `version` marker
+     and an `id` field on each entry, assigned by the app through a
+     single canonical loader (`_load_registry()` — one reader for
+     setup/build/watch/preflight/status/literals). Lazy one-time
+     migration on first load (stderr note, idempotent, add-only:
+     unknown fields, non-string entries, and unknown top-level keys are
+     preserved; duplicate values collapse; duplicate ids repaired with
+     a masked warning; unreadable files are never overwritten;
+     `version > 2` loads read-only). **Downgrade-compatible by verified
+     reader behavior**: the battery runs the actual v0.4.1 binary
+     against a migrated registry.
+  3. **`literals` CLI** — `literals add VALUE... [--mask STYLE]
+     [--file FILE] [--json]` (prints the assigned id per value;
+     duplicates return the existing id; `--mask` applies to every value
+     in the invocation; `--file` = line-delimited bulk) and `literals
+     list [--json]` (id + masked value, sorted by value). Every mutation
+     goes through the canonical loader/writer — no second
+     implementation. D55 rules: `--help` → usage exit 0; unknown flags
+     → verbatim warning + continue; usage errors → exit 2.
+  4. **Battery +31 (177 → 208)** — migration idempotence, entry-id
+     stability across reorder, duplicate repair/preservation, 0600
+     preservation, real-v0.4.1-reader downgrade probe, JSON stdout
+     purity on the post-upgrade first run, `literals` contract, build
+     migration, plus the independent evidence review's fixes pinned:
+     top-level keys survive `literals add`/`setup` writes, no-op adds
+     never rewrite, empty values rejected, full-mask entries list as
+     `***`. CI checkout now fetches full history + tags
+     (`fetch-depth: 0`) so the downgrade probe always runs.
+- **Docs** — `docs/watch-schema.md` gains the `value_id` contract
+  (definition, join path, duplicate semantics, resolved-rows note);
+  `docs/format-spec.md` documents registry v2 + the `literals` command;
+  README "Add your own secrets" leads with `literals add`; the example
+  registry file is v2-shaped; the preflight demo is re-pinned to
+  v0.4.2.
+
 ## [v0.4.1] - 2026-08-20
 
 ### Added
