@@ -1056,6 +1056,47 @@ check("watch --json: protection deltas in object (counts only)",
       and hashlib.sha256(prot_lit_a.encode()).hexdigest() not in j5.stdout,
       "protection raw value or sha leaked into watch JSON")
 
+# ── 19. setup stamping: baseline protection/assessment refreshed ──
+stamp_home = os.path.join(tmp, "stamp-home")
+for sub in ("sessions", "logs", "cron/output"):
+    os.makedirs(os.path.join(stamp_home, sub), exist_ok=True)
+with open(os.path.join(stamp_home, "sessions", "session_20260505_075138_d.jsonl"),
+          "w") as f:
+    f.write(f"HASS_TOKEN={jwt}\n")
+    f.write(f"DISCORD_BOT_TOKEN={dsc}\n")
+os.makedirs(os.path.join(stamp_home, "state", "info-guard"), exist_ok=True)
+env_stamp = dict(os.environ)
+env_stamp["HERMES_HOME"] = stamp_home
+# baseline first (protection snapshot: no literals yet)
+s0 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env_stamp, capture_output=True, text=True, timeout=300)
+check("watch: baseline before setup (exit 0)",
+      s0.returncode == 0, f"rc={s0.returncode}")
+# setup --all registers the fixture values as custom literals -> the
+# stamp must refresh the baseline so the next watch is delta-free
+s1 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "setup", "--all"],
+    env=env_stamp, capture_output=True, text=True, timeout=300)
+s1o = s1.stdout + s1.stderr
+check("setup --all: stamping notice printed",
+      s1.returncode == 0 and "stamped" in s1o,
+      f"rc={s1.returncode} out={s1o[-250:]!r}")
+s2 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env_stamp, capture_output=True, text=True, timeout=300)
+s2o = s2.stdout + s2.stderr
+check("watch after setup: no protection deltas, exit 0",
+      s2.returncode == 0 and "protection configuration changed" not in s2o,
+      f"rc={s2.returncode} out={s2o[-250:]!r}")
+s2bl = json.load(open(os.path.join(stamp_home, "state", "info-guard",
+                                   "watch-baseline.json")))
+check("watch after setup: value history intact (2 values)",
+      len(s2bl["values"]) == 2
+      and s2bl["protection"]["custom_literals"]["count"] >= 2,
+      f"values={len(s2bl['values'])} custom={s2bl['protection']['custom_literals']['count']}")
+
 
 print(f"\n[test] {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

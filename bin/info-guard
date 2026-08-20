@@ -1218,26 +1218,33 @@ def _snapshot_assessment_totals(assessment):
 
 
 def _write_watch_baseline(path, current, prev, protection=None,
-                          assessment=None):
+                          assessment=None, keep_values=False):
     """Write the watch baseline v2: {schema, generated, tool_version,
     gitleaks_version, values:[{value_sha256, type, family, count,
     first_seen}], protection, assessment}. Union semantics: rows known
     in prev keep their first_seen; new rows get today. Values absent
     from the current scan are DROPPED (resolved — the scan is the
-    truth). 0600 via _atomic_write_json."""
+    truth). With keep_values=True (setup stamping, IG D48): the value
+    history is preserved VERBATIM from prev — only the protection +
+    assessment snapshots are refreshed. 0600 via _atomic_write_json."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
         "+00:00", "Z")
     prev_by_sha = {}
     if prev:
         prev_by_sha = {v["value_sha256"]: v for v in prev.get("values", [])}
-    values = []
-    for value, e in current.items():
-        old = prev_by_sha.get(e["value_sha256"])
-        row = {"value_sha256": e["value_sha256"], "type": e["type"],
-               "family": e["family"], "count": e["count"]}
-        row["first_seen"] = old.get("first_seen", now) if old else now
-        values.append(row)
-    values.sort(key=lambda v: (v["first_seen"], v["value_sha256"]))
+    if keep_values:
+        values = sorted(prev_by_sha.values(),
+                        key=lambda v: (v.get("first_seen", ""),
+                                       v.get("value_sha256", "")))
+    else:
+        values = []
+        for value, e in current.items():
+            old = prev_by_sha.get(e["value_sha256"])
+            row = {"value_sha256": e["value_sha256"], "type": e["type"],
+                   "family": e["family"], "count": e["count"]}
+            row["first_seen"] = old.get("first_seen", now) if old else now
+            values.append(row)
+        values.sort(key=lambda v: (v["first_seen"], v["value_sha256"]))
     doc = {"schema": "info-guard/watch-baseline/v2",
            "generated": now,
            "tool_version": _PACKAGE_VERSION,
@@ -2167,6 +2174,33 @@ def cmd_setup(args):
         print(f"[info-guard] note: {skipped_short} short value(s) skipped — their "
               f"keys are covered if present in an env source")
     cmd_status()
+    # setup stamping (IG D48): setup just changed the protection config —
+    # refresh an existing baseline's protection + assessment snapshot in
+    # place so the next `watch` doesn't scream "N protection changes".
+    # Values are untouched (keep_values). No baseline / v1 baseline: the
+    # next watch baselines or migrates anyway (delta-free).
+    baseline_path = STATE_DIR / "watch-baseline.json"
+    if baseline_path.exists():
+        try:
+            prev_bl = json.loads(baseline_path.read_text())
+        except (OSError, ValueError):
+            prev_bl = None
+        if (prev_bl is not None
+                and prev_bl.get("schema") == "info-guard/watch-baseline/v2"):
+            total_files = sum(1 for d in dirs for _ in d.rglob("*")
+                              if _.is_file())
+            now = datetime.now(timezone.utc).isoformat(
+                timespec="seconds").replace("+00:00", "Z")
+            bl_assessment = _build_assessment(
+                all_hits, [str(d.relative_to(_HERMES_HOME)) for d in dirs],
+                total_files, gitleaks_ok, now)
+            _write_watch_baseline(
+                baseline_path, {}, prev_bl,
+                _snapshot_protection(),
+                _snapshot_assessment_totals(bl_assessment),
+                keep_values=True)
+            print("[info-guard] setup: watch baseline protection/assessment "
+                  "stamped (values preserved)")
     print("[info-guard] done. Verify with ./test.sh — masking is live immediately.")
     return 0
 
