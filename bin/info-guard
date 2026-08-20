@@ -772,25 +772,55 @@ def cmd_watch(args):
               f"value{'s' if len(current) != 1 else ''} "
               "(re-run to detect new ones)")
         return 0
-    known = {v["value_sha256"] for v in prev.get("values", [])}
-    new = {k: e for k, e in current.items() if e["value_sha256"] not in known}
     if (prev.get("tool_version") != _PACKAGE_VERSION
             or prev.get("gitleaks_version") != _GITLEAKS_VERSION):
         print("[info-guard] watch: tool/gitleaks version changed — known "
               "values retained (union), updated rules may surface fresh "
               "findings")
-    if new:
+    d = _watch_deltas(current, prev, assessment)
+    any_delta = bool(d["new_values"] or d["resolved_values"]
+                     or d["changed_values"] or d["changed_files"])
+    if d["new_values"]:
         print("[info-guard] watch: NEW credential-shaped values found "
               "(masked 2+2 · type · family · count)")
-        for v, e in new.items():
-            fam = _family_label(e["family"]) if e["family"] else "(no key context)"
-            print(f"  {_mask_value(v):<18} {e['type'][:22]:<24} "
-                  f"{_n(e['count']):>6}  {fam}")
+        for e in d["new_values"]:
+            print(f"  {e['value_masked']:<18} {e['type'][:22]:<24} "
+                  f"{_n(e['count']):>6}  {e['family']}")
+    if d["resolved_values"]:
+        print("[info-guard] watch: values no longer detected "
+              "(informational):")
+        for e in d["resolved_values"]:
+            print(f"  {e['type'][:22]:<24} {_n(e['count']):>6}  {e['family']}  "
+                  f"(first seen {str(e['first_seen'])[:10]})")
+        print("  No longer detected in the current scan scope. This does not "
+              "confirm that the credential is dead or revoked.")
+    if d["changed_values"]:
+        print("[info-guard] watch: occurrence counts changed "
+              "(informational):")
+        for e in d["changed_values"]:
+            delta = e["count"] - e["count_before"]
+            print(f"  {e['value_masked']:<18} {e['type'][:22]:<24} "
+                  f"{_n(e['count_before']):>6} → {_n(e['count']):>6} "
+                  f"({delta:+d})  {e['family']}")
+    if d["new_families"] or d["resolved_families"]:
+        print("[info-guard] watch: families — new: "
+              + (", ".join(d["new_families"]) or "—")
+              + "; resolved: " + (", ".join(d["resolved_families"]) or "—"))
+    if d["changed_files"]:
+        print("[info-guard] watch: files with changed counts "
+              "(informational):")
+        for f in d["changed_files"]:
+            print(f"  {f['file']}: {_n(f['before'])} → {_n(f['after'])}")
+    if any_delta:
+        # refresh-on-delta policy (review MAJ A1): rewrite the baseline
+        # with current state — values = current scan (absent ones
+        # dropped), protection/assessment snapshots refreshed. Every
+        # delta alerts exactly once; clean runs leave it untouched.
         _write_watch_baseline(baseline_path, current, prev,
                               protection, assessment_snap)
-        print(f"[info-guard] watch: baseline updated — {_n(len(current))} "
+        print(f"[info-guard] watch: baseline refreshed — {_n(len(current))} "
               "values now known")
-        return 1
+        return 1 if d["new_values"] else 0
     print(f"[info-guard] watch: no new credential-shaped values since "
           f"{_fmt_generated(prev.get('generated', ''))}")
     return 0
@@ -813,6 +843,60 @@ def _watch_values(all_hits):
             f = _family_of(rule)
             e["family"] = f if f != "bare-token" else None
     return out
+
+
+def _watch_deltas(current, prev, assessment):
+    """Exposure deltas vs the v2 baseline (proposal §2.2). Row shape:
+    new/changed carry `value_masked` (2+2 — the value is IN the scan);
+    resolved rows carry type/family/count/first_seen only — the raw
+    value is gone from the scan, and sha256 is forbidden on this
+    surface (IG D49 / review MAJ A3). Families are labeled; files are
+    per-file count diffs (baseline assessment.files vs current)."""
+    baseline_rows = {v["value_sha256"]: v for v in prev.get("values", [])}
+    known = set(baseline_rows)
+    d = {"new_values": [], "resolved_values": [], "changed_values": [],
+         "new_families": [], "resolved_families": [], "changed_files": []}
+    fams_new, fams_res = set(), set()
+    for value, e in current.items():
+        sha = e["value_sha256"]
+        fam = _family_label(e["family"]) if e["family"] else "(no key context)"
+        if sha not in known:
+            d["new_values"].append({"value_masked": _mask_value(value),
+                                    "type": e["type"], "family": fam,
+                                    "count": e["count"]})
+            fams_new.add(fam)
+        else:
+            old = baseline_rows[sha]
+            if old.get("count") != e["count"]:
+                d["changed_values"].append(
+                    {"value_masked": _mask_value(value), "type": e["type"],
+                     "family": fam, "count": e["count"],
+                     "count_before": old.get("count", 0)})
+    cur_shas = {e["value_sha256"] for e in current.values()}
+    for sha, row in baseline_rows.items():
+        if sha not in cur_shas:
+            fam = _family_label(row.get("family")) if row.get("family") \
+                else "(no key context)"
+            d["resolved_values"].append(
+                {"type": row.get("type"), "family": fam,
+                 "count": row.get("count", 0),
+                 "first_seen": row.get("first_seen")})
+            fams_res.add(fam)
+    d["new_families"] = sorted(fams_new)
+    d["resolved_families"] = sorted(fams_res)
+    # per-file credential_shaped count diff (files-with-findings map,
+    # absent = 0; review MIN A2)
+    base_files = (prev.get("assessment") or {}).get("files") or {}
+    cur_files = {f["file"]: f["credential_shaped"]
+                 for f in assessment.get("affected_files", []) or []
+                 if f.get("credential_shaped")}
+    for rel in sorted(set(base_files) | set(cur_files)):
+        before = base_files.get(rel, 0)
+        after = cur_files.get(rel, 0)
+        if before != after:
+            d["changed_files"].append({"file": rel, "before": before,
+                                       "after": after})
+    return d
 
 
 def _sha(s):

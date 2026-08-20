@@ -720,6 +720,58 @@ check("watch: first v2 run after migration is delta-free",
       m3.returncode == 0 and "no new" in (m3.stdout + m3.stderr),
       f"rc={m3.returncode}")
 
+# ── 15. watch v2: exposure deltas — resolved / changed / files ──
+# resolved: fresh home -> baseline -> delete the file -> both values
+# resolve (informational, exit 0, per-value lines + contract wording)
+res_home = os.path.join(tmp, "res-home")
+for sub in ("sessions", "logs", "cron/output"):
+    os.makedirs(os.path.join(res_home, sub), exist_ok=True)
+res_file = os.path.join(res_home, "sessions", "session_20260505_075138_d.jsonl")
+with open(res_file, "w") as f:
+    f.write(f"HASS_TOKEN={jwt}\n")
+    f.write(f"DISCORD_BOT_TOKEN={dsc}\n")
+env_res = dict(os.environ)
+env_res["HERMES_HOME"] = res_home
+subprocess.run([sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+                "watch"], env=env_res, capture_output=True, text=True,
+               timeout=300)  # baseline
+os.unlink(res_file)
+r1 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env_res, capture_output=True, text=True, timeout=300)
+r1o = r1.stdout + r1.stderr
+check("watch: resolved values exit 0 (informational)",
+      r1.returncode == 0, f"rc={r1.returncode} out={r1o[-250:]!r}")
+check("watch: resolved per-value lines + contract wording",
+      "no longer detected in the current scan scope" in r1o.lower()
+      and "does not confirm that the credential is dead or revoked" in r1o.lower()
+      and "JWT" in r1o and "DISCORD_BOT_TOKEN" in r1o,
+      f"out={r1o[-250:]!r}")
+check("watch: resolved families rollup",
+      "HASS_TOKEN" in r1o and "DISCORD_BOT_TOKEN" in r1o,
+      f"out={r1o[-250:]!r}")
+check("watch: resolved values dropped from refreshed baseline",
+      len(json.load(open(os.path.join(res_home, "state", "info-guard",
+                                      "watch-baseline.json")))["values"]) == 0,
+      "baseline should drop resolved values (refresh-on-delta)")
+# changed: append one more occurrence of a known value on pf_home
+# (baseline holds 3 values: jwt, dsc, sk_new, all count 1)
+with open(os.path.join(pf_home, "sessions", "session_20260505_075138_d.jsonl"),
+          "a") as f:
+    f.write(f"HASS_TOKEN={jwt}\n")
+c1 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "watch"],
+    env=env6, capture_output=True, text=True, timeout=300)
+c1o = c1.stdout + c1.stderr
+check("watch: changed count exits 0 (informational)",
+      c1.returncode == 0, f"rc={c1.returncode} out={c1o[-250:]!r}")
+check("watch: changed value shown with delta",
+      "+2" in c1o and "ey...aa" in c1o,
+      f"out={c1o[-250:]!r}")
+check("watch: changed-files line present",
+      "sessions/session_20260505_075138_d.jsonl" in c1o,
+      f"out={c1o[-250:]!r}")
+
 
 print(f"\n[test] {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
