@@ -896,7 +896,9 @@ def cmd_watch(args):
             pd0 = _protection_deltas(protection, protection)
             et0 = _engine_transition(protection, protection)
             emit_json(prev, empty_d, pd0, et0)
-        return 0
+        # Migration run is still a scan: honor the operational-failure
+        # exit (D94 doctrine, Wave A A20).
+        return 2 if not gitleaks_ok else 0
     if prev is None:
         _write_watch_baseline(baseline_path, current, None,
                               protection, assessment_snap)
@@ -909,7 +911,10 @@ def cmd_watch(args):
             pd0 = _protection_deltas(protection, protection)
             et0 = _engine_transition(protection, protection)
             emit_json(None, empty_d, pd0, et0)
-        return 0
+        # Baseline-creation run is still a scan: a degraded engine must
+        # not masquerade as clean (D94 doctrine, Wave A A20) — honor the
+        # operational-failure exit even when there is nothing to delta.
+        return 2 if not gitleaks_ok else 0
     if (prev.get("tool_version") != _PACKAGE_VERSION
             or prev.get("gitleaks_version") != _GITLEAKS_VERSION):
         say("[info-guard] watch: tool/gitleaks version changed — known "
@@ -1099,7 +1104,10 @@ def cmd_watch(args):
     if json_mode:
         pm = _protected_value_matches(current, prev, known_fps, sha_id)
         emit_json(prev, d, pd, et, pm)
-    return 0
+    # Clean run is still a scan: a degraded engine must not masquerade
+    # as clean (D94 doctrine, Wave A A20) — the reduction's exit-2 path
+    # applies even when there are no deltas.
+    return exit_code
 
 
 def _watch_values(all_hits, env_meta=None):

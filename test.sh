@@ -513,6 +513,42 @@ check("preflight --json: degraded assessment still emitted with engine state",
       "\"gitleaks_ok\": false" in pfdj.stdout,
       "JSON should carry the degraded engine state (scan.gitleaks_ok)")
 
+# 12b2. watch DEGRADED engine: gitleaks hidden -> exit 2 on EVERY path —
+# baseline-creation, no-delta clean, and delta runs alike (v0.6.0, A20:
+# a degraded scan never masquerades as clean; D94 doctrine applied to
+# watch's baseline/migration/clean return sites).
+w_home = os.path.join(tmp, "watch-degraded-home")
+shutil.rmtree(w_home, ignore_errors=True)
+os.makedirs(os.path.join(w_home, "sessions"))
+os.makedirs(os.path.join(w_home, "state", "info-guard"))
+env_wd = dict(env8)  # PATH scrubbed + HOME scrubbed (no gitleaks anywhere)
+env_wd["HERMES_HOME"] = w_home
+igbin = os.path.join(os.getcwd(), "bin", "info-guard")
+with open(os.path.join(w_home, "sessions", "s.jsonl"), "w") as f:
+    f.write("sk-abcdef1234567890abcdef1234567890\n")
+wd1 = subprocess.run([sys.executable, igbin, "watch", "--json"],
+                     env=env_wd, capture_output=True, text=True, timeout=300)
+check("watch: degraded engine (baseline-creation path) exits 2, never 0",
+      wd1.returncode == 2,
+      f"rc={wd1.returncode} out={wd1.stdout[-200:]!r} err={wd1.stderr[-200:]!r}")
+wd2 = subprocess.run([sys.executable, igbin, "watch", "--json"],
+                     env=env_wd, capture_output=True, text=True, timeout=300)
+check("watch: degraded engine (no-delta clean path) exits 2, never 0",
+      wd2.returncode == 2,
+      f"rc={wd2.returncode} out={wd2.stdout[-200:]!r} err={wd2.stderr[-200:]!r}")
+wd3 = subprocess.run([sys.executable, igbin, "watch"],
+                     env=env_wd, capture_output=True, text=True, timeout=300)
+check("watch: degraded engine (text mode) exits 2, never 0",
+      wd3.returncode == 2,
+      f"rc={wd3.returncode} out={wd3.stdout[-200:]!r} err={wd3.stderr[-200:]!r}")
+# control: with the engine available the same home is clean (exit 0)
+env_wok = dict(os.environ); env_wok["HERMES_HOME"] = w_home
+wdc = subprocess.run([sys.executable, igbin, "watch", "--json"],
+                     env=env_wok, capture_output=True, text=True, timeout=300)
+check("watch: engine available, same home -> exit 0 (control)",
+      wdc.returncode == 0,
+      f"rc={wdc.returncode} out={wdc.stdout[-200:]!r}")
+
 # 12c. --version flag
 ver = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
