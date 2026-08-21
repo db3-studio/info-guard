@@ -72,6 +72,10 @@ it is reported as a **KNOWN** (identity-verified) row, marked
 `KNOWN (your .env values) — N in M files`. This makes the preflight
 claim literal: it really does check whether `.env` values are showing
 up in sessions, logs, and cron output — no registration, no config.
+**v0.6.0 (Wave A): the same env pass now powers `watch`** — `.env`
+values matched in a watch scan become env rows (`source: "env"`,
+`source_key`) under the T1–T8 transition table — **and `setup`**, which
+can register discovered `.env` values in one group step (see below).
 **gitleaks is optional** — the core
 product never needs it — but it powers this scan's provider-format tier. If
 it's missing, preflight explains the benefit and offers to install it
@@ -109,15 +113,16 @@ kind (only 2+2 masked forms).
 
 The machine surface (v0.3.0): `preflight --json [--json-out FILE]` prints
 or writes the assessment object — the text report is its render, never a
-second implementation; `preflight watch` re-runs the scan and reports NEW
-credential-shaped values against a sha256-only baseline
-(`<state>/info-guard/watch-baseline.json`, 0600) — cron-friendly, exit 1
-on new values, `--reset` to clear, union-kept across tool/gitleaks
-upgrades. Exit codes (v0.5.0, single-predicate extension): preflight
-exits 1 when KNOWN values or credential-shaped values are found (`known
-> 0 OR credential_shaped > 0`); 0 when clean; 2 on usage errors. The
-severity ladder (0/1/2/3) is deferred to a later wave — see format-spec.
-Contract: `docs/format-spec.md`.
+second implementation; `watch` re-runs the scan and reports NEW values
+against a sha256-only baseline (`<state>/info-guard/watch-baseline.json`,
+0600) — cron-friendly, exit 1 on new values or a delta alarm, `--reset`
+to clear, union-kept across tool/gitleaks upgrades. Every public JSON
+surface carries a `schema` + `tool` envelope (`assessment/v1`, `watch/v1`,
+`literals/v1`). Exit ladder (v0.6.0): 0 clean / 1 findings-or-delta alarm /
+2 usage **or operational** error / 3 KNOWN present (preflight only —
+dominates) / 4 reserved. KNOWN `.env` values now exit 3 on preflight
+instead of 1; the first watch run after upgrading to v0.6.0 requires a
+re-baseline (see CHANGELOG). Contract: `docs/format-spec.md`.
 
 **Privacy & credential handling:** preflight is safe-by-construction —
 values are masked before they leave the machine, never echoed, and the scan
@@ -144,7 +149,12 @@ The wizard walks every preflight candidate one at a time — **values shown
 masked only, never echoed** — and asks which are yours. Confirmed values are
 registered as exact-value literals (token-shaped → full mask, key-shaped →
 default partial), your `.env` sources are added, and the pattern file is
-built and verified in one pass. `info-guard setup --all` accepts every
+built and verified in one pass. **Since v0.6.0, identity-verified `.env`
+candidates are offered as one group, default yes:** `N known .env value(s)
+found in the scanned files — register as protected literal(s)? [Y/n]`,
+each listed masked with its `.env` key and proposed mask style; accepting
+writes a plaintext copy into `custom_literals.json` (0600) — the prompt
+says so. `info-guard setup --all` accepts every
 candidate non-interactively (agent-assisted installs).
 
 **You (terminal):**

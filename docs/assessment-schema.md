@@ -11,6 +11,13 @@ credential-shaped value set over time against a separate baseline file
 Raw values NEVER enter this object — every value field is masked 2+2 via
 the scanner's mask, or `***`.
 
+**v0.6.0 (Wave A):** schema id unchanged (`info-guard/assessment/v1`);
+every addition is additive per the taxonomy — `value_id` annotation on
+registered KNOWN rows (IG D73), KNOWN-row rules extended for env rows.
+The complete envelope/versioning doctrine, exit table (0/1/2/3/4, 4
+reserved), and P3 seams live in `docs/format-spec.md` ("Contract
+foundation"); the two-part consumer obligations are stated below.
+
 ## Architecture
 
 ```
@@ -172,9 +179,13 @@ render time, and renderers must surface them ("top 15 of N").
 activeness); v0.5.0 activates it in place: `true` when ≥1 KNOWN `.env`
 row exists, `null` otherwise. `null` deliberately covers BOTH "KNOWN
 pass disabled" (no usable `.env` sources) and "pass active, no match" —
-the two are not distinguished in v0.5.0 (documented; the text report's
-disabled line is the human-facing distinction). No `false` state exists
-in v0.5.0. A future validation step may fill
+the two are not distinguished (documented; the text report's
+disabled line is the human-facing distinction). **Wave A semantics
+(v0.6.0):** `null` = pass disabled or no identity-verified matches;
+`true` = ≥1 identity-verified KNOWN value; **`false` is NOT emitted by
+Wave A — no output path produces it, and an unexpected `false` MUST be
+handled as `null` under preserve/report behavior**. It is NOT live
+credential validation. A future validation step may fill
 `{"confirmed_active": n, "confirmed_inactive": n,
 "unverified": n}` without a schema change.
 
@@ -207,16 +218,22 @@ key family or a file/area (e.g. `logs/agent.log`).
 attribute the value to a family; `value_masked` is the scanner's actual 2+2
 mask, never re-formatted.
 
-**KNOWN rows (v0.5.0, IG D57–D62/D70–D75):** a KNOWN row is
-identity-verified — the value matches a current eligible `.env` source
-value. Row rules, enforced across every row-bearing path (`top_values[]`,
-`families.items[]`, `locations[]`, `affected_files[]`):
+**KNOWN rows (v0.5.0, IG D57–D62/D70–D75; env-row rules v0.6.0, IG D71/D73):**
+a KNOWN row is identity-verified — the value matches a current eligible
+`.env` source value. Row rules, enforced across every row-bearing path
+(`top_values[]`, `families.items[]`, `locations[]`, `affected_files[]`):
 - KNOWN rows REQUIRE `known: true` and a non-empty `source_key` (the
   alphabetically-first env key across sources) and carry
   `type: "KNOWN"` in `top_values`; `count` = occurrences (per-occurrence,
   incl. same-line repeats).
+- `known == (type == "KNOWN")` — `type` is the authoritative finding-class
+  field; `known` is a derived convenience flag, false for every future tier
+  (e.g. a P3 HONEYTOKEN).
 - non-KNOWN rows MUST NOT carry `known`/`source_key` — absent, never null.
-- no `value_id` on any row in v0.5.0 (deferred, IG D73).
+- `value_id` (v0.6.0, IG D73): KNOWN rows carry `value_id` **iff** the
+  value is registry-registered (lookup at row-build time) — absent, never
+  null. The annotation never affects matching or counts (see the consumer
+  obligations below).
 - `families.items[].known`, `locations[].known`, `affected_files[].known`
   are additive per-path KNOWN-row counts (0 or more; `known` is a
   distinct-VALUE count at the totals level, a ROW count at path level).
@@ -246,6 +263,60 @@ file.
   never re-alert) with a notice.
 - `scan.generated` is ISO-8601 UTC; the text renderer reformats for display
   (renderer owns language).
+
+## Consumer obligations (Wave A, v0.6.0)
+
+Schema `info-guard/assessment/v1` is unchanged in v0.6.0 — every Wave A
+addition is additive. The complete envelope/versioning doctrine, nullable
+field list, exit table, and P3 seams live in `docs/format-spec.md`
+("Contract foundation").
+
+**Two-part forward-compatibility contract (IG D81/D85):**
+
+1. **Syntactic tolerance** — unknown fields, row types, and enum values
+   MUST NOT cause parsing failure or be treated as malformed input.
+2. **Semantic handling** — each enum field and row-type family declares its
+   unknown-value behavior below. Security-significant unknown values MUST be
+   preserved and reported while remaining masked — at minimum retain the
+   complete masked row, the unknown discriminator value, and route the row
+   through the normal findings/reporting path.
+
+**Schema-string parsing:** parse the surface and major from
+`info-guard/<surface>/v<major>[.<minor>]`; never compare the full string
+literally. Unknown major MAY be rejected; unknown minor MUST be accepted.
+
+Unknown-value behavior at Wave A:
+
+| Field / family | Required behavior |
+|---|---|
+| `type` (finding-class tier: KNOWN, JWT, …) | tolerate + **preserve/report** |
+| `delta` (watch transition) | tolerate + **preserve/report** |
+| `source` (`env` \| `literal`, future values) | tolerate + ignore |
+| registry mask-style names | tolerate + ignore |
+| unknown finding-row types (`top_values[]`, `families.items[]`, `locations[]`, `affected_files[]`) | tolerate + **preserve/report** |
+| unknown metadata-row types (`patterns[]`, `redaction[]`, …) | tolerate + ignore |
+
+**Row-bearing paths:** the KNOWN-row rules are enforced across every
+row-bearing path — `top_values[]`, `families.items[]`, `locations[]`,
+`affected_files[]`. Every path rejects: KNOWN without a non-empty
+`source_key`; non-KNOWN rows carrying `known`/`source_key`; optional
+annotation fields set to `null`; any field outside the nullable list
+(`family`, `resolved_values[].value_masked`, `status.confirmed_active`)
+emitted as `null`.
+
+**`value_id` annotation (v0.6.0, IG D73):** read-only, annotation-only
+lookup at row-build time — it NEVER affects matching, counts, or
+classification. `value_id` appears on a KNOWN row iff the value is
+registry-registered; absent, never null. Registry membership itself IS a
+classification input by design (`literal` source, protected overlay,
+collision precedence) — the annotation is the only thing that must not
+change behavior. Example KNOWN row (registered value — row excerpt):
+
+```json
+{"value_masked": "se...7x", "type": "KNOWN", "family": "UNIFI_SSH",
+ "count": 1, "families": ["UNIFI_SSH"], "known": true,
+ "source_key": "UNIFI_SSH", "value_id": "a1b2c3d4e5f60718"}
+```
 
 ## Text ↔ JSON vocabulary
 

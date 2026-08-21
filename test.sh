@@ -1699,14 +1699,15 @@ def mkhome(*subs):
 envval = "ig" + "env" + "val" + "9" + "q2x7"          # 14 chars
 envval2 = "ig" + "env" + "val" + "B" + "8w3m"         # different value
 
-# ── A1: bare known value → KNOWN row masked, exit 1 ──
+# ── A1: bare known value → KNOWN row masked, exit 3 (ladder, IG D83) ──
 h1 = mkhome("sessions", "logs", "cron/output")
 with open(os.path.join(h1, ".env"), "w") as f:
     f.write(f"UNIFI_SSH={envval}\n")
 with open(os.path.join(h1, "sessions", "s1.jsonl"), "w") as f:
     f.write(f"the token is {envval} here\n")
 r1 = ig_run(h1, ["preflight"])
-check("A1: bare known value → exit 1", r1.returncode == 1,
+check("A1: bare known value → exit 3 (KNOWN dominates, D83)",
+      r1.returncode == 3,
       f"rc={r1.returncode} out={r1.stdout[-200:]!r}")
 check("A1: KNOWN summary card present",
       f"KNOWN (your .env values) — 1 in 1 files" in r1.stdout)
@@ -1799,8 +1800,8 @@ with open(os.path.join(h6, ".env"), "w") as f:
 with open(os.path.join(h6, "sessions", "s6.jsonl"), "w") as f:
     f.write(f"{envval}\n")
 r6 = ig_run(h6, ["preflight"])
-check("A6: malformed .env lines skipped silently, raw absent",
-      envval not in r6.stderr and r6.returncode == 1
+check("A6: malformed .env lines skipped silently, raw absent, exit 3 (D83)",
+      envval not in r6.stderr and r6.returncode == 3
       and envval2 not in r6.stderr)
 # (c) unreadable source → masked diagnostic, pass continues
 h6b = mkhome("sessions")
@@ -2246,7 +2247,7 @@ check("A15: locations[].known is int", chk15c)
 chk15d = all(isinstance(f.get("known", 0), int) for f in o11["affected_files"])
 check("A15: affected_files[].known is int", chk15d)
 
-# ── A16: exit matrix (single predicate, D75) ──
+# ── A16: exit matrix (ladder 0/1/2/3, IG D83) ──
 h16c = mkhome("sessions")
 r16c = ig_run(h16c, ["preflight"])
 check("A16: clean → 0", r16c.returncode == 0, f"rc={r16c.returncode}")
@@ -2255,14 +2256,16 @@ with open(os.path.join(h16s, "sessions", "s16s.jsonl"), "w") as f:
     f.write("HASS_TOKEN=" + "eyJ" + "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + ".aaaaaaaaaaaaaaa\n")
 r16s = ig_run(h16s, ["preflight"])
 check("A16: shape-only → 1", r16s.returncode == 1, f"rc={r16s.returncode}")
-check("A16: known-only → 1", r1.returncode == 1, f"rc={r1.returncode}")
+check("A16: known-only → 3 (KNOWN dominates, D83)", r1.returncode == 3,
+      f"rc={r1.returncode}")
 h16b = mkhome("sessions")
 with open(os.path.join(h16b, ".env"), "w") as f:
     f.write(f"TOK={envval}\n")
 with open(os.path.join(h16b, "sessions", "s16b.jsonl"), "w") as f:
     f.write(f"{envval}\nHASS_TOKEN=" + "eyJ" + "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + ".bbbbbbbbbbbbbbb\n")
 r16b = ig_run(h16b, ["preflight"])
-check("A16: both → 1", r16b.returncode == 1, f"rc={r16b.returncode}")
+check("A16: known+shape → 3 (KNOWN dominates, D83)", r16b.returncode == 3,
+      f"rc={r16b.returncode}")
 r16u = ig_run(h16b, ["preflight", "--json-out"])
 check("A16: usage → 2", r16u.returncode == 2, f"rc={r16u.returncode}")
 
@@ -2381,8 +2384,8 @@ check("A17: duplicate key within file → last-parse-wins (only value2)",
       and [v for v in rl17["top_values"] if v.get("known")][0]["count"] == 1,
       f"known={rl17['totals']['known']}")
 
-# ── A18: exit identical across output modes ──
-for home, expect in ((h1, 1), (h7, 0)):
+# ── A18: exit identical across output modes (h1 = known → 3, D83) ──
+for home, expect in ((h1, 3), (h7, 0)):
     e_txt = ig_run(home, ["preflight"]).returncode
     e_json = ig_run(home, ["preflight", "--json"]).returncode
     oj = os.path.join(tmp, "out18.json")

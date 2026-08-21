@@ -766,15 +766,15 @@ def cmd_preflight(args):
     try:
         assessment = _build_assessment(
             all_hits, [str(d.relative_to(_HERMES_HOME)) for d in dirs], total,
-            gitleaks_ok, now, env_meta)
+            gitleaks_ok, now, env_meta, _value_id_map())
         if as_json:
             if json_out:
                 _atomic_write_json(Path(json_out), assessment)
                 print(f"[info-guard] preflight: assessment written to {json_out}")
             else:
                 print(json.dumps(assessment, indent=2))
-            return 2 if not gitleaks_ok else (1 if (assessment["totals"].get("known", 0)
-                         or assessment["totals"]["credential_shaped"]) else 0)
+            return 2 if not gitleaks_ok else (3 if assessment["totals"].get("known", 0)
+                         else (1 if assessment["totals"]["credential_shaped"] else 0))
         print()
         rc = _render_assessment(assessment, all_hits, full, env_meta)
         return 2 if not gitleaks_ok else rc
@@ -825,12 +825,12 @@ def cmd_watch(args):
             _ensure_gitleaks()
     else:
         _ensure_gitleaks()
-    all_hits, gitleaks_ok, _env_meta = _collect_hits(dirs)
+    all_hits, gitleaks_ok, env_meta = _collect_hits(dirs, env_pass=True)
     if not gitleaks_ok:
         say("[info-guard] watch: ⚠ gitleaks not found on PATH — key-shape "
             "pass only")
     all_hits.sort(key=lambda h: (h[2], h[3]))
-    current = _watch_values(all_hits)
+    current = _watch_values(all_hits, env_meta)
     # One assessment per run (A2): totals + per-file map for the
     # baseline snapshot, later rendered by watch/v1 JSON.
     total_files = sum(1 for d in dirs for _ in d.rglob("*") if _.is_file())
@@ -840,7 +840,7 @@ def cmd_watch(args):
         all_hits,
         [str(d.relative_to(_HERMES_HOME)) if _HERMES_HOME in d.parents
          else str(d) for d in dirs],
-        total_files, gitleaks_ok, now)
+        total_files, gitleaks_ok, now, env_meta, _value_id_map())
     protection = _snapshot_protection()
     # Live protected-value registry (v0.4.1, IG D52/D53): custom_literals
     # fingerprints from the CURRENT snapshot — declaring a literal takes
@@ -848,16 +848,11 @@ def cmd_watch(args):
     known_fps = {fp.removeprefix("sha256:") for fp in
                  (protection.get("custom_literals") or {})
                  .get("fingerprints", [])}
-    # value_id map (v0.4.2, IG D64/D65): sha256(value) -> registry id,
-    # built from the loader's DEDUPED entries (first-wins, NIT-3) —
-    # in-memory only; sha stays an internal comparison primitive (D56).
-    sha_id = {}
-    entries, _ok, _doc = _load_registry()
-    for item in entries:
-        if isinstance(item, dict):
-            v, i = item.get("value"), item.get("id")
-            if isinstance(v, str) and v and isinstance(i, str) and i:
-                sha_id[_sha(v)] = i
+    # value_id map (v0.4.2, IG D64/D65; Wave A Phase 2 — shared helper):
+    # sha256(value) -> registry id, built from the loader's DEDUPED
+    # entries (first-wins, NIT-3) — in-memory only; sha stays an
+    # internal comparison primitive (D56). Read-only, annotation-only.
+    sha_id = _value_id_map()
     assessment_snap = _snapshot_assessment_totals(assessment)
     baseline_path = STATE_DIR / "watch-baseline.json"
     prev = None
@@ -941,7 +936,12 @@ def cmd_watch(args):
                      or d["changed_values"] or d["changed_files"]
                      or pd["status"] == "changed"
                      or et["state_before"] != et["state_after"])
-    exit_code = 1 if (d["new_values"] or et["degraded"] or pm_alarm) else 0
+    # Watch exit reduction (Wave A §2.5, A20): operational failure → 2
+    # (engine unavailable / scan failure — never 0, never 1; v0.5.1 D94
+    # doctrine extended to watch); else new_values / engine degradation /
+    # new-or-increased protected alarm → 1; else 0.
+    exit_code = (2 if not gitleaks_ok else
+                 (1 if (d["new_values"] or et["degraded"] or pm_alarm) else 0))
     if any_delta:
         # Changed run: header + per-track summaries + blocks (proposal
         # §2.3 guidance UX). All values masked 2+2 or counts only.
@@ -1093,22 +1093,55 @@ def cmd_watch(args):
     return 0
 
 
-def _watch_values(all_hits):
+def _watch_values(all_hits, env_meta=None):
     """Distinct credential-shaped values -> metadata for the watch
     baseline. sha256 of the raw value only — raw values never touch
-    the baseline file."""
+    the baseline file.
+
+    Wave A (Phase 3/4): env-matched values join the population
+    regardless of shape class (CRIT-1 fold), and the KNOWN precedence
+    partition is applied HERE too (same rule as _build_assessment):
+    a shape/token/gitleaks hit whose (rel, line, value) is an env-known
+    signature is dropped — the env match owns the row, so counts never
+    double. env_meta carries known_sigs when the env pass ran."""
+    known_sigs = (env_meta or {}).get("known_sigs") or {}
     out = {}
     for h in all_hits:
         cls, rule, rel, line, value, masked, ctx = h
+        if cls != "KNOWN" and (rel, line, value) in known_sigs:
+            # KNOWN precedence: the env pass owns this signature; the
+            # shape hit is dropped (never double-counted). The KNOWN
+            # hit itself is processed below.
+            continue
         vc = _value_class(value)
-        if cls != "HIGH-CONFIDENCE" and vc != "token-format":
+        # Inclusion (Wave A Phase 4, CRIT-1 fold): env-matched KNOWN
+        # rows join the watch population REGARDLESS of shape class —
+        # this is the wave's deliberate population expansion (v1.7
+        # CRIT-1; documented mandatory re-baseline on first v0.6.0 run).
+        # Non-env rows keep the v0.4.x shape gate (HIGH-CONFIDENCE or
+        # token-format only) so non-env behavior is byte-unchanged.
+        if cls != "KNOWN" and cls != "HIGH-CONFIDENCE" and vc != "token-format":
             continue
         e = out.setdefault(value, {"type": _value_type(value), "family": None,
                                    "count": 0, "value_sha256": _sha(value)})
+        if cls == "KNOWN":
+            # Env-identity-verified rows are KNOWN by contract (proposal
+            # §3.4 watch example: type "KNOWN"), regardless of shape —
+            # the shape type is what the row would be WITHOUT the env
+            # match; identity beats shape-guess.
+            e["type"] = "KNOWN"
         e["count"] += 1
         if e["family"] is None:
             f = _family_of(rule)
             e["family"] = f if f != "bare-token" else None
+        if cls == "KNOWN" and rule.startswith("known-env:"):
+            # Env provenance: source_key = the env key (alphabetically
+            # first across sources — the index already picks it). Carried
+            # per value so watch rows can annotate source/source_key.
+            key = rule[len("known-env:"):]
+            e["source_key"] = key
+            if e["family"] is None:
+                e["family"] = key
     return out
 
 
@@ -1135,10 +1168,23 @@ def _watch_deltas(current, prev, assessment, sha_id=None):
         sha = e["value_sha256"]
         fam = e["family"]
         vid = sha_id.get(sha)
+        # Wave A annotations (proposal §3.4/P-C): source = precedence
+        # winner (literal wins on collision); source_key present iff an
+        # env match exists REGARDLESS of the winner (both-match rows
+        # carry both); value_id iff registered. Absent, never null.
+        env_key = e.get("source_key")
+        if env_key is not None:
+            src = "literal" if vid else "env"
+        else:
+            src = "literal" if vid else None
         if sha not in known:
             row = {"value_masked": _mask_value(value),
                    "type": e["type"], "family": fam,
                    "count": e["count"]}
+            if src:
+                row["source"] = src
+            if env_key is not None:
+                row["source_key"] = env_key
             if vid:
                 row["value_id"] = vid
             d["new_values"].append(row)
@@ -1149,6 +1195,10 @@ def _watch_deltas(current, prev, assessment, sha_id=None):
                 row = {"value_masked": _mask_value(value), "type": e["type"],
                        "family": fam, "count": e["count"],
                        "count_before": old.get("count", 0)}
+                if src:
+                    row["source"] = src
+                if env_key is not None:
+                    row["source_key"] = env_key
                 if vid:
                     row["value_id"] = vid
                 d["changed_values"].append(row)
@@ -1200,6 +1250,15 @@ def _protected_value_matches(current, prev, known_fps, sha_id=None):
         row = {"value_masked": _mask_value(value), "type": e["type"],
                "family": e["family"], "count": e["count"]}
         vid = sha_id.get(e["value_sha256"])
+        # Wave A annotations: protected rows are registered by
+        # definition — source = "literal" (precedence winner on
+        # collision, P-C); source_key present iff an env match also
+        # exists; value_id iff the entry carries one (absent, never
+        # null — hand-added entries without an id until backfilled).
+        row["source"] = "literal"
+        env_key = e.get("source_key")
+        if env_key is not None:
+            row["source_key"] = env_key
         if vid:
             row["value_id"] = vid
         old = baseline_rows.get(e["value_sha256"])
@@ -1549,17 +1608,22 @@ def _area_status(value: int, masked: int):
 
 
 def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated,
-                      env_meta=None):
+                      env_meta=None, value_id_map=None):
     """Reduce the raw hit list into the assessment object. Classification
     is a PARTITION: every hit lands in exactly one tier (KNOWN,
     credential-shaped, key-name mention, or already-masked) — totals
     always reconcile. v0.5.0 (IG D57–D62/D70–D75): env_meta carries the
     KNOWN pass results (known_sigs = {(rel, line, value)}, diagnostics,
     disabled) — KNOWN rows classify by signature (proposal §2.2/D28),
-    counted per OCCURRENCE, value-deduped into totals.known."""
+    counted per OCCURRENCE, value-deduped into totals.known.
+    Wave A (Phase 2/6): value_id_map = per-run {sha256(value): id} from
+    the shared registry lookup — registered KNOWN rows carry value_id
+    (annotation-only, never affects matching/counts; absent, never
+    null)."""
     from collections import Counter
 
     known_sigs = (env_meta or {}).get("known_sigs") or {}
+    vid_map = value_id_map or {}
     n_tok = n_gl = n_key = n_mask = 0
     for h in all_hits:
         cls, _rule, rel, line, value, _masked, _ctx = h
@@ -1813,10 +1877,14 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated,
     for v, e in known_vals.items():
         fam_c = e["fams"]
         fam_n = max(fam_c, key=lambda f: fam_c[f]) if fam_c else None
-        top_values.append({"value_masked": _mask_value(v), "type": "KNOWN",
-                           "family": fam_n, "count": e["count"],
-                           "families": sorted(e["fams"]),
-                           "known": True, "source_key": fam_n})
+        row = {"value_masked": _mask_value(v), "type": "KNOWN",
+               "family": fam_n, "count": e["count"],
+               "families": sorted(e["fams"]),
+               "known": True, "source_key": fam_n}
+        vid = vid_map.get(_sha(v))
+        if vid:
+            row["value_id"] = vid  # absent, never null (D54); D73 lifted
+        top_values.append(row)
     top_values.sort(key=lambda x: -x["count"])
 
     affected_files = [
@@ -2241,7 +2309,12 @@ def _render_assessment(a, all_hits, full, env_meta=None):
             print()
         print("  Known false-positive classes: code identifiers (password_hash =),")
         print("  config examples in docs, harmless IDs matching token prefixes.")
-    return 1 if (t.get("known", 0) > 0 or t["credential_shaped"] > 0) else 0
+    # Exit ladder (Wave A, IG D83): 3 = KNOWN present (dominates), 1 =
+    # credential-shaped only, 0 = clean. The D75 single-predicate
+    # (known OR shape → 1) is superseded by the packaged ladder; known
+    # values are the rotate-now signal and outrank shape guesses.
+    return 3 if t.get("known", 0) > 0 else (1 if t["credential_shaped"] > 0
+                                            else 0)
 
 
 # ── KNOWN tier wording (v0.5.0, IG D57–D62/D70–D75) ──────────────────
@@ -2412,13 +2485,13 @@ def _collect_hits(dirs, redact=True, env_pass=False):
     echoes it — it goes straight into custom_literals.json). Preflight
     stays redact=True (read-only, values blanked).
 
-    env_pass=True (preflight ONLY — IG D71 hard boundary): the KNOWN
-    exact-value pass runs per file after _key_scan. watch and setup call
-    this unchanged (env_pass=False) — watch's _watch_values consumes
-    every hit, so an unconditioned env pass would alter watch baselines
-    (D71: no watch changes). env_meta = {"known_sigs": {(rel,line,value):
-    source_key}, "diagnostics": [...], "disabled": bool, "known_files":
-    set} or None when env_pass=False."""
+    env_pass=True (Wave A — the D71 boundary is lifted; preflight,
+    watch, and setup all run the KNOWN exact-value pass): the KNOWN
+    pass runs per file after _key_scan. preflight/watch classify via
+    _build_assessment (env_meta); watch additionally expands its
+    population to env-matched values (Phase 4, CRIT-1 fold). env_meta =
+    {"known_sigs": {(rel,line,value): source_key}, "diagnostics": [...],
+    "disabled": bool, "known_files": set} or None when env_pass=False."""
     all_hits, gitleaks_ok = [], True
     env_meta = None
     if env_pass:
@@ -2677,6 +2750,15 @@ def _load_registry():
       one-time stderr note; same-version id backfill gets its own
       wording; `version` > 2 -> read-only pass-through (entries as-is,
       no writes, one stderr warning — MIN-5)
+    - **migration/backfill write failure is NON-FATAL (MAJ-5 r1 fold,
+      Wave A):** a read-only consumer (preflight/watch annotation
+      lookup) must never crash because the migration could not
+      persist — emit one stderr note, continue with the in-memory
+      normalized entries, and return doc unchanged so canonical
+      writers still see the original top level. A canonical WRITE
+      command (literals add / setup) failing on an unwritable registry
+      fails itself with exit 2 — that failure is the command's own
+      atomic write, not this loader.
     - ALL chatter goes to stderr (stdout purity: watch --json /
       literals --json on the first post-upgrade run — MAJ-2)."""
     if not CUSTOM_LITERALS.exists():
@@ -2701,7 +2783,16 @@ def _load_registry():
         out = dict(doc)  # preserve unknown top-level keys (MIN-2)
         out["version"] = _REGISTRY_VERSION
         out["literals"] = entries
-        _atomic_write_json(CUSTOM_LITERALS, out)
+        try:
+            _atomic_write_json(CUSTOM_LITERALS, out)
+        except OSError:
+            # Read-only filesystem (MAJ-5 r1): degrade gracefully —
+            # annotation lookups proceed with in-memory entries; the
+            # canonical writer's OWN write will fail loudly with exit 2.
+            print(f"[info-guard] ⚠ {CUSTOM_LITERALS.name} migration could "
+                  f"not be persisted (read-only?) — continuing in-memory",
+                  file=sys.stderr)
+            return entries, True, doc
         if version == _REGISTRY_VERSION:
             note = (f"{CUSTOM_LITERALS.name} backfilled — {_n(n_new)} "
                     f"entr{'y' if n_new == 1 else 'ies'} got ids")
@@ -2710,6 +2801,27 @@ def _load_registry():
                     f"— {_n(n_new)} entr{'y' if n_new == 1 else 'ies'} got ids")
         print(f"[info-guard] {note}", file=sys.stderr)
     return entries, True, doc
+
+
+def _value_id_map():
+    """Per-run deduplicated value-to-ID lookup (Wave A, Phase 2 — NIT-11
+    r1: NOT a fingerprint-to-ID mapping; IDs are CSPRNG-generated and
+    value-independent per S1, the lookup is by deduplicated VALUE).
+
+    Built from the canonical loader's deduplicated entries (first-wins,
+    v0.4.2 NIT-3) as {sha256(value): id} — in-memory only, read-only,
+    annotation-only (D73: never affects matching or counts). Consumers
+    that lack a registry entry simply omit `value_id` (absent, never
+    null; D54). Never writes, never backfills — a canonical write
+    command owns persistence (MAJ-5 r1)."""
+    out = {}
+    entries, _ok, _doc = _load_registry()
+    for item in entries:
+        if isinstance(item, dict):
+            v, i = item.get("value"), item.get("id")
+            if isinstance(v, str) and v and isinstance(i, str) and i:
+                out.setdefault(_sha(v), i)  # first-wins
+    return out
 
 
 def cmd_literals(args):
