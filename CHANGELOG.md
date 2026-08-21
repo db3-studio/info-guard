@@ -4,9 +4,9 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 
 > Convention: micro-version fixes within the same workstream are consolidated into the latest entry of that wave, not captured per tag.
 
-## [Unreleased]
+## [v0.5.1] - 2026-08-21
 
-### Fixed (v0.5.1 — IG D94)
+### Fixed (IG D94)
 - **Preflight no longer reports clean on a degraded run.** When the
   gitleaks engine is unavailable (or an internal scan failure occurs),
   preflight exits **2 (operational failure)** instead of 0 — a partially
