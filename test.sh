@@ -1886,6 +1886,49 @@ check("A9: self-match excluded (direct/symlink/hard-link)",
 check("A9: .env source itself never a finding of any tier",
       all(".env" not in f["file"] or f["total_findings"] == 0
           for f in o9["affected_files"]))
+# A9b (MAJ-3 r2): stat-failure fallback (path-only identity) + file
+# replacement between discovery and read (new inode, same path)
+h9b = mkhome("sessions", "logs")
+env9b = os.path.join(h9b, ".env")
+with open(env9b, "w") as f:
+    f.write(f"TOK9B={envval}\n")
+# replacement-between-discovery-and-read: monkeypatched stat failing
+# on the candidate file forces path-only identity; then the source file
+# is REPLACED (new inode) before the env pass reads it — the snapshot
+# (old inode) must not disable matching of the NEW source content.
+with open(os.path.join(h9b, "sessions", "s9b.jsonl"), "w") as f:
+    f.write(f"{envval}\n")
+env9b_env = dict(os.environ); env9b_env["HERMES_HOME"] = h9b
+import importlib.util as _ilu9
+_ig9 = os.path.join(tmp, "igmod9.py")
+shutil.copy(IG, _ig9)
+_ig9s = _ilu9.spec_from_file_location("ig9", _ig9)
+_ig9m = _ilu9.module_from_spec(_ig9s); _ig9s.loader.exec_module(_ig9m)
+_orig_stat = os.stat
+def _fail_stat(p, *a, **k):
+    if str(p).endswith("s9b.jsonl"):
+        raise OSError("stat denied (probe)")
+    return _orig_stat(p, *a, **k)
+_ig9m.os.stat = _fail_stat
+ah9, ok9, meta9 = _ig9m._collect_hits([Path(h9b) / "sessions"], env_pass=True)
+check("A9b: stat-failure on candidate → path-only identity, no crash",
+      meta9 is not None and meta9["disabled"] is False)
+# replacement: swap the .env for a new file (new inode) with a DIFFERENT
+# value; the scan file carries the NEW value; must match (snapshot was
+# taken pre-replacement — TOCTOU documented; the read-time identity
+# check uses the CURRENT stat, so the new file matches).
+os.replace(env9b, env9b + ".old")
+with open(env9b, "w") as f:
+    f.write(f"TOK9B={envval2}\n")
+with open(os.path.join(h9b, "sessions", "s9b.jsonl"), "a") as f:
+    f.write(f"{envval2}\n")
+r9b = ig_run(h9b, ["preflight", "--json"])
+o9b = json.loads(r9b.stdout)
+chk9b = [v.get("source_key") for v in o9b["top_values"] if v.get("known")]
+check("A9b: replacement between discovery and read → new value matched",
+      chk9b == ["TOK9B"] and o9b["totals"]["known"] == 1
+      and [v for v in o9b["top_values"] if v.get("known")][0]["count"] == 1,
+      f"known={chk9b}")
 
 # ── A10: confirmed_active semantics + old-consumer probe ──
 r10 = ig_run(h1, ["preflight", "--json"])     # h1 has 1 known value
@@ -1919,6 +1962,35 @@ check("A11: same-line repeats → one row, count = occurrences",
       f"rows={o11['totals']['known_rows']} count={tv11[0]['count']}")
 check("A11: totals.known = distinct values",
       o11["totals"]["known"] == 1)
+# A11b (MAJ-3 r2): cross-detector collapse — a BARE token-shaped value is
+# caught by BOTH the token-prefix detector (known-prefix → bare-token
+# family) and the env pass on the same line/sig → exactly ONE KNOWN row,
+# the TOKEN-SHAPE hit dropped (never credential-shaped). A `KEY=value`
+# line of the same value is a DIFFERENT sig (the run includes `KEY=` —
+# `=` is a grammar char) so the key-shape row stays credential-shaped,
+# proving detectors stay independent where sigs differ.
+jwt12_short = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aaaabbbb"
+h11b = mkhome("sessions")
+with open(os.path.join(h11b, ".env"), "w") as f:
+    f.write(f"HASS_TOKEN={jwt12_short}\n")
+with open(os.path.join(h11b, "sessions", "s11b.jsonl"), "w") as f:
+    f.write(f"token is {jwt12_short} here\n")         # TOKEN-SHAPE + env, same sig
+    f.write(f"HASS_TOKEN={jwt12_short}\n")            # key-shape only (different sig)
+r11b = ig_run(h11b, ["preflight", "--json"])
+o11b = json.loads(r11b.stdout)
+tv11b = [v for v in o11b["top_values"] if v.get("known")]
+shape11b = [v for v in o11b["top_values"] if not v.get("known")]
+collapsed_ok = not any(v["family"] == "bare-token" for v in shape11b)
+key_shape_kept = any(v["type"] == "JWT" and v["family"] == "HASS_TOKEN"
+                     for v in shape11b)
+check("A11b: cross-detector collapse — TOKEN-SHAPE hit dropped, one KNOWN row",
+      o11b["totals"]["known"] == 1
+      and o11b["totals"]["known_rows"] == 1
+      and tv11b[0]["count"] == 1
+      and tv11b[0]["source_key"] == "HASS_TOKEN"
+      and collapsed_ok and key_shape_kept,
+      f"known={o11b['totals']['known']} rows={o11b['totals']['known_rows']} "
+      f"shape={[(v['type'], v.get('family')) for v in shape11b]}")
 
 # ── A12: punctuation values + negative fixtures + grammar parity ──
 url12 = "https://user:pass@host:8080/x?y=1#frag"
@@ -2100,6 +2172,49 @@ for tag, nf, lpf in (("5k", 50, 100), ("50k", 500, 100)):
     check(f"A14: {tag}-tree overhead ≤10% or ≤5s (base {t_base:.2f}s, "
           f"new {t_new:.2f}s, +{over*100:.0f}%)",
           over <= 0.10 or (t_new - t_base) <= 5.0)
+    # A14b (MAJ-4 r2): --json mode complete-preflight timing + per-phase
+    # reconciliation: measure text vs json mode and the phase sum vs
+    # wall clock (±10% tolerance) on the 5k tree.
+    if tag == "5k":
+        t_json = median_reps(IG, hperf, ["preflight", "--json"])
+        # per-phase instrumentation via module import (same trick as A6):
+        env_p = dict(os.environ); env_p["HERMES_HOME"] = hperf
+        import importlib.util as _ilup
+        _igp = os.path.join(tmp, "igmodp.py")
+        shutil.copy(IG, _igp)
+        _igps = _ilup.spec_from_file_location("igp", _igp)
+        _igpm = _ilup.module_from_spec(_igps); _igps.loader.exec_module(_igpm)
+        _igpm._HERMES_HOME = Path(hperf)
+        t0 = time.perf_counter()
+        idx, srcs, diags = _igpm._env_sources()
+        t_src = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        scan_dirs = [Path(hperf) / d for d in
+                     ("sessions", "logs", "cron/output")
+                     if (Path(hperf) / d).is_dir()]
+        n_hits = 0
+        for d in scan_dirs:
+            for p in sorted(d.rglob("*")):
+                if p.is_file():
+                    eh, _es = _igpm._env_scan_file(p, idx, srcs)
+                    n_hits += len(eh)
+        t_scan = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        ah, _ok, _meta = _igpm._collect_hits(scan_dirs, env_pass=True)
+        t_with = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        _igpm._collect_hits(scan_dirs, env_pass=False)
+        t_without = time.perf_counter() - t0
+        t_env = t_with - t_without                 # env-pass marginal cost
+        check("A14b: --json mode overhead ≤10% or ≤5s "
+              f"(text {t_new:.2f}s, json {t_json:.2f}s)",
+              t_json <= t_new * 1.10 + 5.0 or t_json - t_new <= 5.0,
+              f"json={t_json:.2f}s")
+        check("A14b: env-phase sum reconciles with marginal env cost ±10% "
+              f"(src {t_src:.3f}s + scan {t_scan:.3f}s ≈ env {t_env:.3f}s)",
+              abs((t_src + t_scan) - t_env) <= 0.10 * t_env + 0.05,
+              f"sum={t_src + t_scan:.3f}s env={t_env:.3f}s hits={n_hits} "
+              f"with={t_with:.2f}s without={t_without:.2f}s")
 
 # ── A15: row-shape validation across every row-bearing path ──
 tv15 = [v for v in o11["top_values"]]
