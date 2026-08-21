@@ -2945,7 +2945,19 @@ def _literals_list(args):
     if not ok:
         print(f"[info-guard] ⚠ {CUSTOM_LITERALS.name} unreadable",
               file=sys.stderr)
-        print(json.dumps({"literals": []}, indent=2) if json_mode else "")
+        if json_mode:
+            inst = _installation_status()
+            manifest = _install_manifest()
+            print(json.dumps({
+                "schema": "info-guard/literals/v1",
+                "tool": {"name": "info-guard", "version": _PACKAGE_VERSION,
+                         "gitleaks": _GITLEAKS_VERSION,
+                         "installed": inst["engine"],
+                         "engine_state": ("active" if inst["engine"] else
+                                          ("partial" if inst["partial"] else "none")),
+                         "engine_version": (manifest.get("version")
+                                            if manifest and inst["engine"] else None)},
+                "literals": []}, indent=2))
         return 0
     rows = []
     for item in entries:
@@ -2960,13 +2972,34 @@ def _literals_list(args):
     def _disp(v, m):
         return "***" if m == "full" else _mask_value(v)
     if json_mode:
-        print(json.dumps({"literals": [{"value_masked": _disp(v, m),
-                                        "id": i} for v, i, m in rows]},
-                         indent=2))
+        inst = _installation_status()
+        manifest = _install_manifest()
+        print(json.dumps({
+            "schema": "info-guard/literals/v1",
+            "tool": {"name": "info-guard", "version": _PACKAGE_VERSION,
+                     "gitleaks": _GITLEAKS_VERSION,
+                     "installed": inst["engine"],
+                     "engine_state": ("active" if inst["engine"] else
+                                      ("partial" if inst["partial"] else "none")),
+                     "engine_version": (manifest.get("version")
+                                        if manifest and inst["engine"] else None)},
+            "literals": [{"value_masked": _disp(v, m), "id": i}
+                         for v, i, m in rows]}, indent=2))
     else:
         for v, i, m in rows:
             print(f"{i or '-':<16} {_disp(v, m)}")
     return 0
+
+
+def _self_fill_mask_style(value):
+    """Self-fill mask style (Wave A P-D, shape-based + length floor):
+    token-format value → `full`; any value shorter than 12 chars →
+    `full` regardless of shape (2+2 on an 8-char PIN discloses half the
+    secret); everything else → default 2+2 (None). Applied by VALUE
+    shape, not detector class (D9's stated intent)."""
+    if len(value) < 12 or _value_class(value) == "token-format":
+        return "full"
+    return None
 
 
 def cmd_setup(args):
@@ -2975,7 +3008,11 @@ def cmd_setup(args):
 
     Values are NEVER echoed: candidates are shown masked, and confirmed
     values go straight from the scan into custom_literals.json.
-    `--all` accepts every candidate non-interactively (for agents/tests)."""
+    `--all` accepts every candidate non-interactively (for agents/tests).
+    Wave A (Phase 5): identity-verified KNOWN .env candidates are
+    grouped into ONE default-accept prompt (masked value + source_key +
+    proposed mask style, plaintext-persistence disclosure); non-KNOWN
+    candidates keep the existing per-item prompt."""
     auto = "--all" in args
     if not auto and not sys.stdin.isatty():
         print("[info-guard] setup is interactive — run it in a terminal, or use:\n"
@@ -2991,17 +3028,62 @@ def cmd_setup(args):
     _ensure_gitleaks()
     print(f"[info-guard] setup — scanning {len(dirs)} dirs under {_HERMES_HOME} "
           f"(read-only scan; only your confirmed choices write anything)")
-    all_hits, gitleaks_ok, _env_meta = _collect_hits(dirs, redact=False)
+    all_hits, gitleaks_ok, env_meta = _collect_hits(dirs, redact=False,
+                                                    env_pass=True)
     if not gitleaks_ok:
         print("[info-guard] setup: ⚠ gitleaks not found on PATH — key-shape pass only")
     from collections import OrderedDict
+    known_sigs = (env_meta or {}).get("known_sigs") or {}
     deduped = OrderedDict()
     for h in all_hits:
+        if h[0] == "KNOWN":
+            continue  # KNOWN rows handled by the group prompt, never the per-item loop
+        if (h[2], h[3], h[4]) in known_sigs:
+            continue  # KNOWN precedence: the env pass owns this signature
         key = (h[0], h[1], h[2], h[3], h[4])
         count, _ = deduped.get(key, (0, None))
         deduped[key] = (count + 1, h)
     added = []          # (value, mask_style)
     skipped_short = 0
+
+    # ── Wave A: KNOWN self-fill group (Phase 5, A13) ──────────────
+    # Identity-verified .env values (env_meta known_sigs) get ONE
+    # default-accept group prompt: masked value + source_key + proposed
+    # mask style + plaintext-persistence disclosure. Declining skips the
+    # group (values remain detectable as env rows, just unregistered).
+    known_sigs = (env_meta or {}).get("known_sigs") or {}
+    if known_sigs:
+        known_vals = OrderedDict()   # value -> {source_key, count}
+        for (_rel, _line, value), src_key in known_sigs.items():
+            e = known_vals.setdefault(value, {"source_key": src_key, "count": 0})
+            e["count"] += 1
+        print()
+        print(f"[info-guard] {len(known_vals)} known .env value(s) found in the "
+              f"scanned files — register as protected literal(s)? [Y/n]")
+        for value, e in known_vals.items():
+            style = _self_fill_mask_style(value)
+            style_label = "full" if style == "full" else "default 2+2"
+            print(f"    {_mask_value(value):<18} source_key={e['source_key']}  "
+                  f"mask={style_label}  (×{e['count']})")
+        print(f"    Accepting writes a PLAINTEXT copy to {CUSTOM_LITERALS} "
+              f"(0600, same trust class as your .env).")
+        if auto:
+            ans = "y"
+        else:
+            try:
+                ans = input("    register these known values? [Y/n] ").strip().lower()
+            except EOFError:
+                ans = "q"
+            if ans in ("q", "quit"):
+                print("[info-guard] aborted — nothing registered")
+                return 2
+        if ans in ("y", "yes", ""):
+            for value, e in known_vals.items():
+                added.append((value, _self_fill_mask_style(value)))
+            print(f"    ✓ {len(known_vals)} known value(s) queued for registration")
+        else:
+            print("    skipped — values remain detectable as env rows, "
+                  "just unregistered")
     if deduped:
         print(f"\n[info-guard] {len(deduped)} candidate(s) found in your transcripts "
               f"and logs. Review each: anything that is YOURS gets registered as "
@@ -3009,6 +3091,8 @@ def cmd_setup(args):
         print()
         for key, (n, h) in deduped.items():
             cls, rule, rel, line, value, masked, ctx = h
+            if cls == "KNOWN":
+                continue  # KNOWN rows handled by the group prompt above
             print(f"  [{cls}] {rule} (×{n})")
             print(f"      {rel}:{line}  value={masked}")
             if ctx:
@@ -3029,7 +3113,7 @@ def cmd_setup(args):
                 print("      (value too short for exact-value matching — it will be "
                       "covered if its KEY is in your .env sources)")
                 continue
-            style = "full" if cls != "KEY-SHAPE" else None
+            style = _self_fill_mask_style(value)
             added.append((value, style))
             print(f"      ✓ registered (mask: {style or 'default 2+2'})")
         print()
