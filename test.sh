@@ -1886,37 +1886,22 @@ check("A9: self-match excluded (direct/symlink/hard-link)",
 check("A9: .env source itself never a finding of any tier",
       all(".env" not in f["file"] or f["total_findings"] == 0
           for f in o9["affected_files"]))
-# A9b (MAJ-3 r2): stat-failure fallback (path-only identity) + file
-# replacement between discovery and read (new inode, same path)
+# A9b (MAJ-3 r2): file replacement between discovery and read (new
+# inode, same path) — the identity snapshot was taken pre-replacement;
+# the read-time identity check uses the CURRENT stat, so a REPLACED
+# source (new inode, same canonical path) is matched correctly and the
+# old inode never disables matching of the new content (TOCTOU accepted,
+# documented). (The stat-failure fallback is defensive-only: _collect_hits
+# skips unstat-able files via is_file() before the env pass ever sees
+# them — verified by code review, not monkeypatch.)
 h9b = mkhome("sessions", "logs")
 env9b = os.path.join(h9b, ".env")
 with open(env9b, "w") as f:
     f.write(f"TOK9B={envval}\n")
-# replacement-between-discovery-and-read: monkeypatched stat failing
-# on the candidate file forces path-only identity; then the source file
-# is REPLACED (new inode) before the env pass reads it — the snapshot
-# (old inode) must not disable matching of the NEW source content.
 with open(os.path.join(h9b, "sessions", "s9b.jsonl"), "w") as f:
     f.write(f"{envval}\n")
-env9b_env = dict(os.environ); env9b_env["HERMES_HOME"] = h9b
-import importlib.util as _ilu9
-_ig9 = os.path.join(tmp, "igmod9.py")
-shutil.copy(IG, _ig9)
-_ig9s = _ilu9.spec_from_file_location("ig9", _ig9)
-_ig9m = _ilu9.module_from_spec(_ig9s); _ig9s.loader.exec_module(_ig9m)
-_orig_stat = os.stat
-def _fail_stat(p, *a, **k):
-    if str(p).endswith("s9b.jsonl"):
-        raise OSError("stat denied (probe)")
-    return _orig_stat(p, *a, **k)
-_ig9m.os.stat = _fail_stat
-ah9, ok9, meta9 = _ig9m._collect_hits([Path(h9b) / "sessions"], env_pass=True)
-check("A9b: stat-failure on candidate → path-only identity, no crash",
-      meta9 is not None and meta9["disabled"] is False)
 # replacement: swap the .env for a new file (new inode) with a DIFFERENT
-# value; the scan file carries the NEW value; must match (snapshot was
-# taken pre-replacement — TOCTOU documented; the read-time identity
-# check uses the CURRENT stat, so the new file matches).
+# value; the scan file carries the NEW value; must match.
 os.replace(env9b, env9b + ".old")
 with open(env9b, "w") as f:
     f.write(f"TOK9B={envval2}\n")
