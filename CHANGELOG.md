@@ -4,6 +4,46 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 
 > Convention: micro-version fixes within the same workstream are consolidated into the latest entry of that wave, not captured per tag.
 
+## [v0.6.0] - 2026-08-21
+
+### Added
+- **Watch `.env` integration** (IG D71 lifted, Wave A): watch and setup
+  now run the KNOWN exact-value pass — env-matched values join the
+  watch population regardless of shape class, with additive
+  `source` / `source_key` / `value_id` annotations on watch rows
+  (`new_values`, `changed_values`, `protected_values`). Precedence:
+  `literal` wins on env+literal collision, but `source_key` is present
+  whenever an env match exists. Rows carry `value_id` iff the value is
+  registered (absent, never null).
+- **Setup self-fill** — identity-verified KNOWN `.env` candidates get
+  ONE default-accept group prompt (masked value + source_key + proposed
+  mask style + plaintext-persistence disclosure); accepting registers
+  them through the canonical registry writer. Mask styles are
+  shape-based: token-format or <12-char values → `full`, else default
+  2+2.
+- **`value_id` on preflight KNOWN rows** — registered KNOWN rows carry
+  the registry id (read-only annotation; never affects matching).
+- **Contract foundation** — JSON surface versioning doctrine
+  (major = compatibility generation, minor = additive), two-part
+  consumer contract (syntactic tolerance + semantic preserve/report of
+  security-significant unknown values), schema-string parsing rule,
+  complete nullable-field list, P3 seams S1–S4, and `literals --json`
+  now carries the `info-guard/literals/v1` envelope.
+- **Exit-code ladder** (IG D83) — preflight: 0 clean / 1 credential-
+  shaped / 2 usage or operational / **3 KNOWN present (dominates)**;
+  exit 4 reserved for honeytoken-grade escalation (never emitted).
+  Watch: 2 on operational failure (engine unavailable / scan failure),
+  1 on new values / degradation / protected alarm.
+- **Mandatory first-run upgrade re-baseline** — the first v0.6.0 watch
+  run against a v0.5.x baseline must re-baseline (`watch --reset`);
+  previously-excluded env-matched values would otherwise false-alarm as
+  `new_values` (IG D93 CRIT-1).
+
+### Changed
+- Preflight known-only runs exit **3** (was 1 under the v0.5.0
+  single-predicate). Consumers routing on exit codes: 3 is the
+  at-rest KNOWN verdict; 1 now means credential-shaped findings only.
+
 ## [v0.5.1] - 2026-08-21
 
 ### Fixed (IG D94)
