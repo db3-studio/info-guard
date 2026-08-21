@@ -2005,6 +2005,78 @@ p10b = subprocess.run([sys.executable, probe], input=r7j.stdout,
 check("A10: v0.4.2-era consumer probe PASSES on clean output",
       p10b.returncode == 0, f"rc={p10b.returncode} err={p10b.stderr[-200:]!r}")
 
+# ── A22 (Wave A): same-major v1.1 consumer probe ──
+# A consumer written against v1.0 must accept v1.1 payloads — schema
+# surface + major parsing, unknown-minor tolerance, unknown additive
+# fields tolerated, security-significant unknown enum values preserved.
+probe11 = os.path.join(os.getcwd(), "tests", "consumers",
+                       "v1.1-consumer-probe.py")
+p11a = subprocess.run([sys.executable, probe11], input=r10.stdout,
+                      capture_output=True, text=True, timeout=120)
+check("A22: v1.1 same-major probe PASSES on assessment v1 output",
+      p11a.returncode == 0, f"rc={p11a.returncode} err={p11a.stderr[-200:]!r}")
+# watch/v1 output:
+r11w = ig_run(h1, ["watch", "--json", "--reset"])
+p11w = subprocess.run([sys.executable, probe11, "--surface", "watch"],
+                      input=r11w.stdout, capture_output=True, text=True,
+                      timeout=120)
+check("A22: v1.1 same-major probe PASSES on watch v1 output",
+      p11w.returncode == 0,
+      f"rc={p11w.returncode} err={p11w.stderr[-200:]!r}")
+# literals --json envelope:
+r11l = ig_run(h1, ["literals", "list", "--json"])
+p11l = subprocess.run([sys.executable, probe11, "--surface", "literals"],
+                      input=r11l.stdout, capture_output=True, text=True,
+                      timeout=120)
+check("A22: literals/v1 envelope accepted by same-major probe",
+      p11l.returncode == 0,
+      f"rc={p11l.returncode} err={p11l.stderr[-200:]!r}")
+# v1.1 (unknown minor) fixture accepted — same-major tolerance:
+p11m = subprocess.run([sys.executable, probe11],
+                      input=r10.stdout.replace(
+                          "info-guard/assessment/v1",
+                          "info-guard/assessment/v1.1"),
+                      capture_output=True, text=True, timeout=120)
+check("A22: v1.1 (unknown minor) fixture accepted by same-major probe",
+      p11m.returncode == 0,
+      f"rc={p11m.returncode} err={p11m.stderr[-200:]!r}")
+
+# ── A12/W23 (Wave A): mandatory upgrade re-baseline (v1.7 CRIT-1) ──
+# A v0.5.1-generated baseline (v2 schema; v0.5.0/v0.5.1 schema-identical)
+# followed by the first v0.6.0 watch run false-alarms previously-excluded
+# env-matched values as new_values (exit 1); the documented re-baseline
+# (watch --reset) makes subsequent identical runs quiet (exit 0).
+h23 = mkhome("sessions")
+with open(os.path.join(h23, ".env"), "w") as f:
+    f.write(f"UNIFI_SSH={envval}\n")
+with open(os.path.join(h23, "sessions", "s23.jsonl"), "w") as f:
+    f.write(f"the token is {envval} here\n")
+# Simulate the v0.5.1 baseline: an old-format baseline that excludes the
+# env value from its population (the pre-wave watch never ran the env
+# pass), written in the v2 schema shape the upgrade path expects.
+bl23 = os.path.join(h23, "state", "info-guard", "watch-baseline.json")
+os.makedirs(os.path.dirname(bl23), exist_ok=True)
+with open(bl23, "w") as f:
+    json.dump({"schema": "info-guard/watch-baseline/v2",
+               "generated": "2026-08-20T10:00:00Z",
+               "tool_version": "0.5.1",
+               "gitleaks_version": "8.30.1",
+               "values": []}, f)
+r23a = ig_run(h23, ["watch", "--json"])
+o23a = json.loads(r23a.stdout) if r23a.stdout.strip().startswith("{") else {}
+check("W23: first v0.6.0 run vs v0.5.1 baseline false-alarms env value (exit 1)",
+      r23a.returncode == 1
+      and any(r.get("type") == "KNOWN" and r.get("source") == "env"
+              for r in o23a.get("exposure", {}).get("new_values", [])),
+      f"rc={r23a.returncode} out={r23a.stdout[-200:]!r}")
+r23b = ig_run(h23, ["watch", "--reset", "--json"])
+r23c = ig_run(h23, ["watch", "--json"])
+o23c = json.loads(r23c.stdout) if r23c.stdout.strip().startswith("{") else {}
+check("W23: documented re-baseline → subsequent runs quiet (exit 0)",
+      r23c.returncode == 0
+      and not o23c.get("exposure", {}).get("new_values"),
+      f"rc={r23c.returncode} out={r23c.stdout[-200:]!r}")
+
 # ── A11: duplicate value across keys → one row, first key; N/M; counts ──
 h11 = mkhome("sessions")
 with open(os.path.join(h11, ".env"), "w") as f:
