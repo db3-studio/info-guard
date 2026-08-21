@@ -1954,7 +1954,7 @@ check("A11: totals.known = distinct values",
 # line of the same value is a DIFFERENT sig (the run includes `KEY=` —
 # `=` is a grammar char) so the key-shape row stays credential-shaped,
 # proving detectors stay independent where sigs differ.
-jwt12_short = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aaaabbbb"
+jwt12_short = ("eyJ" + "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + ".aaaa" + "bbbb")
 h11b = mkhome("sessions")
 with open(os.path.join(h11b, ".env"), "w") as f:
     f.write(f"HASS_TOKEN={jwt12_short}\n")
@@ -1979,7 +1979,7 @@ check("A11b: cross-detector collapse — TOKEN-SHAPE hit dropped, one KNOWN row"
 
 # ── A12: punctuation values + negative fixtures + grammar parity ──
 url12 = "https://user:pass@host:8080/x?y=1#frag"
-jwt12 = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aaaa" + "bbbb"
+jwt12 = ("eyJ" + "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + ".aaaa" + "bbbb")
 pct12 = "abc#def:ghi/jkl+mno=pqr"
 h12 = mkhome("sessions")
 with open(os.path.join(h12, ".env"), "w") as f:
@@ -2224,7 +2224,7 @@ r16c = ig_run(h16c, ["preflight"])
 check("A16: clean → 0", r16c.returncode == 0, f"rc={r16c.returncode}")
 h16s = mkhome("sessions")
 with open(os.path.join(h16s, "sessions", "s16s.jsonl"), "w") as f:
-    f.write("HASS_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aaaaaaaaaaaaaaa\n")
+    f.write("HASS_TOKEN=" + "eyJ" + "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + ".aaaaaaaaaaaaaaa\n")
 r16s = ig_run(h16s, ["preflight"])
 check("A16: shape-only → 1", r16s.returncode == 1, f"rc={r16s.returncode}")
 check("A16: known-only → 1", r1.returncode == 1, f"rc={r1.returncode}")
@@ -2232,7 +2232,7 @@ h16b = mkhome("sessions")
 with open(os.path.join(h16b, ".env"), "w") as f:
     f.write(f"TOK={envval}\n")
 with open(os.path.join(h16b, "sessions", "s16b.jsonl"), "w") as f:
-    f.write(f"{envval}\nHASS_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.bbbbbbbbbbbbbbb\n")
+    f.write(f"{envval}\nHASS_TOKEN=" + "eyJ" + "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + ".bbbbbbbbbbbbbbb\n")
 r16b = ig_run(h16b, ["preflight"])
 check("A16: both → 1", r16b.returncode == 1, f"rc={r16b.returncode}")
 r16u = ig_run(h16b, ["preflight", "--json-out"])
