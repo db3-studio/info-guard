@@ -421,10 +421,15 @@ review whether it is still live" — never "leak", never "confirmed".
 distinguished in v0.5.0).
 
 **Exit codes (v0.5.0 — documented extension):** `0` = clean, **`1` iff
-`known > 0 OR credential_shaped > 0`**, `2` = usage error. The severity
+`known > 0 OR credential_shaped > 0`**, `2` = usage error. **v0.5.1 (IG D94):**
+`2` widens to usage **or operational** — a degraded preflight run (gitleaks
+engine unavailable, or an internal scan failure) exits **2, never 0 and never
+1**; the assessment JSON continues to carry `engine.installed` so consumers
+can distinguish the cause. The severity
 ladder (0 clean / 1 shape / 2 usage / 3 KNOWN, KNOWN dominates) is
 deferred to a later wave (D75) and ships as ONE packaged contract change
-(format-spec + CHANGELOG + release notes + consumer tests together).
+(format-spec + CHANGELOG + release notes + consumer tests together),
+adopting this widened `2` unchanged.
 
 Date discipline: historical date ranges come from **session filename
 timestamps** (`session_YYYYMMDD…`), never filesystem mtime.
@@ -442,7 +447,9 @@ already-masked.
 Exit codes: **0 = clean**, **1 = findings** (any KNOWN `.env` value OR any
 credential-shaped value — single-predicate extension, v0.5.0; previously
 credential-shaped only),
-**2 = usage error**. gitleaks is optional: without it the scan runs the
+**2 = usage or operational error** (v0.5.1, IG D94 — the operational
+sub-case: gitleaks engine unavailable or an internal scan failure; preflight
+exits 2, never 0). gitleaks is optional: without it the scan runs the
 key-shape pass only and says so. The severity ladder (0/1/2/3 with KNOWN
 dominating) is deferred to a later wave (D75) as one packaged contract
 change.

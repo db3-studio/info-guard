@@ -78,6 +78,7 @@ State dir: $HERMES_HOME/state/info-guard/  (default $HERMES_HOME = ~/.hermes).
 This is the redaction layer only. The full stack — secret inventory,
 leak detection, rotation, watchdogs — is documented in docs/full-stack.md.
 """
+import contextlib
 import hashlib
 import json
 import os
@@ -706,6 +707,8 @@ def cmd_preflight(args):
     # one-example-per-family sampler (same masking, no cap).
     # --json: emit the assessment object to stdout (no chatter — the
     # object carries engine state); --json-out FILE: atomic 0600 write.
+    # Exits: 0 clean · 1 findings · 2 usage OR operational failure
+    # (engine unavailable / scan failure — never 0, never 1; v0.5.1, IG D94).
     full = "--full" in (args or [])
     as_json = "--json" in (args or [])
     json_out = None
@@ -739,7 +742,13 @@ def cmd_preflight(args):
         print(f"[info-guard] preflight: no scan targets under {_HERMES_HOME} "
               f"({', '.join(_PREFLIGHT_DIRS)}) — nothing to scan")
         return 0
-    _ensure_gitleaks()
+    if as_json:
+        # JSON purity (W15 doctrine, applied early): the missing-engine
+        # advisory is chatter → stderr; stdout stays pure JSON (v0.5.1, IG D94).
+        with contextlib.redirect_stdout(sys.stderr):
+            _ensure_gitleaks()
+    else:
+        _ensure_gitleaks()
     total = 0
     for d in dirs:
         total += sum(1 for _ in d.rglob("*") if _.is_file())
@@ -764,10 +773,11 @@ def cmd_preflight(args):
                 print(f"[info-guard] preflight: assessment written to {json_out}")
             else:
                 print(json.dumps(assessment, indent=2))
-            return 1 if (assessment["totals"].get("known", 0)
-                         or assessment["totals"]["credential_shaped"]) else 0
+            return 2 if not gitleaks_ok else (1 if (assessment["totals"].get("known", 0)
+                         or assessment["totals"]["credential_shaped"]) else 0)
         print()
-        return _render_assessment(assessment, all_hits, full, env_meta)
+        rc = _render_assessment(assessment, all_hits, full, env_meta)
+        return 2 if not gitleaks_ok else rc
     except BaseException:
         # Sanitized CLI boundary (plan A1.7/CRIT-2 r3): any failure below
         # this line (assessment construction, JSON serialization, text
@@ -776,7 +786,8 @@ def cmd_preflight(args):
         # object (stdout stays clean).
         print("[info-guard] preflight: internal error — scan incomplete "
               "(generic)", file=sys.stderr)
-        return 1
+        return 2  # operational failure (v0.5.1, IG D94): a failed scan is
+                  # never "findings" (1) and never clean (0)
 
 
 def cmd_watch(args):
@@ -808,7 +819,12 @@ def cmd_watch(args):
         say(f"[info-guard] watch: no scan targets under {_HERMES_HOME} "
             f"({', '.join(_PREFLIGHT_DIRS)}) — nothing to scan")
         return 0
-    _ensure_gitleaks()
+    if json_mode:
+        # JSON purity: same treatment as preflight (v0.5.1, IG D94).
+        with contextlib.redirect_stdout(sys.stderr):
+            _ensure_gitleaks()
+    else:
+        _ensure_gitleaks()
     all_hits, gitleaks_ok, _env_meta = _collect_hits(dirs)
     if not gitleaks_ok:
         say("[info-guard] watch: ⚠ gitleaks not found on PATH — key-shape "

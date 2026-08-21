@@ -478,6 +478,33 @@ check("preflight: clean path has assessment header + CLEAN",
       "Preflight Security Assessment" in pfco and "CLEAN" in pfco)
 check("preflight: clean path has SCOPE line", "SCOPE:" in pfco)
 
+# 12b1. preflight DEGRADED engine: gitleaks hidden -> exit 2, never 0 (v0.5.1, IG D94)
+env8 = dict(env7)
+env8["PATH"] = "/usr/bin:/bin"
+g_home = os.path.join(tmp, "no-engine-home")
+os.makedirs(g_home, exist_ok=True)
+env8["HOME"] = g_home
+pfd = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "preflight"],
+    env=env8, capture_output=True, text=True, timeout=300)
+pfdo = pfd.stdout + pfd.stderr
+check("preflight: degraded engine (gitleaks hidden) exits 2, never 0",
+      pfd.returncode == 2,
+      f"rc={pfd.returncode} out={pfdo[-300:]!r}")
+check("preflight: degraded-engine note visible",
+      "key-shape pass only" in pfdo,
+      "the missing-engine explanation should be shown")
+pfdj = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "preflight", "--json"],
+    env=env8, capture_output=True, text=True, timeout=300)
+check("preflight --json: degraded engine exits 2",
+      pfdj.returncode == 2,
+      f"rc={pfdj.returncode} out={pfdj.stdout[-300:]!r}")
+check("preflight --json: degraded assessment still emitted with engine state",
+      "\"gitleaks_ok\": false" in pfdj.stdout,
+      "JSON should carry the degraded engine state (scan.gitleaks_ok)")
+
 # 12c. --version flag
 ver = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
@@ -1837,7 +1864,8 @@ rw2 = subprocess.run([sys.executable, wrap, "preflight", "--json"],
                      env=env_w, capture_output=True, text=True, timeout=300)
 check("A6: assessment-path sentinel injection — generic, no leak, no partial JSON",
       SENT not in rw2.stdout + rw2.stderr
-      and "internal error" in rw2.stderr and rw2.returncode == 1
+      and "internal error" in rw2.stderr
+      and rw2.returncode == 2  # operational failure (v0.5.1, IG D94 — was 1)
       and not rw2.stdout.strip().startswith("{"),
       f"rc={rw2.returncode} out={rw2.stdout[-120:]!r} err={rw2.stderr[-120:]!r}")
 

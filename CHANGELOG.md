@@ -6,6 +6,16 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Fixed (v0.5.1 — IG D94)
+- **Preflight no longer reports clean on a degraded run.** When the
+  gitleaks engine is unavailable (or an internal scan failure occurs),
+  preflight exits **2 (operational failure)** instead of 0 — a partially
+  degraded scan never masquerades as a clean bill of health, and a failed
+  scan is never misreported as "findings" (exit 1). JSON output is
+  unchanged and still carries `engine.installed`. Exit-code docs updated
+  (format-spec); the severity ladder in a later wave adopts this widened
+  exit-2 semantics unchanged.
+
 ## [v0.5.0] - 2026-08-20
 
 ### Added
