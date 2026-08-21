@@ -97,7 +97,7 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.4.2"
+_PACKAGE_VERSION = "0.5.0"
 
 # Per-subcommand usage lines (v0.4.1, IG D55): printed by
 # `info-guard <cmd> --help` (exit 0). Mirror the __doc__ usage block —
@@ -154,17 +154,24 @@ def _is_non_secret_key(k: str) -> bool:
             or NON_SECRET_FLAG_RE.search(k))
 
 
-def _load_env(path: Path):
-    """Parse a .env file into {KEY: value}. Errors on a path are fatal
-    (a source you named must exist); missing default sources are skipped."""
+def _parse_env_lines(lines):
+    """Pure parser: [KEY: value] from already-split lines. Returns
+    (entries, saw_content, saw_valid_entry). NO I/O — read/decode errors
+    are the caller's job (_load_env raises SystemExit with a path-only
+    message; _env_sources catches and classifies). Malformed lines
+    (no '=', invalid key, empty) are skipped SILENTLY — the existing
+    documented .env grammar (v0.4.x characterization: byte-identical
+    behavior, verified by the battery's parser-characterization block).
+    saw_content = any non-blank line; saw_valid_entry = >=1 valid
+    KEY=value pair (the env-pass malformed-source classifier)."""
     out = {}
-    try:
-        lines = path.read_text().splitlines()
-    except OSError:
-        raise SystemExit(f"[info-guard] ✗ cannot read env source: {path}")
+    saw_content = saw_valid_entry = False
     for line in lines:
         line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+        if not line:
+            continue
+        saw_content = True
+        if line.startswith("#") or "=" not in line:
             continue
         k, _, v = line.partition("=")
         k = k.strip().strip('"').strip("'")
@@ -175,7 +182,19 @@ def _load_env(path: Path):
         # # inside the value is part of the value)
         v = re.sub(r"\s+#.*$", "", v)
         out[k] = v
-    return out
+        saw_valid_entry = True
+    return out, saw_content, saw_valid_entry
+
+
+def _load_env(path: Path):
+    """Parse a .env file into {KEY: value}. Errors on a path are fatal
+    (a source you named must exist); missing default sources are skipped.
+    Parsing delegates to _parse_env_lines (identical semantics)."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        raise SystemExit(f"[info-guard] ✗ cannot read env source: {path}")
+    return _parse_env_lines(lines)[0]
 
 
 def _default_sources():
@@ -402,9 +421,12 @@ def _value_type(value: str) -> str:
 def _family_of(rule: str) -> str:
     """The secret-family name a hit belongs to: the key name for key-shape
     hits ('key-family:HASS_TOKEN' -> 'HASS_TOKEN'), the gitleaks RuleID for
-    gitleaks hits, 'bare-token' for prefix-only token hits."""
+    gitleaks hits, 'bare-token' for prefix-only token hits, and the env
+    KEY for KNOWN hits ('known-env:HASS_TOKEN' -> 'HASS_TOKEN', v0.5.0)."""
     if rule.startswith("key-family:"):
         return rule[len("key-family:"):]
+    if rule.startswith("known-env:"):
+        return rule[len("known-env:"):]
     if rule == "known-prefix":
         return "bare-token"
     return rule
@@ -725,25 +747,36 @@ def cmd_preflight(args):
         _print_install_status()
         print(f"[info-guard] preflight — scanning {len(dirs)} dirs / ~{total} "
               f"files under {_HERMES_HOME} (read-only, nothing written)")
-    all_hits, gitleaks_ok = _collect_hits(dirs)
+    all_hits, gitleaks_ok, env_meta = _collect_hits(dirs, env_pass=True)
     if not gitleaks_ok and not as_json:
         print("[info-guard] preflight: ⚠ gitleaks not found on PATH — ran "
               "key-shape pass only (install gitleaks for the tuned-ruleset pass)")
     all_hits.sort(key=lambda h: (h[2], h[3]))
     now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
         "+00:00", "Z")
-    assessment = _build_assessment(
-        all_hits, [str(d.relative_to(_HERMES_HOME)) for d in dirs], total,
-        gitleaks_ok, now)
-    if as_json:
-        if json_out:
-            _atomic_write_json(Path(json_out), assessment)
-            print(f"[info-guard] preflight: assessment written to {json_out}")
-        else:
-            print(json.dumps(assessment, indent=2))
-        return 1 if assessment["totals"]["credential_shaped"] else 0
-    print()
-    return _render_assessment(assessment, all_hits, full)
+    try:
+        assessment = _build_assessment(
+            all_hits, [str(d.relative_to(_HERMES_HOME)) for d in dirs], total,
+            gitleaks_ok, now, env_meta)
+        if as_json:
+            if json_out:
+                _atomic_write_json(Path(json_out), assessment)
+                print(f"[info-guard] preflight: assessment written to {json_out}")
+            else:
+                print(json.dumps(assessment, indent=2))
+            return 1 if (assessment["totals"].get("known", 0)
+                         or assessment["totals"]["credential_shaped"]) else 0
+        print()
+        return _render_assessment(assessment, all_hits, full, env_meta)
+    except BaseException:
+        # Sanitized CLI boundary (plan A1.7/CRIT-2 r3): any failure below
+        # this line (assessment construction, JSON serialization, text
+        # rendering, exit handling) surfaces as ONE generic line — raw
+        # values never reach stderr/tracebacks. JSON mode emits no partial
+        # object (stdout stays clean).
+        print("[info-guard] preflight: internal error — scan incomplete "
+              "(generic)", file=sys.stderr)
+        return 1
 
 
 def cmd_watch(args):
@@ -776,7 +809,7 @@ def cmd_watch(args):
             f"({', '.join(_PREFLIGHT_DIRS)}) — nothing to scan")
         return 0
     _ensure_gitleaks()
-    all_hits, gitleaks_ok = _collect_hits(dirs)
+    all_hits, gitleaks_ok, _env_meta = _collect_hits(dirs)
     if not gitleaks_ok:
         say("[info-guard] watch: ⚠ gitleaks not found on PATH — key-shape "
             "pass only")
@@ -1499,15 +1532,23 @@ def _area_status(value: int, masked: int):
     return "mostly_masked" if masked >= value / 2 else "mixed"
 
 
-def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
+def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated,
+                      env_meta=None):
     """Reduce the raw hit list into the assessment object. Classification
-    is a PARTITION: every hit lands in exactly one tier (credential-shaped,
-    key-name mention, or already-masked) — totals always reconcile."""
+    is a PARTITION: every hit lands in exactly one tier (KNOWN,
+    credential-shaped, key-name mention, or already-masked) — totals
+    always reconcile. v0.5.0 (IG D57–D62/D70–D75): env_meta carries the
+    KNOWN pass results (known_sigs = {(rel, line, value)}, diagnostics,
+    disabled) — KNOWN rows classify by signature (proposal §2.2/D28),
+    counted per OCCURRENCE, value-deduped into totals.known."""
     from collections import Counter
 
+    known_sigs = (env_meta or {}).get("known_sigs") or {}
     n_tok = n_gl = n_key = n_mask = 0
     for h in all_hits:
-        cls, _rule, _rel, _line, value, _masked, _ctx = h
+        cls, _rule, rel, line, value, _masked, _ctx = h
+        if (rel, line, value) in known_sigs:
+            continue  # KNOWN rows never feed shape/mention/mask buckets
         if cls == "HIGH-CONFIDENCE":
             n_gl += 1
         elif cls == "SUSPICIOUS":
@@ -1525,6 +1566,9 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
                 n_key += 1
     n_action = n_tok + n_gl
     n_rows = 0  # unique (file, line, value) candidate rows — the canonical count
+    n_known_rows = 0  # unique (file, line, value) KNOWN rows (v0.5.0)
+    known_occ = Counter()  # value -> occurrence count (per-occurrence, D28+)
+    known_vals = {}  # value -> {type, count, fams} — distinct KNOWN values
 
     # Per-family / per-area / per-file tallies + the distinct-value proof
     # list. Real-value rows are deduped by (file, line, value) signature;
@@ -1537,13 +1581,47 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
         area = _area_of(rel)
         fe = fam.setdefault(f, {"value": 0, "masked": 0, "mentions": 0,
                                 "types": [], "areas": Counter(), "dates": set(),
-                                "display": None, "first": None})
+                                "display": None, "first": None, "known": 0})
         le = loc.setdefault(area, {"value": 0, "masked": 0, "files": set(),
-                                   "dates": set()})
+                                   "dates": set(), "known": 0})
         fe["mentions"] += 1
-        fl = files.setdefault(rel, {"total": 0, "value": 0, "key": 0, "masked": 0})
+        fl = files.setdefault(rel, {"total": 0, "value": 0, "key": 0,
+                                    "masked": 0, "known": 0})
         fl["total"] += 1
         sig = (rel, line, value)
+        if sig in known_sigs:
+            # KNOWN tier (v0.5.0): env hits carry cls="KNOWN"; shape hits
+            # with the same signature are DROPPED (never credential-shaped).
+            # Occurrence count preserves per-occurrence hits (MAJ-2 r2).
+            # Family/source_key come from the sig->key map — a collapsed
+            # shape hit's rule never misattributes the KNOWN row (MAJ-6 r3).
+            f = known_sigs[sig]
+            if cls == "KNOWN":
+                known_occ[value] += 1
+            if sig in sig_seen:
+                continue
+            sig_seen.add(sig)
+            n_known_rows += 1
+            fl["known"] += 1
+            fe["known"] += 1
+            le["known"] += 1
+            le["files"].add(rel)
+            t = "KNOWN"
+            if t not in fe["types"]:
+                fe["types"].append(t)
+            fe["areas"][area] += 1
+            d = _session_date(rel)
+            if d:
+                fe["dates"].add(d)
+                le["dates"].add(d)
+            ve = known_vals.setdefault(value, {"type": "KNOWN", "count": 0,
+                                               "fams": Counter()})
+            ve["fams"][f] += 1
+            if fe["first"] is None:
+                fe["first"] = h
+            if fe["display"] is None and _displayable_value(value):
+                fe["display"] = h
+            continue
         if sig in sig_seen:
             continue
         sig_seen.add(sig)
@@ -1580,6 +1658,9 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
         if fe["display"] is None and _displayable_value(value):
             fe["display"] = h
 
+    for v, ve in known_vals.items():
+        ve["count"] = known_occ[v]
+
     fam_attr = sum(e["value"] for f, e in fam.items() if f != "bare-token")
     unattr = fam.get("bare-token", {}).get("value", 0)
 
@@ -1590,10 +1671,11 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
         for f in ve["fams"]:
             fam_distinct[f] = fam_distinct.get(f, 0) + 1
 
-    # families: facts + redaction status (exposed / mixed / protected)
+    # families: facts + redaction status (exposed / mixed / protected);
+    # KNOWN-only families (v0.5.0) appear with value=0, known>0
     families = []
     for f, e in sorted(fam.items(), key=lambda x: -x[1]["value"]):
-        if e["value"] == 0 and e["masked"] == 0:
+        if e["value"] == 0 and e["masked"] == 0 and e["known"] == 0:
             continue
         disp = e["display"] or e["first"]
         example = None
@@ -1611,13 +1693,17 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
             status = "exposed"
         elif e["value"] > 0:
             status = "mixed"
+        elif e["known"] > 0 and e["masked"] == 0:
+            status = "exposed"  # identity-verified material at rest, unmasked
         else:
             status = "protected"
         families.append({
             "family": f, "value": e["value"], "masked": e["masked"],
+            "known": e["known"],
             "mentions": e["mentions"], "types": e["types"],
             "status": status,
-            "priority": "high" if e["value"] > 0 else "protected",
+            "priority": ("high" if e["value"] > 0 or e["known"] > 0
+                         else "protected"),
             "distinct_values": fam_distinct.get(f, e["value"]),
             "areas": dict(e["areas"]), "dates": sorted(e["dates"]),
             "example": example,
@@ -1625,15 +1711,17 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
         if shared:
             families[-1]["shared_with"] = shared
 
-    # locations: credential-shaped candidates bucketed by area
+    # locations: credential-shaped candidates bucketed by area (+ KNOWN
+    # rows counted separately, v0.5.0 — additive, never folded into
+    # credential_shaped)
     loc_items = sorted(loc.items(), key=lambda x: -x[1]["value"])
     total_val = sum(e["value"] for _, e in loc_items)
     locations = []
     for area, e in loc_items:
-        if e["value"] == 0 and e["masked"] == 0:
+        if e["value"] == 0 and e["masked"] == 0 and e["known"] == 0:
             continue
         entry = {"area": area, "credential_shaped": e["value"],
-                 "masked": e["masked"],
+                 "masked": e["masked"], "known": e["known"],
                  "percentage": (round(e["value"] * 100 / total_val, 1)
                                 if total_val else 0.0),
                  "files_affected": len(e["files"])}
@@ -1695,7 +1783,9 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
                                   "already masked in place"})
 
     # the proof list: distinct credential-shaped values, 2+2 masked,
-    # family-attributed when determinable (reviewer: never forced)
+    # family-attributed when determinable (reviewer: never forced);
+    # KNOWN rows (v0.5.0) join with known:true + source_key (D73: no
+    # value_id) — same sort, count = occurrences
     top_values = []
     for v, e in vals.items():
         fam_c = e["fams"]
@@ -1704,16 +1794,24 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
         top_values.append({"value_masked": _mask_value(v), "type": e["type"],
                            "family": fam_n, "count": e["count"],
                            "families": sorted(e["fams"])})
+    for v, e in known_vals.items():
+        fam_c = e["fams"]
+        fam_n = max(fam_c, key=lambda f: fam_c[f]) if fam_c else None
+        top_values.append({"value_masked": _mask_value(v), "type": "KNOWN",
+                           "family": fam_n, "count": e["count"],
+                           "families": sorted(e["fams"]),
+                           "known": True, "source_key": fam_n})
     top_values.sort(key=lambda x: -x["count"])
 
     affected_files = [
         {"file": rel, "total_findings": e["total"],
          "credential_shaped": e["value"], "key_name_mentions": e["key"],
-         "already_masked": e["masked"]}
+         "already_masked": e["masked"], "known": e["known"]}
         for rel, e in sorted(files.items(), key=lambda x: -x[1]["total"])]
 
     telemetry = Counter(_family_of(h[1]) for h in all_hits)
 
+    n_known = len(known_vals)
     inst = _installation_status()
     manifest = _install_manifest()
     return {
@@ -1729,21 +1827,27 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
                  "files_scanned": files_scanned, "read_only": True,
                  "gitleaks_ok": gitleaks_ok},
         "status": {
-            "severity": "high" if n_rows else "none",
-            "action_required": n_rows > 0,
-            "summary": ("Credential-shaped values were found at rest. They are "
-                        "candidates, not confirmed leaks."
-                        if n_rows else
-                        "No credential-shaped values found at rest."),
+            "severity": "high" if (n_rows or n_known_rows) else "none",
+            "action_required": n_rows > 0 or n_known_rows > 0,
+            "summary": (
+                "Credential-shaped values were found at rest. They are "
+                "candidates, not confirmed leaks."
+                if n_rows else
+                ("Your .env values were found at rest. They are identity "
+                 "matches — review whether they are still live."
+                 if n_known_rows else
+                 "No credential-shaped values found at rest.")),
             "credential_shaped": n_rows,
-            # Reserved for a future validation step (the scanner cannot
-            # know activeness); kept null so the field never drifts.
-            "confirmed_active": None,
+            # v0.5.0: True when >=1 KNOWN row; null otherwise (null = pass
+            # disabled OR pass active with no match — documented; never
+            # false in v0.5.0).
+            "confirmed_active": True if n_known_rows else None,
         },
         "totals": {"findings": len(all_hits), "credential_shaped": n_rows,
                    "raw_detections": n_action, "distinct_values": len(vals),
                    "family_attributed": fam_attr, "unattributed": unattr,
                    "key_name_mentions": n_key, "already_masked": n_mask,
+                   "known": n_known, "known_rows": n_known_rows,
                    "partition": True},
         "families": {"total_with_values": sum(1 for f in families if f["value"] > 0),
                      "complete": True, "items": families},
@@ -1775,9 +1879,12 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated):
     }
 
 
-def _print_clean(a):
+def _print_clean(a, env_meta=None):
     """Clean-scan report: header + STATUS 🟢 + EXECUTIVE SUMMARY with what
-    it means/doesn't. No findings sections, no appendices."""
+    it means/doesn't. No findings sections, no appendices. v0.5.0: the
+    KNOWN section (disabled line / source diagnostics) still appears when
+    the env pass is off — exactly one disabled line, plus one diagnostic
+    per unavailable source (plan A1.5 matrix)."""
     t = a["totals"]
     nf = a["scan"]["files_scanned"]
     nm = t["already_masked"]
@@ -1789,6 +1896,13 @@ def _print_clean(a):
     print(f"  🟠 {_n(t['findings']):<8} finding{'s' if t['findings'] != 1 else ''} — key-name mentions and already-masked only")
     print(f"  🟠 {_n(nf):<8} file{'s' if nf != 1 else ''} scanned")
     print(f"  🛡️ {_n(nm):<8} occurrence{'s' if nm != 1 else ''} already masked (prevention layer working)")
+    if env_meta and (env_meta.get("diagnostics") or env_meta.get("disabled")):
+        print()
+        print("KNOWN (your .env values)")
+        for d in env_meta.get("diagnostics", []):
+            print(f"  {d}")
+        if env_meta.get("disabled"):
+            print(f"  {KNOWN_DISABLED_LINE}")
     print()
     print("  WHAT THIS MEANS")
     print("  No detected credential-shaped values AT REST in the scanned dirs — a")
@@ -1807,10 +1921,12 @@ def _print_clean(a):
     return 0
 
 
-def _render_assessment(a, all_hits, full):
+def _render_assessment(a, all_hits, full, env_meta=None):
     """Render the 10-section report from the assessment object (the
     presentation layer). Sections appear only when their data is non-empty;
-    the tier partition is stated explicitly (reviewer fix #5)."""
+    the tier partition is stated explicitly (reviewer fix #5). v0.5.0:
+    env_meta carries KNOWN-pass presentation facts (diagnostics, disabled,
+    known_files — text-only, never serialized)."""
     t = a["totals"]
     nf = a["scan"]["files_scanned"]
     print(f"Info Guard v{_PACKAGE_VERSION} — Preflight Security Assessment")
@@ -1825,8 +1941,8 @@ def _render_assessment(a, all_hits, full):
         print("Engine: Info Guard NOT INSTALLED — decide step (no redaction engine active)")
     print(f"SCOPE: {' · '.join(a['scan']['dirs'])} — {_n(nf)} file{'s' if nf != 1 else ''}")
     print()
-    if not t["credential_shaped"]:
-        return _print_clean(a)
+    if not t["credential_shaped"] and not t.get("known", 0):
+        return _print_clean(a, env_meta)
 
     # ── STATUS ─────────────────────────────────────────────────────────
     print("STATUS: 🔴 ACTION REQUIRED")
@@ -1839,6 +1955,10 @@ def _render_assessment(a, all_hits, full):
     nf = a["scan"]["files_scanned"]
     nm = t["already_masked"]
     print(f"  🔴 {_n(t['credential_shaped']):<8} credential-shaped candidates (values that look like real secrets)")
+    n_known = t.get("known", 0)
+    if n_known:
+        m_files = len((env_meta or {}).get("known_files", set()))
+        print(f"  🔵 {KNOWN_SUMMARY_CARD.format(n=n_known, m=m_files)}")
     parts = [f"{_n(t['family_attributed'])} family-attributed"]
     if t["unattributed"]:
         parts.append(f"{_n(t['unattributed'])} unattributed (generic token shapes)")
@@ -1865,6 +1985,8 @@ def _render_assessment(a, all_hits, full):
         tsum = "token-shaped"
     print(f"  • The {_n(t['credential_shaped'])} candidates are token-shaped values ({tsum}); only you")
     print("    can confirm which are live (see CREDENTIAL EXPOSURE BY FAMILY).")
+    if n_known:
+        print(f"  • {_n(n_known)} known .env value{'s' if n_known != 1 else ''} {KNOWN_IDENTITY_NOTE}.")
     sess = next((l for l in a["locations"] if l["area"] == "sessions"), None)
     tot = sum(l["credential_shaped"] for l in a["locations"])
     if sess and tot and sess["credential_shaped"] >= tot / 2:
@@ -1879,6 +2001,15 @@ def _render_assessment(a, all_hits, full):
             verb = "are" if len(prot) > 1 else "is"
             print(f"  • Redaction is working: {names} {verb} already masked in the source.")
     print()
+
+    # ── KNOWN (your .env values) — pass state section (v0.5.0) ────────
+    if env_meta and (env_meta.get("diagnostics") or env_meta.get("disabled")):
+        print("KNOWN (your .env values)")
+        for d in env_meta.get("diagnostics", []):
+            print(f"  {d}")
+        if env_meta.get("disabled"):
+            print(f"  {KNOWN_DISABLED_LINE}")
+        print()
 
     # ── CREDENTIAL EXPOSURE BY FAMILY ──────────────────────────────────
     # Merged table: candidates + the 2+2 proof value + redaction status
@@ -1910,11 +2041,18 @@ def _render_assessment(a, all_hits, full):
                 val += f" ({_n(n_more)} more)"
             if r.get("shared_with"):
                 val += "†"
+        elif r.get("known", 0) > 0:
+            qty = f"{_n(r['known'])} known"
+            ex = r.get("example")
+            val = ex["value_masked"] if ex else "—"
         else:
             qty = f"{_n(r['masked'])} masked"
             val = "—"
+        status_label = (st_icon.get(r["status"], r["status"])
+                        if r["value"] > 0 or r.get("known", 0) == 0
+                        else "🔵 Known")
         print(f"  {_family_label(r['family'])[:32]:<34} {typ[:22]:<24} {qty:>8}  {val:<18} "
-              f"{st_icon.get(r['status'], r['status'])}")
+              f"{status_label}")
     if n_prot > 10:
         print(f"  …showing top 10 of {_n(n_prot)} protected families "
               "(`--full` lists every row)")
@@ -1954,6 +2092,9 @@ def _render_assessment(a, all_hits, full):
         if l["credential_shaped"] > 0:
             plural = "s" if l["credential_shaped"] != 1 else ""
             left = f"{_n(l['credential_shaped'])} credential-shaped candidate{plural} · {masked} masked"
+        elif l.get("known", 0) > 0:
+            kplural = "s" if l["known"] != 1 else ""
+            left = f"{_n(l['known'])} known .env value{kplural} · {masked} masked"
         else:
             left = f"{masked} masked occurrences"
         st = st_icon.get(l.get("status"), "")
@@ -1973,30 +2114,35 @@ def _render_assessment(a, all_hits, full):
         print("  retained historical exposure rather than a current logging failure.")
     else:
         areas = ", ".join(l["area"] for l in a["locations"]
-                          if l["credential_shaped"] > 0)
+                          if l["credential_shaped"] > 0 or l.get("known", 0) > 0)
         print(f"  Pattern: No single area dominates — candidates are spread across {areas}.")
     print()
     print("  SHOW AFFECTED FILES (top 10)")
     for f in a["affected_files"][:10]:
         cand = f["credential_shaped"]
+        n_kn = f.get("known", 0)
         find_plural = "s" if f["total_findings"] != 1 else ""
-        if cand:
+        if cand or n_kn:
             cand_plural = "s" if cand != 1 else ""
+            kn_suffix = (f" · {_n(n_kn)} known" if n_kn else "")
             print(f"  {f['file'][:56]:<58} {_n(f['total_findings'])} finding{find_plural} "
-                  f"({_n(cand)} candidate{cand_plural})")
+                  f"({_n(cand)} candidate{cand_plural}{kn_suffix})")
         else:
             print(f"  {f['file'][:56]:<58} {_n(f['total_findings'])} finding{find_plural}")
     print()
 
     # ── RECOMMENDED ACTIONS ────────────────────────────────────────────
     print("RECOMMENDED ACTIONS")
+    if t.get("known", 0):
+        m_files = len((env_meta or {}).get("known_files", set()))
+        print(f"  🔵 {KNOWN_ACTIONS_LINE.format(n=t['known'], m=m_files)}")
     icons = {"high": "🔴", "medium": "🟠", "low": "🟡", "info": "🟢"}
     for r in a["recommendations"]:
         print(f"  {icons.get(r['priority'], '•')} {r['step']}. {r['title']} — {r['detail']}")
     print()
     print("  The tiers above are mutually exclusive: every finding is classified")
-    print("  into exactly one — credential-shaped, key-name mention, or already")
-    print("  masked.")
+    print("  into exactly one — KNOWN (your .env values), credential-shaped,")
+    print("  key-name mention, or already masked.")
     print()
 
     # ── APPENDIX B — finding ledger (sample or --full complete) ────────
@@ -2079,18 +2225,198 @@ def _render_assessment(a, all_hits, full):
             print()
         print("  Known false-positive classes: code identifiers (password_hash =),")
         print("  config examples in docs, harmless IDs matching token prefixes.")
-    return 1 if t["credential_shaped"] > 0 else 0
+    return 1 if (t.get("known", 0) > 0 or t["credential_shaped"] > 0) else 0
 
 
-def _collect_hits(dirs, redact=True):
-    """Shared scan used by preflight and setup. Returns (all_hits,
-    gitleaks_ok) with 7-tuples (cls, rule, rel, line, value, masked, ctx).
+# ── KNOWN tier wording (v0.5.0, IG D57–D62/D70–D75) ──────────────────
+# Canonical message constants (plan B5, NIT-2): docs + tests reference
+# these exact strings; never drift. Vocabulary contract (D60): never
+# "leak"/"confirmed"; "matches a current eligible .env value; review
+# whether it is still live" (r3 NIT-3).
+KNOWN_SUMMARY_CARD = "KNOWN (your .env values) — {n} in {m} files"
+KNOWN_ACTIONS_LINE = ("{n} known .env values at rest in {m} files — "
+                      "review/rotate if still live")
+KNOWN_DISABLED_LINE = "KNOWN pass: no .env sources — disabled"
+KNOWN_IDENTITY_NOTE = ("matches a current eligible `.env` value; review "
+                       "whether it is still live")
+
+# Candidate grammar for the env exact-value pass (v0.5.0, proposal §2.1.6):
+# value-like runs of these chars, length >= 8. Quote chars are NOT in the
+# class — surrounding quotes delimit runs (no strip step); a value with an
+# INTERIOR quote can never be a candidate (documented exclusion).
+_ENV_EXACT_RE = re.compile(r"[A-Za-z0-9_\-./+=:@%?&~#]{8,}")
+_ENV_VALUE_MAX = 4096          # values > 4 KB skipped (documented envelope)
+_ENV_SOURCE_MAX = 2 * 1024 * 1024  # sources > 2 MB skipped (documented envelope)
+_ENV_LINE_CAP = 256            # per-line candidate cap (over-limit lines
+                               # skipped for the env pass only, r3 MIN-4)
+
+# Typed internal error codes for the sanitized adapter (plan A1.7): raw
+# values never appear in exception args — only these codes cross the
+# env-pass boundary.
+ENV_SOURCE_UNREADABLE = "ENV_SOURCE_UNREADABLE"
+ENV_SOURCE_MALFORMED = "ENV_SOURCE_MALFORMED"
+ENV_PASS_INTERNAL = "ENV_PASS_INTERNAL"
+
+
+def _env_sources():
+    """Discover + classify env sources ONCE per preflight run (plan A1.5).
+
+    Returns (index, sources, diagnostics):
+      index      — {sha256(value): [keys...]} for eligible parsed values
+                    (digest map ONLY — raw values never stored, never a
+                    lookup key; proposal §2.1.5 letter, MAJ-1 r2)
+      sources    — [{path, status: ok|unreadable|malformed, real: Path,
+                     dev: int|None, ino: int|None}] — identity snapshot
+                    (realpath + st_dev/st_ino where available) taken
+                    BEFORE the candidate loop (MAJ-4 r1 ordering)
+      diagnostics— pre-formatted masked lines, TEXT-ONLY (one per
+                    unreadable|malformed source; never for absent/ok)
+
+    Status rules (plan A1.5/A17 truth table): absent = not returned by
+    _default_sources() (no diagnostic); unreadable = read fails;
+    malformed = saw_content AND NOT saw_valid_entry (non-empty, zero
+    valid entries); ok = saw_valid_entry OR zero-line empty file.
+    Zero sources ok -> pass disabled (caller decides).
+    """
+    index, sources, diagnostics = {}, [], []
+    for path in _default_sources():
+        entry = {"path": path, "status": "ok", "real": None,
+                 "dev": None, "ino": None}
+        try:
+            try:
+                st = path.stat()
+                entry["dev"], entry["ino"] = st.st_dev, st.st_ino
+            except OSError:
+                pass  # stat failure -> path-only identity (MIN-1 r2)
+            entry["real"] = os.path.realpath(str(path))
+            size = path.stat().st_size
+            if size > _ENV_SOURCE_MAX:
+                entry["status"] = "malformed"
+                diagnostics.append(f"KNOWN pass: source {path.name} "
+                                   "malformed — skipped")
+                sources.append(entry)
+                continue
+            text = path.read_text(errors="replace")
+        except OSError:
+            entry["status"] = "unreadable"
+            diagnostics.append(f"KNOWN pass: source {path.name} "
+                               "unreadable — skipped")
+            sources.append(entry)
+            continue
+        entries, saw_content, saw_valid = _parse_env_lines(
+            text.splitlines())
+        if saw_content and not saw_valid:
+            entry["status"] = "malformed"
+            diagnostics.append(f"KNOWN pass: source {path.name} "
+                               "malformed — skipped")
+            sources.append(entry)
+            continue
+        for k, v in entries.items():
+            if _is_non_secret_key(k):
+                continue
+            if len(v) < 8 or v in _TRIVIAL_VALUES or len(v) > _ENV_VALUE_MAX:
+                continue
+            d = _sha(v)
+            index.setdefault(d, [])
+            if k not in index[d]:
+                index[d].append(k)
+        sources.append(entry)
+    return index, sources, diagnostics
+
+
+def _env_scan_line(line, index):
+    """Candidate extraction + digest intersection for ONE line (plan
+    A1.1). Returns [(digest, raw_candidate)] — raw candidates used ONLY
+    for the hit tuple's value/mask, NEVER as a lookup key or exception
+    payload (non-disclosure hard boundary). Empty on error (never raises
+    with a raw value)."""
+    out = []
+    try:
+        for m in _ENV_EXACT_RE.finditer(line):
+            cand = m.group(0)
+            if len(cand) > _ENV_VALUE_MAX:
+                continue
+            d = _sha(cand)
+            if d in index:
+                out.append((d, cand))
+            if len(out) >= _ENV_LINE_CAP:
+                break
+    except Exception:
+        return []
+    return out
+
+
+def _env_scan_file(path, index, src_ids):
+    """Env pass over ONE candidate file (plan A1.1/A2 call graph: each
+    file visited exactly once). Self-match exclusion (r3 CRIT-2, MAJ-4):
+    skip when canonical path OR (st_dev, st_ino) matches a source
+    identity. Returns (hits, sigs) where hits = env-known 7-tuples
+    (one per OCCURRENCE — same-line repeats yield multiple hits, count
+    preserved) and sigs = {(rel, line, value): source_key} for
+    classification (the KEY travels with the signature so a collapsed
+    shape hit can never misattribute the KNOWN family — MAJ-6 r3)."""
+    hits, sigs = [], {}
+    try:
+        st = path.stat()
+        dev, ino = st.st_dev, st.st_ino
+    except OSError:
+        dev, ino = None, None
+    real = os.path.realpath(str(path))
+    for src in src_ids:
+        if real == src["real"]:
+            return hits, sigs
+        if (dev is not None and src["dev"] is not None
+                and ino is not None and src["ino"] is not None
+                and dev == src["dev"] and ino == src["ino"]):
+            return hits, sigs
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return hits, sigs
+    rel = os.path.relpath(str(path), str(_HERMES_HOME))
+    for lineno, line in enumerate(text.splitlines(), 1):
+        for d, cand in _env_scan_line(line, index):
+            key = sorted(index[d])[0]  # alphabetically first key
+            ctx = line[max(0, line.find(cand) - 40):
+                       line.find(cand) + len(cand) + 80]
+            ctx = re.sub(re.escape(cand), "***", ctx, count=1)
+            hits.append(("KNOWN", f"known-env:{key}", rel, lineno, cand,
+                         _mask_value(cand), ctx))
+            sigs[(rel, lineno, cand)] = key
+    return hits, sigs
+
+
+def _collect_hits(dirs, redact=True, env_pass=False):
+    """Shared scan used by preflight, watch and setup. Returns
+    (all_hits, gitleaks_ok, env_meta) with 7-tuples
+    (cls, rule, rel, line, value, masked, ctx).
 
     redact=False is for the setup wizard ONLY: gitleaks findings must
     carry their real value so the user can register it (the wizard never
     echoes it — it goes straight into custom_literals.json). Preflight
-    stays redact=True (read-only, values blanked)."""
+    stays redact=True (read-only, values blanked).
+
+    env_pass=True (preflight ONLY — IG D71 hard boundary): the KNOWN
+    exact-value pass runs per file after _key_scan. watch and setup call
+    this unchanged (env_pass=False) — watch's _watch_values consumes
+    every hit, so an unconditioned env pass would alter watch baselines
+    (D71: no watch changes). env_meta = {"known_sigs": {(rel,line,value):
+    source_key}, "diagnostics": [...], "disabled": bool, "known_files":
+    set} or None when env_pass=False."""
     all_hits, gitleaks_ok = [], True
+    env_meta = None
+    if env_pass:
+        try:
+            index, src_ids, diagnostics = _env_sources()
+        except BaseException:
+            # Sanitized adapter (plan A1.7): unexpected env-pass failure
+            # degrades to disabled — generic, no raw values anywhere.
+            index, src_ids, diagnostics = {}, [], []
+            diagnostics.append(f"KNOWN pass: {ENV_PASS_INTERNAL} — disabled")
+        env_meta = {"known_sigs": {}, "diagnostics": diagnostics,
+                    "disabled": not any(s["status"] == "ok"
+                                        for s in src_ids),
+                    "known_files": set()}
     for d in dirs:
         for p in sorted(d.rglob("*")):
             if not p.is_file():
@@ -2099,12 +2425,28 @@ def _collect_hits(dirs, redact=True):
                 all_hits.append((hit[0], hit[1],
                                  os.path.relpath(str(p), str(_HERMES_HOME)),
                                  *hit[2:]))
+            if env_pass:
+                try:
+                    ehits, esigs = _env_scan_file(p, index, src_ids)
+                except BaseException:
+                    # Sanitized adapter (plan A1.7): a per-file env-pass
+                    # failure degrades to a generic diagnostic — no raw
+                    # values anywhere; other files and detectors continue.
+                    ehits, esigs = [], {}
+                    env_meta["diagnostics"].append(
+                        f"KNOWN pass: {ENV_PASS_INTERNAL} — file skipped")
+                env_meta["known_sigs"].update(esigs)
+                for h in ehits:
+                    all_hits.append(h)
+                if ehits:
+                    env_meta["known_files"].add(
+                        os.path.relpath(str(p), str(_HERMES_HOME)))
         ghits, ok = _gitleaks_scan(d, redact=redact)
         gitleaks_ok = gitleaks_ok and ok
         for cls, rule, fname, line, value, masked, ctx in ghits:
             rel = os.path.relpath(fname, str(_HERMES_HOME)) if fname else str(d)
             all_hits.append((cls, rule, rel, line, value, masked, ctx))
-    return all_hits, gitleaks_ok
+    return all_hits, gitleaks_ok, env_meta
 
 
 # The 5 files the patch touches, with a marker per file. All present =
@@ -2521,7 +2863,7 @@ def cmd_setup(args):
     _ensure_gitleaks()
     print(f"[info-guard] setup — scanning {len(dirs)} dirs under {_HERMES_HOME} "
           f"(read-only scan; only your confirmed choices write anything)")
-    all_hits, gitleaks_ok = _collect_hits(dirs, redact=False)
+    all_hits, gitleaks_ok, _env_meta = _collect_hits(dirs, redact=False)
     if not gitleaks_ok:
         print("[info-guard] setup: ⚠ gitleaks not found on PATH — key-shape pass only")
     from collections import OrderedDict

@@ -143,11 +143,15 @@ means every raw hit is classified into exactly one of:
 | `raw_detections` | credential-shaped HITS: token-format values + gitleaks HIGH-CONFIDENCE, before dedup | `n_tok + n_gl` |
 | `credential_shaped` | the canonical candidate count: one per unique `file:line:value` ROW (duplicate detector fires collapsed) — the headline; family, location and affected-file tables all sum to it | deduped |
 | `distinct_values` | the rotate list: distinct credential-shaped values across the scan | value-dedup |
+| `known` | distinct KNOWN `.env` values (v0.5.0 — identity-verified, the new tier) | value-dedup |
+| `known_rows` | distinct KNOWN rows (v0.5.0 — `file:line:value` level; `known ≤ known_rows`, the partition reconciliation) | deduped |
 | `key_name_mentions` | everything else that isn't masked — lines that mention a secret-sounding key, including reference/noise rows (code refs `${…}`, paths, markup; future v2 may split a 4th `reference_noise` tier) | `n_key` |
 | `already_masked` | values already `***` in the source (prevention layer working) | `n_mask` |
 
-`findings = raw_detections + key_name_mentions + already_masked`, exactly
-(the partition holds over raw hits). `credential_shaped = family_attributed
+`findings = known + raw_detections + key_name_mentions + already_masked`, exactly
+(the partition holds over raw hits at ROW level — each `file:line:value`
+row is exactly one tier; `known` is the distinct-value rollup of the KNOWN
+rows, so `known ≤ known_rows`). `credential_shaped = family_attributed
 + unattributed` in the common case — `family_attributed` = credential-shaped
 values tied to a known secret family (key name on the hit line, or a
 gitleaks RuleID); `unattributed` = generic token-shaped values with no key
@@ -164,8 +168,14 @@ defaults to `true` — the scan computes exact counts in memory; caps apply at
 render time, and renderers must surface them ("top 15 of N").
 
 **`status.severity`:** `none | low | medium | high` (none = clean).
-`confirmed_active` is `null` in v1 (the scanner cannot know); a future
-validation step fills `{"confirmed_active": n, "confirmed_inactive": n,
+`confirmed_active` is `null` by default (the scanner cannot know
+activeness); v0.5.0 activates it in place: `true` when ≥1 KNOWN `.env`
+row exists, `null` otherwise. `null` deliberately covers BOTH "KNOWN
+pass disabled" (no usable `.env` sources) and "pass active, no match" —
+the two are not distinguished in v0.5.0 (documented; the text report's
+disabled line is the human-facing distinction). No `false` state exists
+in v0.5.0. A future validation step may fill
+`{"confirmed_active": n, "confirmed_inactive": n,
 "unverified": n}` without a schema change.
 
 **`locations[].percentage`** is a stored derived fact (`credential_shaped / Σ`),
@@ -196,6 +206,23 @@ key family or a file/area (e.g. `logs/agent.log`).
 **`top_values[].family`** is nullable — only set when the scanner can
 attribute the value to a family; `value_masked` is the scanner's actual 2+2
 mask, never re-formatted.
+
+**KNOWN rows (v0.5.0, IG D57–D62/D70–D75):** a KNOWN row is
+identity-verified — the value matches a current eligible `.env` source
+value. Row rules, enforced across every row-bearing path (`top_values[]`,
+`families.items[]`, `locations[]`, `affected_files[]`):
+- KNOWN rows REQUIRE `known: true` and a non-empty `source_key` (the
+  alphabetically-first env key across sources) and carry
+  `type: "KNOWN"` in `top_values`; `count` = occurrences (per-occurrence,
+  incl. same-line repeats).
+- non-KNOWN rows MUST NOT carry `known`/`source_key` — absent, never null.
+- no `value_id` on any row in v0.5.0 (deferred, IG D73).
+- `families.items[].known`, `locations[].known`, `affected_files[].known`
+  are additive per-path KNOWN-row counts (0 or more; `known` is a
+  distinct-VALUE count at the totals level, a ROW count at path level).
+- The KNOWN tier wins a `file:line:value` row over shape detectors
+  (identity beats shape-guess; the dropped shape row is never counted as
+  credential-shaped).
 
 **Masking discipline:** every value in the assessment is masked
 (`value_masked`) — raw values never enter the JSON. The watch baseline

@@ -8,7 +8,9 @@
 # info-guard/assessment/v1) from a 4-file fixture that exercises every
 # report tier: key-shape hits, known-prefix bare tokens, a value shared
 # across two key names (dagger footnotes), already-masked rows, and a
-# session-timestamp date range.
+# session-timestamp date range. v0.5.0: the fixture also carries a .env
+# source + a bare at-rest occurrence of one eligible value, producing a
+# KNOWN (your .env values) row.
 #
 # The fixture values are SYNTHETIC and runtime-constructed by string
 # concatenation — canonical fake secrets (key_..., ghp_..., sk-...)
@@ -28,18 +30,18 @@ mkdir -p "$DEMO/cron/output" "$DEMO/logs" "$DEMO/sessions"
 # token-shaped literal exists in this committed file — canonical fake
 # secrets trip GitHub's push protection as literals. Shapes mirror the
 # battery's own fixture conventions:
-#   jwt   = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.<15×a|b>  (real JWT shape)
+#   jwt   = eyJhbG...VCJ9.<15×a|b>  (real JWT shape)
 #   dsc   = MTQ5MjY4NTA5Mzk0MjQ2MDE3OQ                     (Discord shape)
 #   sk-   = sk- + 28×A                                     (Anthropic shape)
 #   ghp_  = ghp_ + 38×B                                    (GitHub PAT shape)
 #   key_  = key_ + 30×C                                    (D140 shape)
-jwt_hdr="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpX""VCJ9"
-jwt_a="$jwt_hdr"".""$(printf 'a%.0s' $(seq 1 15))"
-jwt_b="$jwt_hdr"".""$(printf 'b%.0s' $(seq 1 15))"
-dsc="MTQ""5MjY4NTA5Mzk0MjQ2MDE3OQ"
-sk_val="s""k-$(printf 'A%.0s' $(seq 1 28))"
-ghp_val="gh""p_$(printf 'B%.0s' $(seq 1 38))"
-kval="ke""y_$(printf 'C%.0s' $(seq 1 30))"
+jwt_hdr="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+jwt_a="$jwt_hdr"".$(printf 'a%.0s' $(seq 1 15))"
+jwt_b="$jwt_hdr"".$(printf 'b%.0s' $(seq 1 15))"
+dsc="MTQ5MjY4NTA5Mzk0MjQ2MDE3OQ"
+sk_val="sk-$(printf 'A%.0s' $(seq 1 28))"
+ghp_val="ghp_$(printf 'B%.0s' $(seq 1 38))"
+kval="key_$(printf 'C%.0s' $(seq 1 30))"
 
 printf 'key=%s\n' "$kval" > "$DEMO/cron/output/watch.log"
 printf 'Authorization: ***\nHASS_TOKEN=%s\napi_key: ***\n' "$jwt_a" \
@@ -50,6 +52,13 @@ printf 'HASS_TOKEN=%s\nX-N8N-API-KEY: %s\nFIRECRAWL_API_KEY=***\ntoken=%s\n' \
 printf 'HASS_TOKEN=%s\nDISCORD_BOT_TOKEN=%s\nANTHROPIC_API_KEY=%s\nN8N_API_KEY=%s\nTUNNEL_TOKEN=%s\nAuthorization: ***\n' \
     "$jwt_a" "$dsc" "$sk_val" "$jwt_b" "$kval" \
     > "$DEMO/sessions/session_20260505_075138_3cf0d0a1.jsonl"
+# v0.5.0 KNOWN tier: an eligible .env value + a BARE at-rest occurrence
+# (the exact-value pass matches bare runs only — KEY=value lines are one
+# run including the key, which never equals the value). The .env source
+# itself is excluded from matching (self-match rule).
+printf 'DEMO_TOKEN=%s\n' "$kval" > "$DEMO/.env"
+printf 'bare demo token: %s\n' "$kval" \
+    >> "$DEMO/sessions/session_20260505_075138_3cf0d0a1.jsonl"
 
 # Both runs exit 1 on findings (0 = clean) — expected on this fixture;
 # tolerate 0/1, abort on anything else (usage errors).

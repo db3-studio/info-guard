@@ -41,11 +41,13 @@ PY="$(command -v python3)"
 "$PY" - "$CHECKOUT" <<'PYEOF'
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import hashlib
+from pathlib import Path
 
 CHECKOUT = sys.argv[1]
 sys.path.insert(0, CHECKOUT)
@@ -384,7 +386,7 @@ pf = subprocess.run(
 pfo = pf.stdout + pf.stderr
 check("preflight: findings exit code 1", pf.returncode == 1,
       f"rc={pf.returncode} out={pfo[-300:]!r}")
-for section in ("Info Guard v0.4.2 — Preflight Security Assessment",
+for section in ("Info Guard v0.5.0 — Preflight Security Assessment",
                 "STATUS", "EXECUTIVE SUMMARY", "WHAT MATTERS",
                 "CREDENTIAL EXPOSURE BY FAMILY",
                 "EXPOSURE LOCATIONS",
@@ -481,7 +483,7 @@ ver = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
     capture_output=True, text=True, timeout=60)
 check("--version prints the package version",
-      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.4.2",
+      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.5.0",
       f"rc={ver.returncode} out={ver.stdout.strip()!r}")
 
 # 12d. detection gaps (v0.3.1): Authorization family + dot-structured
@@ -1647,6 +1649,734 @@ l12j = json.loads(l12.stdout)
 check("value_id D12: full-mask entry lists as ***",
       any(r["value_masked"] == "***" for r in l12j["literals"]),
       f"out={l12j!r}")
+
+# ── 21. env-value KNOWN tier (v0.5.0, IG D57–D62/D70–D75; A1–A18) ──
+IG = os.path.join(os.getcwd(), "bin", "info-guard")
+
+def ig_run(home, args, cwd=None, extra_env=None):
+    env = dict(os.environ)
+    env["HERMES_HOME"] = home
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run([sys.executable, IG] + args, env=env,
+                          capture_output=True, text=True, timeout=300,
+                          cwd=cwd)
+
+def mkhome(*subs):
+    h = os.path.join(tmp, "env-home-" + str(len(os.listdir(tmp)) + 1))
+    for s in subs:
+        os.makedirs(os.path.join(h, s), exist_ok=True)
+    return h
+
+# Fixture values (synthetic, runtime-constructed).
+envval = "ig" + "env" + "val" + "9" + "q2x7"          # 14 chars
+envval2 = "ig" + "env" + "val" + "B" + "8w3m"         # different value
+
+# ── A1: bare known value → KNOWN row masked, exit 1 ──
+h1 = mkhome("sessions", "logs", "cron/output")
+with open(os.path.join(h1, ".env"), "w") as f:
+    f.write(f"UNIFI_SSH={envval}\n")
+with open(os.path.join(h1, "sessions", "s1.jsonl"), "w") as f:
+    f.write(f"the token is {envval} here\n")
+r1 = ig_run(h1, ["preflight"])
+check("A1: bare known value → exit 1", r1.returncode == 1,
+      f"rc={r1.returncode} out={r1.stdout[-200:]!r}")
+check("A1: KNOWN summary card present",
+      f"KNOWN (your .env values) — 1 in 1 files" in r1.stdout)
+check("A1: value masked (2+2), raw never printed",
+      envval not in r1.stdout + r1.stderr
+      and f"{envval[:2]}..." in r1.stdout)
+check("A1: identity wording — KNOWN rows never leak/confirmed (D60)",
+      "review whether it is still live" in r1.stdout
+      and "confirmed leak" not in
+      r1.stdout[r1.stdout.find("KNOWN (your .env values)"):]
+      if "KNOWN (your .env values)" in r1.stdout else False)
+
+# ── A2: eligibility table (in/out cases) ──
+h2 = mkhome("sessions")
+with open(os.path.join(h2, ".env"), "w") as f:
+    f.write(f"UNIFI_SSH={envval}\n"      # eligible (secret class)
+            f"AGH_PIN=12345678\n"        # eligible — closes the PIN gap
+            f"AGH_USER={envval2}\n"      # NON-secret → excluded
+            f"UNIFI_HOST=192.168.2.1\n"  # NON-secret → excluded
+            f"MY_PORT=8080\n")           # NON-secret → excluded
+with open(os.path.join(h2, "sessions", "s2.jsonl"), "w") as f:
+    f.write(f"{envval} {envval2} 12345678 192.168.2.1 8080\n")
+r2 = ig_run(h2, ["preflight", "--json"])
+o2 = json.loads(r2.stdout)
+tv2 = [v for v in o2["top_values"] if v.get("known")]
+keys2 = sorted(v.get("source_key") for v in tv2)
+check("A2: eligible keys only in KNOWN set",
+      keys2 == ["AGH_PIN", "UNIFI_SSH"],
+      f"known keys={keys2}")
+check("A2: non-secret key values never KNOWN",
+      all(v["source_key"] not in ("AGH_USER", "UNIFI_HOST", "MY_PORT")
+          for v in tv2))
+
+# ── A3: length floor (7 not matched, 8 matched) ──
+h3 = mkhome("sessions")
+with open(os.path.join(h3, ".env"), "w") as f:
+    f.write("SEVEN7=abcdefg\nEIGHT8=abcdefgh\n")   # 7 vs 8 chars
+with open(os.path.join(h3, "sessions", "s3.jsonl"), "w") as f:
+    f.write("abcdefg abcdefgh\n")
+r3 = ig_run(h3, ["preflight", "--json"])
+o3 = json.loads(r3.stdout)
+tv3 = [v.get("source_key") for v in o3["top_values"] if v.get("known")]
+check("A3: 7-char never hashed/matched, 8-char matched",
+      tv3 == ["EIGHT8"], f"known={tv3}")
+
+# ── A4: env pass ignores custom_literals; literal detector unchanged ──
+h4 = mkhome("sessions")
+os.makedirs(os.path.join(h4, "state", "info-guard"), exist_ok=True)
+with open(os.path.join(h4, ".env"), "w") as f:
+    f.write(f"REAL_KEY={envval}\n")
+lit4 = "ig" + "literal" + "only" + "x4"          # in registry, NOT in .env
+with open(os.path.join(h4, "state", "info-guard",
+                       "custom_literals.json"), "w") as f:
+    json.dump({"version": 2, "literals": [lit4]}, f)
+with open(os.path.join(h4, "sessions", "s4.jsonl"), "w") as f:
+    f.write(f"{envval} {lit4}\n")
+r4 = ig_run(h4, ["preflight", "--json"])
+o4 = json.loads(r4.stdout)
+tv4 = [v.get("source_key") for v in o4["top_values"] if v.get("known")]
+check("A4: registry-only value never KNOWN; .env value is",
+      tv4 == ["REAL_KEY"], f"known={tv4}")
+
+# ── A5: trivial values excluded at any length ──
+h5 = mkhome("sessions")
+with open(os.path.join(h5, ".env"), "w") as f:
+    f.write("FLAG=undefined\nBOOL=true\n")
+with open(os.path.join(h5, "sessions", "s5.jsonl"), "w") as f:
+    f.write("undefined true\n")
+r5 = ig_run(h5, ["preflight", "--json"])
+o5 = json.loads(r5.stdout)
+check("A5: trivial values never KNOWN (incl. >=8-char trivial)",
+      o5["totals"]["known"] == 0 and o5["totals"]["known_rows"] == 0,
+      f"known={o5['totals']['known']}")
+
+# ── A6: surface audit — raw values absent from ALL surfaces ──
+# (a) code-level review assertions: digest-keyed index, no raw-value
+# interpolation in diagnostics
+igsrc = open(IG).read()
+check("A6: index is digest-keyed (sha256(value) → keys)",
+      "index.setdefault(d" in igsrc and "index.setdefault(v" not in igsrc)
+check("A6: diagnostics never carry raw values",
+      "unreadable — skipped" in igsrc and "malformed — skipped" in igsrc
+      and "diagnostics.append" in igsrc)
+# (b) malformed .env input → generic, no raw value
+h6 = mkhome("sessions")
+with open(os.path.join(h6, ".env"), "w") as f:
+    f.write(f"GOOD={envval}\n"                       # indexed (the match)
+            "this line has no equals sign and a raw "
+            f"{envval2} inside\n")                   # malformed → skipped
+with open(os.path.join(h6, "sessions", "s6.jsonl"), "w") as f:
+    f.write(f"{envval}\n")
+r6 = ig_run(h6, ["preflight"])
+check("A6: malformed .env lines skipped silently, raw absent",
+      envval not in r6.stderr and r6.returncode == 1
+      and envval2 not in r6.stderr)
+# (c) unreadable source → masked diagnostic, pass continues
+h6b = mkhome("sessions")
+with open(os.path.join(h6b, ".env"), "w") as f:
+    f.write(f"GOOD={envval2}\n")
+with open(os.path.join(h6b, "sessions", "s6b.jsonl"), "w") as f:
+    f.write(f"{envval2}\n")
+os.makedirs(os.path.join(h6b, "cwd"), exist_ok=True)
+bad6 = os.path.join(h6b, "cwd", ".env")
+with open(bad6, "w") as f:
+    f.write(f"BROKEN={envval}\n")
+os.chmod(bad6, 0)
+r6b = ig_run(h6b, ["preflight"], cwd=os.path.join(h6b, "cwd"))
+os.chmod(bad6, 0o600)
+check("A6: unreadable source → one masked diagnostic, pass active",
+      "unreadable — skipped" in r6b.stdout
+      and "KNOWN (your .env values) — 1 in 1 files" in r6b.stdout
+      and envval not in r6b.stdout + r6b.stderr,
+      f"rc={r6b.returncode}")
+# (d) monkeypatch sentinel injection at each boundary (CRIT-1 r2)
+h6c = mkhome("sessions")
+with open(os.path.join(h6c, ".env"), "w") as f:
+    f.write(f"TOK={envval}\n")
+with open(os.path.join(h6c, "sessions", "s6c.jsonl"), "w") as f:
+    f.write(f"{envval}\n")
+SENT = "IGSENTINEL" + "x9q2"
+igmod = os.path.join(tmp, "igmod.py")
+shutil.copy(IG, igmod)
+wrap = os.path.join(tmp, "igwrap.py")
+with open(wrap, "w") as f:
+    f.write("import importlib.util, sys, os\n"
+            "spec = importlib.util.spec_from_file_location("
+            f"'ig', {igmod!r})\n"
+            "m = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(m)\n"
+            f"SENT = {SENT!r}\n"
+            "def boom(*a, **k):\n"
+            "    raise RuntimeError(SENT + ' in boundary')\n"
+            "m._env_sources = boom\n"
+            "sys.exit(m.main(sys.argv[1:]))\n")
+env_w = dict(os.environ); env_w["HERMES_HOME"] = h6c
+rw = subprocess.run([sys.executable, wrap, "preflight"], env=env_w,
+                    capture_output=True, text=True, timeout=300)
+check("A6: _env_sources sentinel injection — no raw leak, generic degrade",
+      SENT not in rw.stdout + rw.stderr
+      and "ENV_PASS_INTERNAL" in rw.stdout,
+      f"rc={rw.returncode} out={rw.stdout[-150:]!r} err={rw.stderr[-150:]!r}")
+# (e) downstream failure injection in assessment path (CRIT-2 r3)
+with open(wrap, "w") as f:
+    f.write("import importlib.util, sys, os\n"
+            "spec = importlib.util.spec_from_file_location("
+            f"'ig', {igmod!r})\n"
+            "m = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(m)\n"
+            f"SENT = {SENT!r}\n"
+            "def boom(*a, **k):\n"
+            "    raise RuntimeError(SENT + ' in assessment')\n"
+            "m._build_assessment = boom\n"
+            "sys.exit(m.main(sys.argv[1:]))\n")
+rw2 = subprocess.run([sys.executable, wrap, "preflight", "--json"],
+                     env=env_w, capture_output=True, text=True, timeout=300)
+check("A6: assessment-path sentinel injection — generic, no leak, no partial JSON",
+      SENT not in rw2.stdout + rw2.stderr
+      and "internal error" in rw2.stderr and rw2.returncode == 1
+      and not rw2.stdout.strip().startswith("{"),
+      f"rc={rw2.returncode} out={rw2.stdout[-120:]!r} err={rw2.stderr[-120:]!r}")
+
+# ── A7: no sources → one disabled line + null + 0; golden ──
+h7 = mkhome("sessions", "logs", "cron/output")
+with open(os.path.join(h7, "sessions", "s7.jsonl"), "w") as f:
+    f.write("plain text only, no secrets\n")
+r7 = ig_run(h7, ["preflight"])
+check("A7: no sources → exactly one disabled line",
+      r7.stdout.count("KNOWN pass: no .env sources — disabled") == 1,
+      f"out={r7.stdout[-300:]!r}")
+r7j = ig_run(h7, ["preflight", "--json"])
+o7 = json.loads(r7j.stdout)
+check("A7: no sources → confirmed_active null + known 0",
+      o7["status"]["confirmed_active"] is None
+      and o7["totals"]["known"] == 0 and o7["totals"]["known_rows"] == 0)
+# A7b: active pass with valid source but zero matches → null, NO disabled line
+h7b = mkhome("sessions")
+with open(os.path.join(h7b, ".env"), "w") as f:
+    f.write(f"TOK={envval}\n")
+with open(os.path.join(h7b, "sessions", "s7b.jsonl"), "w") as f:
+    f.write("nothing matching here\n")
+r7b = ig_run(h7b, ["preflight"])
+check("A7b: active/no-match → no disabled line, null, exit 0",
+      "KNOWN pass: no .env sources — disabled" not in r7b.stdout
+      and json.loads(ig_run(h7b, ["preflight", "--json"]).stdout)
+      ["status"]["confirmed_active"] is None
+      and r7b.returncode == 0)
+
+# ── A9: self-match exclusion (direct/relative/symlink/hard-link) ──
+h9 = mkhome("sessions", "logs", "cron/output")
+with open(os.path.join(h9, ".env"), "w") as f:
+    f.write(f"HASS_TOKEN={envval}\n")
+with open(os.path.join(h9, "sessions", "s9.jsonl"), "w") as f:
+    f.write(f"bare {envval} occurrence\n")   # the real match
+os.symlink(os.path.join(h9, ".env"), os.path.join(h9, "sessions", "envlink"))
+os.link(os.path.join(h9, ".env"), os.path.join(h9, "logs", "envhard"))
+r9 = ig_run(h9, ["preflight", "--json"])
+o9 = json.loads(r9.stdout)
+# The .env itself + symlink + hard link must never be KNOWN rows; the
+# session file's bare occurrence is the ONLY known row.
+known_files9 = [f["file"] for f in o9["affected_files"] if f.get("known", 0) > 0]
+check("A9: self-match excluded (direct/symlink/hard-link)",
+      known_files9 == ["sessions/s9.jsonl"],
+      f"known files={known_files9}")
+check("A9: .env source itself never a finding of any tier",
+      all(".env" not in f["file"] or f["total_findings"] == 0
+          for f in o9["affected_files"]))
+# A9b (MAJ-3 r2): stat-failure fallback (path-only identity) + file
+# replacement between discovery and read (new inode, same path)
+h9b = mkhome("sessions", "logs")
+env9b = os.path.join(h9b, ".env")
+with open(env9b, "w") as f:
+    f.write(f"TOK9B={envval}\n")
+# replacement-between-discovery-and-read: monkeypatched stat failing
+# on the candidate file forces path-only identity; then the source file
+# is REPLACED (new inode) before the env pass reads it — the snapshot
+# (old inode) must not disable matching of the NEW source content.
+with open(os.path.join(h9b, "sessions", "s9b.jsonl"), "w") as f:
+    f.write(f"{envval}\n")
+env9b_env = dict(os.environ); env9b_env["HERMES_HOME"] = h9b
+import importlib.util as _ilu9
+_ig9 = os.path.join(tmp, "igmod9.py")
+shutil.copy(IG, _ig9)
+_ig9s = _ilu9.spec_from_file_location("ig9", _ig9)
+_ig9m = _ilu9.module_from_spec(_ig9s); _ig9s.loader.exec_module(_ig9m)
+_orig_stat = os.stat
+def _fail_stat(p, *a, **k):
+    if str(p).endswith("s9b.jsonl"):
+        raise OSError("stat denied (probe)")
+    return _orig_stat(p, *a, **k)
+_ig9m.os.stat = _fail_stat
+ah9, ok9, meta9 = _ig9m._collect_hits([Path(h9b) / "sessions"], env_pass=True)
+check("A9b: stat-failure on candidate → path-only identity, no crash",
+      meta9 is not None and meta9["disabled"] is False)
+# replacement: swap the .env for a new file (new inode) with a DIFFERENT
+# value; the scan file carries the NEW value; must match (snapshot was
+# taken pre-replacement — TOCTOU documented; the read-time identity
+# check uses the CURRENT stat, so the new file matches).
+os.replace(env9b, env9b + ".old")
+with open(env9b, "w") as f:
+    f.write(f"TOK9B={envval2}\n")
+with open(os.path.join(h9b, "sessions", "s9b.jsonl"), "a") as f:
+    f.write(f"{envval2}\n")
+r9b = ig_run(h9b, ["preflight", "--json"])
+o9b = json.loads(r9b.stdout)
+chk9b = [v.get("source_key") for v in o9b["top_values"] if v.get("known")]
+check("A9b: replacement between discovery and read → new value matched",
+      chk9b == ["TOK9B"] and o9b["totals"]["known"] == 1
+      and [v for v in o9b["top_values"] if v.get("known")][0]["count"] == 1,
+      f"known={chk9b}")
+
+# ── A10: confirmed_active semantics + old-consumer probe ──
+r10 = ig_run(h1, ["preflight", "--json"])     # h1 has 1 known value
+o10 = json.loads(r10.stdout)
+check("A10: known present → confirmed_active true",
+      o10["status"]["confirmed_active"] is True)
+probe = os.path.join(os.getcwd(), "tests", "consumers", "v0.4.2-json-probe.py")
+p10 = subprocess.run([sys.executable, probe], input=r10.stdout,
+                     capture_output=True, text=True, timeout=120)
+check("A10: v0.4.2-era consumer probe PASSES on v0.5.0 known output",
+      p10.returncode == 0, f"rc={p10.returncode} err={p10.stderr[-200:]!r}")
+p10b = subprocess.run([sys.executable, probe], input=r7j.stdout,
+                      capture_output=True, text=True, timeout=120)
+check("A10: v0.4.2-era consumer probe PASSES on clean output",
+      p10b.returncode == 0, f"rc={p10b.returncode} err={p10b.stderr[-200:]!r}")
+
+# ── A11: duplicate value across keys → one row, first key; N/M; counts ──
+h11 = mkhome("sessions")
+with open(os.path.join(h11, ".env"), "w") as f:
+    f.write(f"B_SECRET={envval}\nA_SECRET={envval}\n")
+with open(os.path.join(h11, "sessions", "s11.jsonl"), "w") as f:
+    f.write(f"{envval} {envval} on one line\n{envval} on another\n")
+r11 = ig_run(h11, ["preflight", "--json"])
+o11 = json.loads(r11.stdout)
+tv11 = [v for v in o11["top_values"] if v.get("known")]
+check("A11: one row per value, source_key = alphabetically first key",
+      len(tv11) == 1 and tv11[0]["source_key"] == "A_SECRET",
+      f"tv={tv11!r}")
+check("A11: same-line repeats → one row, count = occurrences",
+      o11["totals"]["known_rows"] == 2 and tv11[0]["count"] == 3,
+      f"rows={o11['totals']['known_rows']} count={tv11[0]['count']}")
+check("A11: totals.known = distinct values",
+      o11["totals"]["known"] == 1)
+# A11b (MAJ-3 r2): cross-detector collapse — a BARE token-shaped value is
+# caught by BOTH the token-prefix detector (known-prefix → bare-token
+# family) and the env pass on the same line/sig → exactly ONE KNOWN row,
+# the TOKEN-SHAPE hit dropped (never credential-shaped). A `KEY=value`
+# line of the same value is a DIFFERENT sig (the run includes `KEY=` —
+# `=` is a grammar char) so the key-shape row stays credential-shaped,
+# proving detectors stay independent where sigs differ.
+jwt12_short = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aaaabbbb"
+h11b = mkhome("sessions")
+with open(os.path.join(h11b, ".env"), "w") as f:
+    f.write(f"HASS_TOKEN={jwt12_short}\n")
+with open(os.path.join(h11b, "sessions", "s11b.jsonl"), "w") as f:
+    f.write(f"token is {jwt12_short} here\n")         # TOKEN-SHAPE + env, same sig
+    f.write(f"HASS_TOKEN={jwt12_short}\n")            # key-shape only (different sig)
+r11b = ig_run(h11b, ["preflight", "--json"])
+o11b = json.loads(r11b.stdout)
+tv11b = [v for v in o11b["top_values"] if v.get("known")]
+shape11b = [v for v in o11b["top_values"] if not v.get("known")]
+collapsed_ok = not any(v["family"] == "bare-token" for v in shape11b)
+key_shape_kept = any(v["type"] == "JWT" and v["family"] == "HASS_TOKEN"
+                     for v in shape11b)
+check("A11b: cross-detector collapse — TOKEN-SHAPE hit dropped, one KNOWN row",
+      o11b["totals"]["known"] == 1
+      and o11b["totals"]["known_rows"] == 1
+      and tv11b[0]["count"] == 1
+      and tv11b[0]["source_key"] == "HASS_TOKEN"
+      and collapsed_ok and key_shape_kept,
+      f"known={o11b['totals']['known']} rows={o11b['totals']['known_rows']} "
+      f"shape={[(v['type'], v.get('family')) for v in shape11b]}")
+
+# ── A12: punctuation values + negative fixtures + grammar parity ──
+url12 = "https://user:pass@host:8080/x?y=1#frag"
+jwt12 = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aaaa" + "bbbb"
+pct12 = "abc#def:ghi/jkl+mno=pqr"
+h12 = mkhome("sessions")
+with open(os.path.join(h12, ".env"), "w") as f:
+    # NOTE: the key must be secret-class — "URL" itself is a non-secret
+    # key class (eligibility table A2), so the URL-shaped VALUE rides a
+    # secret-class key here.
+    f.write(f"ENDPOINT_URL_VALUE={url12}\nJWT={jwt12}\nPCT={pct12}\n")
+with open(os.path.join(h12, "sessions", "s12.jsonl"), "w") as f:
+    f.write(f"{url12} {jwt12} {pct12}\n")
+    f.write("fragment of url12 only: https://user \n")   # partial → never
+r12 = ig_run(h12, ["preflight", "--json"])
+o12 = json.loads(r12.stdout)
+tv12 = sorted(v.get("source_key") for v in o12["top_values"] if v.get("known"))
+check("A12: punctuation values (URL/JWT/#/:) matched exactly",
+      tv12 == ["ENDPOINT_URL_VALUE", "JWT", "PCT"], f"known={tv12}")
+# negative fixtures: whitespace/unicode/commas/brackets/backslashes/
+# shell escapes/multi-line/interior-quote values never match
+neg_vals = ["a b c d e f g h", "cafévalue9", "a,b,c,d,e,f,g",
+            "ab[cd]efg1", "ab\\cd\\ef\\gh", "a$b$c$d$e",
+            "quo\"te9x2", "quo'te9x2", "multi\nline9x2"]
+h12n = mkhome("sessions")
+with open(os.path.join(h12n, ".env"), "w") as f:
+    for i, v in enumerate(neg_vals):
+        f.write(f"KEY{i}={v}\n")
+with open(os.path.join(h12n, "sessions", "s12n.jsonl"), "w") as f:
+    for v in neg_vals:
+        f.write(v + "\n")
+r12n = ig_run(h12n, ["preflight", "--json"])
+o12n = json.loads(r12n.stdout)
+check("A12: every excluded construct never matches (negative fixtures)",
+      o12n["totals"]["known"] == 0 and o12n["totals"]["known_rows"] == 0,
+      f"known={o12n['totals']['known']}")
+
+# ── A13: no value_id anywhere ──
+check("A13: no value_id in JSON or text",
+      "value_id" not in r10.stdout and "value_id" not in r1.stdout)
+# A13b (MIN-1 r1): recursive absence over every JSON document + surfaces
+def key_walk(o, key):
+    if isinstance(o, dict):
+        return key in o or any(key_walk(v, key) for v in o.values())
+    if isinstance(o, list):
+        return any(key_walk(v, key) for v in o)
+    return False
+check("A13b: recursive value_id absence across all generated JSON",
+      not key_walk(json.loads(r10.stdout), "value_id")
+      and not key_walk(json.loads(r7j.stdout), "value_id")
+      and not key_walk(json.loads(r11.stdout), "value_id"))
+
+# ── A12b (MIN-3 r1): size/limit boundary behavior (4 KB value, 2 MB
+# source, 256-candidate line cap) — no crash, no leak, deterministic ──
+h12b = mkhome("sessions")
+bigval = "b" * 4096                                  # exactly 4 KB
+overval = "c" * 4097                                 # > 4 KB → skipped
+with open(os.path.join(h12b, ".env"), "w") as f:
+    f.write(f"BIG4K={bigval}\nOVER={overval}\n")
+with open(os.path.join(h12b, "sessions", "s12b.jsonl"), "w") as f:
+    f.write(f"{bigval}\n{overval}\n")
+r12b = ig_run(h12b, ["preflight", "--json"])
+o12b = json.loads(r12b.stdout)
+chk12b = o12b["totals"]["known"] == 1 and o12b["totals"]["known_rows"] == 1
+chk12b = chk12b and [v for v in o12b["top_values"] if v.get("known")][0][
+    "source_key"] == "BIG4K"
+check("A12b: 4 KB value matched, >4 KB value skipped (no crash)",
+      chk12b, f"known={o12b['totals']['known']}")
+# >2 MB source → skipped with malformed diagnostic, no crash
+h12c = mkhome("sessions")
+with open(os.path.join(h12c, ".env"), "w") as f:
+    f.write(f"TOK={envval}\n")
+with open(os.path.join(h12c, "sessions", "s12c.jsonl"), "w") as f:
+    f.write(f"{envval}\n")
+big_src = os.path.join(h12c, "cwd"); os.makedirs(big_src, exist_ok=True)
+with open(os.path.join(big_src, ".env"), "w") as f:
+    f.write("# padding\n" * 300000)                  # ~3 MB
+r12c = ig_run(h12c, ["preflight"], cwd=big_src)
+check("A12c: >2 MB source skipped with diagnostic, no crash",
+      "malformed — skipped" in r12c.stdout
+      and "KNOWN (your .env values) — 1 in 1 files" in r12c.stdout,
+      f"rc={r12c.returncode}")
+# 256-candidate line cap: a line with >256 matching candidates still
+# matches deterministically and never crashes
+h12d = mkhome("sessions")
+with open(os.path.join(h12d, ".env"), "w") as f:
+    f.write(f"CAPTOK={envval}\n")
+with open(os.path.join(h12d, "sessions", "s12d.jsonl"), "w") as f:
+    f.write(" ".join([envval] * 300) + "\n")        # 300 occurrences, one line
+r12d = ig_run(h12d, ["preflight", "--json"])
+o12d = json.loads(r12d.stdout)
+tv12d = [v for v in o12d["top_values"] if v.get("known")]
+check("A12d: 256-cap line — one row, capped count, no crash",
+      o12d["totals"]["known_rows"] == 1
+      and len(tv12d) == 1 and tv12d[0]["count"] <= 256,
+      f"rows={o12d['totals']['known_rows']} count={tv12d[0]['count'] if tv12d else None}")
+
+# ── Parser characterization (MAJ-5 r1): _load_env pre/post refactor
+# byte-identical — duplicate keys, quoting/comments, invalid lines,
+# empty values, read errors, SystemExit text + type ──
+char_cases = [
+    ["A=1", "A=2"],                       # duplicate key → last wins
+    ['Q="quoted"', "SQ='sq'"],            # quoting stripped
+    ["C=val # comment", "D=hash#kept"],   # comments only when preceded by ws
+    ["bad line", "=novalue", "1BAD=x"],   # invalid → skipped
+    ["E=", "F=  "],                       # empty values
+    ["", "   ", "# only comment"],        # blank/comment lines
+]
+# Load BOTH parsers as modules: baseline = v0.4.2 binary via git show,
+# new = current binary (copied to .py for importlib, same trick as A6).
+import importlib.util as _ilu
+_base_src = subprocess.run(
+    ["git", "-C", os.getcwd(), "show", "30eb783:bin/info-guard"],
+    capture_output=True, text=True, check=True).stdout
+_base_mod = os.path.join(tmp, "ig-base.py")
+open(_base_mod, "w").write(_base_src)
+_base = _ilu.spec_from_file_location("igbase", _base_mod)
+_bm = _ilu.module_from_spec(_base); _base.loader.exec_module(_bm)
+_new = _ilu.spec_from_file_location("ignew", igmod)
+_nm = _ilu.module_from_spec(_new); _new.loader.exec_module(_nm)
+char_ok = True
+char_dir = os.path.join(tmp, "char"); os.makedirs(char_dir, exist_ok=True)
+for i, case in enumerate(char_cases):
+    p_new = os.path.join(char_dir, f"new{i}.env")
+    p_old = os.path.join(char_dir, f"old{i}.env")
+    open(p_new, "w").write("\n".join(case) + "\n")
+    open(p_old, "w").write("\n".join(case) + "\n")
+    new = _nm._load_env(Path(p_new))
+    old = _bm._load_env(Path(p_old))
+    char_ok = char_ok and new == old
+check("MAJ5: parser characterization — old vs new identical on all cases",
+      char_ok, f"cases={len(char_cases)}")
+# SystemExit text+type unchanged on unreadable source
+sys_exit_ok = True
+for fn in (_bm._load_env, _nm._load_env):
+    try:
+        fn(Path("/nonexistent/ig/.env"))
+        sys_exit_ok = False
+    except SystemExit as e:
+        sys_exit_ok = sys_exit_ok and "cannot read env source" in str(e)
+check("MAJ5: SystemExit text+type identical on unreadable source",
+      sys_exit_ok)
+
+# ── A14: perf protocol (baseline 30eb783 vs HEAD, 5k + 50k trees) ──
+base_ig = os.path.join(tmp, "ig-baseline")
+with open(base_ig, "w") as f:
+    f.write(subprocess.run(
+        ["git", "-C", os.getcwd(), "show", "30eb783:bin/info-guard"],
+        capture_output=True, text=True, check=True).stdout)
+os.chmod(base_ig, 0o755)
+
+def gen_tree(root, n_files, lines_per_file):
+    os.makedirs(os.path.join(root, "sessions"), exist_ok=True)
+    for i in range(n_files):
+        with open(os.path.join(root, "sessions", f"perf{i}.jsonl"), "w") as f:
+            for j in range(lines_per_file):
+                f.write(f"line {i}.{j} k{i}_v{j} tok{i}{j} {envval} tail\n")
+
+def median_reps(binpath, home, args, reps=3):
+    ts = []
+    for _ in range(reps):
+        env = dict(os.environ); env["HERMES_HOME"] = home
+        t0 = time.perf_counter()
+        subprocess.run([sys.executable, binpath] + args, env=env,
+                       capture_output=True, text=True, timeout=600)
+        ts.append(time.perf_counter() - t0)
+    return sorted(ts)[len(ts) // 2]
+
+for tag, nf, lpf in (("5k", 50, 100), ("50k", 500, 100)):
+    hperf = mkhome("sessions")
+    with open(os.path.join(hperf, ".env"), "w") as f:
+        f.write(f"PERF_TOK={envval}\n")
+    gen_tree(hperf, nf, lpf)
+    # warm cache (run once before timing)
+    ig_run(hperf, ["preflight"])
+    t_base = median_reps(base_ig, hperf, ["preflight"])
+    t_new = median_reps(IG, hperf, ["preflight"])
+    over = (t_new - t_base) / t_base if t_base else 1.0
+    check(f"A14: {tag}-tree overhead ≤10% or ≤5s (base {t_base:.2f}s, "
+          f"new {t_new:.2f}s, +{over*100:.0f}%)",
+          over <= 0.10 or (t_new - t_base) <= 5.0)
+    # A14b (MAJ-4 r2): --json mode complete-preflight timing + per-phase
+    # reconciliation: measure text vs json mode and the phase sum vs
+    # wall clock (±10% tolerance) on the 5k tree.
+    if tag == "5k":
+        t_json = median_reps(IG, hperf, ["preflight", "--json"])
+        # per-phase instrumentation via module import (same trick as A6):
+        env_p = dict(os.environ); env_p["HERMES_HOME"] = hperf
+        import importlib.util as _ilup
+        _igp = os.path.join(tmp, "igmodp.py")
+        shutil.copy(IG, _igp)
+        _igps = _ilup.spec_from_file_location("igp", _igp)
+        _igpm = _ilup.module_from_spec(_igps); _igps.loader.exec_module(_igpm)
+        _igpm._HERMES_HOME = Path(hperf)
+        t0 = time.perf_counter()
+        idx, srcs, diags = _igpm._env_sources()
+        t_src = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        scan_dirs = [Path(hperf) / d for d in
+                     ("sessions", "logs", "cron/output")
+                     if (Path(hperf) / d).is_dir()]
+        n_hits = 0
+        for d in scan_dirs:
+            for p in sorted(d.rglob("*")):
+                if p.is_file():
+                    eh, _es = _igpm._env_scan_file(p, idx, srcs)
+                    n_hits += len(eh)
+        t_scan = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        ah, _ok, _meta = _igpm._collect_hits(scan_dirs, env_pass=True)
+        t_with = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        _igpm._collect_hits(scan_dirs, env_pass=False)
+        t_without = time.perf_counter() - t0
+        t_env = t_with - t_without                 # env-pass marginal cost
+        check("A14b: --json mode overhead ≤10% or ≤5s "
+              f"(text {t_new:.2f}s, json {t_json:.2f}s)",
+              t_json <= t_new * 1.10 + 5.0 or t_json - t_new <= 5.0,
+              f"json={t_json:.2f}s")
+        check("A14b: env-phase sum reconciles with marginal env cost ±10% "
+              f"(src {t_src:.3f}s + scan {t_scan:.3f}s ≈ env {t_env:.3f}s)",
+              abs((t_src + t_scan) - t_env) <= 0.10 * t_env + 0.05,
+              f"sum={t_src + t_scan:.3f}s env={t_env:.3f}s hits={n_hits} "
+              f"with={t_with:.2f}s without={t_without:.2f}s")
+
+# ── A15: row-shape validation across every row-bearing path ──
+tv15 = [v for v in o11["top_values"]]
+chk15 = True
+for v in tv15:
+    if v.get("known") is True:
+        chk15 = chk15 and isinstance(v.get("source_key"), str) and v["source_key"]
+        chk15 = chk15 and v.get("type") == "KNOWN"
+    else:
+        chk15 = chk15 and "known" not in v and "source_key" not in v
+check("A15: top_values row shape (KNOWN required, non-KNOWN absent)", chk15)
+chk15b = all(isinstance(f.get("known", 0), int) for f in o11["families"]["items"])
+check("A15: families.items[].known is int", chk15b)
+chk15c = all(isinstance(l.get("known", 0), int) for l in o11["locations"])
+check("A15: locations[].known is int", chk15c)
+chk15d = all(isinstance(f.get("known", 0), int) for f in o11["affected_files"])
+check("A15: affected_files[].known is int", chk15d)
+
+# ── A16: exit matrix (single predicate, D75) ──
+h16c = mkhome("sessions")
+r16c = ig_run(h16c, ["preflight"])
+check("A16: clean → 0", r16c.returncode == 0, f"rc={r16c.returncode}")
+h16s = mkhome("sessions")
+with open(os.path.join(h16s, "sessions", "s16s.jsonl"), "w") as f:
+    f.write("HASS_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aaaaaaaaaaaaaaa\n")
+r16s = ig_run(h16s, ["preflight"])
+check("A16: shape-only → 1", r16s.returncode == 1, f"rc={r16s.returncode}")
+check("A16: known-only → 1", r1.returncode == 1, f"rc={r1.returncode}")
+h16b = mkhome("sessions")
+with open(os.path.join(h16b, ".env"), "w") as f:
+    f.write(f"TOK={envval}\n")
+with open(os.path.join(h16b, "sessions", "s16b.jsonl"), "w") as f:
+    f.write(f"{envval}\nHASS_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.bbbbbbbbbbbbbbb\n")
+r16b = ig_run(h16b, ["preflight"])
+check("A16: both → 1", r16b.returncode == 1, f"rc={r16b.returncode}")
+r16u = ig_run(h16b, ["preflight", "--json-out"])
+check("A16: usage → 2", r16u.returncode == 2, f"rc={r16u.returncode}")
+
+# ── A17: source-conflict truth table (A1.5 oracle) ──
+def env_home(s1_content, s2_content, s1_mode=0o600):
+    h = mkhome("sessions")
+    cwd = None
+    if s1_content is not None:
+        p = os.path.join(h, ".env")
+        with open(p, "w") as f:
+            f.write(s1_content)
+        os.chmod(p, s1_mode)
+    if s2_content is not None:
+        cwd = os.path.join(h, "cwd")
+        os.makedirs(cwd, exist_ok=True)
+        with open(os.path.join(cwd, ".env"), "w") as f:
+            f.write(s2_content)
+    return h, cwd
+
+def scanfile(h, content):
+    with open(os.path.join(h, "sessions", "scan17.jsonl"), "w") as f:
+        f.write(content)
+
+# absent/absent
+h, c = env_home(None, None)
+scanfile(h, "plain\n")
+ra = ig_run(h, ["preflight"], cwd=c)
+check("A17: absent/absent → disabled line + null + 0",
+      ra.stdout.count("KNOWN pass: no .env sources — disabled") == 1
+      and json.loads(ig_run(h, ["preflight", "--json"], cwd=c).stdout)
+      ["status"]["confirmed_active"] is None)
+# empty/absent → ok, no disabled
+h, c = env_home("", None)
+scanfile(h, "plain\n")
+rb = ig_run(h, ["preflight"], cwd=c)
+check("A17: empty/absent → ok, no disabled line",
+      "KNOWN pass: no .env sources — disabled" not in rb.stdout)
+# comments-only/absent → malformed → disabled
+h, c = env_home("# just a comment\n", None)
+scanfile(h, "plain\n")
+rc17 = ig_run(h, ["preflight"], cwd=c)
+check("A17: comments-only/absent → 1 diagnostic + disabled",
+      rc17.stdout.count("malformed — skipped") == 1
+      and rc17.stdout.count("KNOWN pass: no .env sources — disabled") == 1)
+# malformed-only/absent
+h, c = env_home("no equals sign here\n", None)
+scanfile(h, "plain\n")
+rd17 = ig_run(h, ["preflight"], cwd=c)
+check("A17: malformed-only/absent → 1 diagnostic + disabled",
+      rd17.stdout.count("malformed — skipped") == 1
+      and rd17.stdout.count("KNOWN pass: no .env sources — disabled") == 1)
+# unreadable/absent
+h, c = env_home(f"TOK={envval}\n", None, s1_mode=0)
+scanfile(h, "plain\n")
+re17 = ig_run(h, ["preflight"], cwd=c)
+os.chmod(os.path.join(h, ".env"), 0o600)
+check("A17: unreadable/absent → 1 diagnostic + disabled",
+      re17.stdout.count("unreadable — skipped") == 1
+      and re17.stdout.count("KNOWN pass: no .env sources — disabled") == 1)
+# empty(ok)/malformed → 1 diagnostic, NOT disabled
+h, c = env_home("", "broken line\n")
+scanfile(h, "plain\n")
+rf17 = ig_run(h, ["preflight"], cwd=c)
+check("A17: empty(ok)/malformed → 1 diagnostic, pass active",
+      rf17.stdout.count("malformed — skipped") == 1
+      and "KNOWN pass: no .env sources — disabled" not in rf17.stdout)
+# MIN-4 r1: mixed valid + malformed lines in ONE file → ok, NO diagnostic
+h, c = env_home(f"OK={envval}\nbroken line\n# comment\n", None)
+scanfile(h, f"{envval}\n")
+rm17 = ig_run(h, ["preflight"], cwd=c)
+check("A17: mixed valid+malformed in one file → ok, no diagnostic",
+      "malformed — skipped" not in rm17.stdout
+      and "KNOWN (your .env values) — 1 in 1 files" in rm17.stdout)
+# valid/malformed → 1 diagnostic, active
+h, c = env_home(f"TOK={envval}\n", "broken\n")
+scanfile(h, f"{envval}\n")
+rg17 = ig_run(h, ["preflight"], cwd=c)
+check("A17: valid/malformed → 1 diagnostic, KNOWN row found",
+      rg17.stdout.count("malformed — skipped") == 1
+      and "KNOWN (your .env values) — 1 in" in rg17.stdout)
+# valid/unreadable → 1 diagnostic, active
+h, c = env_home(f"TOK={envval}\n", f"BROKEN={envval2}\n")
+os.chmod(os.path.join(c, ".env"), 0)
+scanfile(h, f"{envval}\n")
+rh17 = ig_run(h, ["preflight"], cwd=c)
+os.chmod(os.path.join(c, ".env"), 0o600)
+check("A17: valid/unreadable → 1 diagnostic, KNOWN row found",
+      rh17.stdout.count("unreadable — skipped") == 1
+      and "KNOWN (your .env values) — 1 in" in rh17.stdout)
+# valid/valid, same key same value → one row
+h, c = env_home(f"SAME={envval}\n", f"SAME={envval}\n")
+scanfile(h, f"{envval}\n")
+ri17 = json.loads(ig_run(h, ["preflight", "--json"], cwd=c).stdout)
+check("A17: same key/value both files → ONE KNOWN row",
+      ri17["totals"]["known"] == 1 and ri17["totals"]["known_rows"] == 1)
+# valid/valid, same key DIFFERENT values → both match their own
+h, c = env_home(f"DIFF={envval}\n", f"DIFF={envval2}\n")
+scanfile(h, f"{envval} {envval2}\n")
+rj17 = json.loads(ig_run(h, ["preflight", "--json"], cwd=c).stdout)
+check("A17: same key different values → BOTH match",
+      rj17["totals"]["known"] == 2 and rj17["totals"]["known_rows"] == 2,
+      f"known={rj17['totals']['known']}")
+# valid/valid, different keys same value → source_key alphabetical
+h, c = env_home(f"Z_KEY={envval}\n", f"A_KEY={envval}\n")
+scanfile(h, f"{envval}\n")
+rk17 = json.loads(ig_run(h, ["preflight", "--json"], cwd=c).stdout)
+tvk = [v for v in rk17["top_values"] if v.get("known")]
+check("A17: diff keys same value → source_key = first alphabetically",
+      len(tvk) == 1 and tvk[0]["source_key"] == "A_KEY", f"tv={tvk!r}")
+# duplicate key within one file → last-parse-wins
+h, c = env_home(f"DUP={envval}\nDUP={envval2}\n", None)
+scanfile(h, f"{envval} {envval2}\n")
+rl17 = json.loads(ig_run(h, ["preflight", "--json"], cwd=c).stdout)
+check("A17: duplicate key within file → last-parse-wins (only value2)",
+      rl17["totals"]["known"] == 1
+      and [v for v in rl17["top_values"] if v.get("known")][0]["count"] == 1,
+      f"known={rl17['totals']['known']}")
+
+# ── A18: exit identical across output modes ──
+for home, expect in ((h1, 1), (h7, 0)):
+    e_txt = ig_run(home, ["preflight"]).returncode
+    e_json = ig_run(home, ["preflight", "--json"]).returncode
+    oj = os.path.join(tmp, "out18.json")
+    e_out = ig_run(home, ["preflight", "--json-out", oj]).returncode
+    check(f"A18: exit identical across modes (expect {expect})",
+          e_txt == e_json == e_out == expect,
+          f"text={e_txt} json={e_json} out={e_out}")
 
 print(f"\n[test] {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

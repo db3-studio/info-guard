@@ -2,18 +2,18 @@
   "schema": "info-guard/assessment/v1",
   "tool": {
     "name": "info-guard",
-    "version": "0.4.2",
+    "version": "0.5.0",
     "gitleaks": "8.30.1",
     "installed": false,
     "engine_state": "none",
     "engine_version": null
   },
   "scan": {
-    "generated": "2026-08-20T20:55:00Z",
+    "generated": "2026-08-21T00:24:14Z",
     "dirs": [
       "."
     ],
-    "files_scanned": 4,
+    "files_scanned": 5,
     "read_only": true,
     "gitleaks_ok": true
   },
@@ -21,28 +21,31 @@
     "severity": "high",
     "action_required": true,
     "summary": "Credential-shaped values were found at rest. They are candidates, not confirmed leaks.",
-    "credential_shaped": 10,
-    "confirmed_active": null
+    "credential_shaped": 11,
+    "confirmed_active": true
   },
   "totals": {
-    "findings": 25,
-    "credential_shaped": 10,
-    "raw_detections": 21,
+    "findings": 30,
+    "credential_shaped": 11,
+    "raw_detections": 23,
     "distinct_values": 6,
-    "family_attributed": 9,
+    "family_attributed": 10,
     "unattributed": 1,
     "key_name_mentions": 0,
     "already_masked": 4,
+    "known": 1,
+    "known_rows": 1,
     "partition": true
   },
   "families": {
-    "total_with_values": 8,
+    "total_with_values": 9,
     "complete": true,
     "items": [
       {
         "family": "HASS_TOKEN",
         "value": 3,
         "masked": 0,
+        "known": 0,
         "mentions": 3,
         "types": [
           "JWT"
@@ -65,10 +68,37 @@
         }
       },
       {
+        "family": "DEMO_TOKEN",
+        "value": 1,
+        "masked": 0,
+        "known": 0,
+        "mentions": 2,
+        "types": [
+          "generated key"
+        ],
+        "status": "exposed",
+        "priority": "high",
+        "distinct_values": 1,
+        "areas": {
+          "other": 1
+        },
+        "dates": [],
+        "example": {
+          "value_masked": "ke...CC",
+          "file": ".env",
+          "line": 1
+        },
+        "shared_with": [
+          "TUNNEL_TOKEN",
+          "bare-token"
+        ]
+      },
+      {
         "family": "bare-token",
         "value": 1,
         "masked": 0,
-        "mentions": 9,
+        "known": 0,
+        "mentions": 11,
         "types": [
           "generated key"
         ],
@@ -85,6 +115,7 @@
           "line": 1
         },
         "shared_with": [
+          "DEMO_TOKEN",
           "TUNNEL_TOKEN"
         ]
       },
@@ -92,6 +123,7 @@
         "family": "X-N8N-API-KEY",
         "value": 1,
         "masked": 0,
+        "known": 0,
         "mentions": 1,
         "types": [
           "JWT"
@@ -118,18 +150,21 @@
         "family": "token",
         "value": 1,
         "masked": 0,
-        "mentions": 1,
+        "known": 1,
+        "mentions": 2,
         "types": [
-          "GitHub PAT"
+          "GitHub PAT",
+          "KNOWN"
         ],
         "status": "exposed",
         "priority": "high",
         "distinct_values": 1,
         "areas": {
-          "sessions": 1
+          "sessions": 2
         },
         "dates": [
-          "2026-04-24"
+          "2026-04-24",
+          "2026-05-05"
         ],
         "example": {
           "value_masked": "gh...BB",
@@ -141,6 +176,7 @@
         "family": "DISCORD_BOT_TOKEN",
         "value": 1,
         "masked": 0,
+        "known": 0,
         "mentions": 1,
         "types": [
           "Discord bot token"
@@ -164,6 +200,7 @@
         "family": "ANTHROPIC_API_KEY",
         "value": 1,
         "masked": 0,
+        "known": 0,
         "mentions": 1,
         "types": [
           "API key"
@@ -187,6 +224,7 @@
         "family": "N8N_API_KEY",
         "value": 1,
         "masked": 0,
+        "known": 0,
         "mentions": 1,
         "types": [
           "JWT"
@@ -213,6 +251,7 @@
         "family": "TUNNEL_TOKEN",
         "value": 1,
         "masked": 0,
+        "known": 0,
         "mentions": 1,
         "types": [
           "generated key"
@@ -232,6 +271,7 @@
           "line": 5
         },
         "shared_with": [
+          "DEMO_TOKEN",
           "bare-token"
         ]
       },
@@ -239,6 +279,7 @@
         "family": "Authorization",
         "value": 0,
         "masked": 2,
+        "known": 0,
         "mentions": 2,
         "types": [],
         "status": "protected",
@@ -256,6 +297,7 @@
         "family": "api_key",
         "value": 0,
         "masked": 1,
+        "known": 0,
         "mentions": 1,
         "types": [],
         "status": "protected",
@@ -273,6 +315,7 @@
         "family": "FIRECRAWL_API_KEY",
         "value": 0,
         "masked": 1,
+        "known": 0,
         "mentions": 1,
         "types": [],
         "status": "protected",
@@ -293,7 +336,8 @@
       "area": "sessions",
       "credential_shaped": 8,
       "masked": 2,
-      "percentage": 80.0,
+      "known": 1,
+      "percentage": 72.7,
       "files_affected": 2,
       "status": "mixed",
       "date_range": {
@@ -303,10 +347,20 @@
       }
     },
     {
+      "area": "other",
+      "credential_shaped": 1,
+      "masked": 0,
+      "known": 0,
+      "percentage": 9.1,
+      "files_affected": 1,
+      "status": "exposed"
+    },
+    {
       "area": "cron",
       "credential_shaped": 1,
       "masked": 0,
-      "percentage": 10.0,
+      "known": 0,
+      "percentage": 9.1,
       "files_affected": 1,
       "status": "exposed"
     },
@@ -314,7 +368,8 @@
       "area": "logs",
       "credential_shaped": 1,
       "masked": 2,
-      "percentage": 10.0,
+      "known": 0,
+      "percentage": 9.1,
       "files_affected": 1,
       "status": "protected"
     }
@@ -349,6 +404,12 @@
     {
       "scope_type": "family",
       "scope": "HASS_TOKEN",
+      "status": "exposed",
+      "note": "value-shaped material remains at rest"
+    },
+    {
+      "scope_type": "family",
+      "scope": "DEMO_TOKEN",
       "status": "exposed",
       "note": "value-shaped material remains at rest"
     },
@@ -427,22 +488,23 @@
   ],
   "top_values": [
     {
+      "value_masked": "ke...CC",
+      "type": "generated key",
+      "family": "DEMO_TOKEN",
+      "count": 3,
+      "families": [
+        "DEMO_TOKEN",
+        "TUNNEL_TOKEN",
+        "bare-token"
+      ]
+    },
+    {
       "value_masked": "ey...aa",
       "type": "JWT",
       "family": "HASS_TOKEN",
       "count": 3,
       "families": [
         "HASS_TOKEN"
-      ]
-    },
-    {
-      "value_masked": "ke...CC",
-      "type": "generated key",
-      "family": "TUNNEL_TOKEN",
-      "count": 2,
-      "families": [
-        "TUNNEL_TOKEN",
-        "bare-token"
       ]
     },
     {
@@ -481,36 +543,59 @@
       "families": [
         "ANTHROPIC_API_KEY"
       ]
+    },
+    {
+      "value_masked": "ke...CC",
+      "type": "KNOWN",
+      "family": "DEMO_TOKEN",
+      "count": 1,
+      "families": [
+        "DEMO_TOKEN"
+      ],
+      "known": true,
+      "source_key": "DEMO_TOKEN"
     }
   ],
   "affected_files": [
     {
       "file": "sessions/session_20260505_075138_3cf0d0a1.jsonl",
-      "total_findings": 12,
+      "total_findings": 15,
       "credential_shaped": 5,
       "key_name_mentions": 0,
-      "already_masked": 1
+      "already_masked": 1,
+      "known": 1
     },
     {
       "file": "sessions/session_20260424_211845_69c7b6.jsonl",
       "total_findings": 8,
       "credential_shaped": 3,
       "key_name_mentions": 0,
-      "already_masked": 1
+      "already_masked": 1,
+      "known": 0
     },
     {
       "file": "logs/agent.log",
       "total_findings": 4,
       "credential_shaped": 1,
       "key_name_mentions": 0,
-      "already_masked": 2
+      "already_masked": 2,
+      "known": 0
+    },
+    {
+      "file": ".env",
+      "total_findings": 2,
+      "credential_shaped": 1,
+      "key_name_mentions": 0,
+      "already_masked": 0,
+      "known": 0
     },
     {
       "file": "cron/output/watch.log",
       "total_findings": 1,
       "credential_shaped": 1,
       "key_name_mentions": 0,
-      "already_masked": 0
+      "already_masked": 0,
+      "known": 0
     }
   ],
   "recommendations": [
@@ -543,7 +628,7 @@
     "telemetry": [
       [
         "bare-token",
-        9
+        11
       ],
       [
         "HASS_TOKEN",
@@ -554,7 +639,15 @@
         3
       ],
       [
+        "DEMO_TOKEN",
+        2
+      ],
+      [
         "Authorization",
+        2
+      ],
+      [
+        "token",
         2
       ],
       [
@@ -567,10 +660,6 @@
       ],
       [
         "FIRECRAWL_API_KEY",
-        1
-      ],
-      [
-        "token",
         1
       ],
       [
