@@ -6,6 +6,53 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [v0.5.0] - 2026-08-20
+
+### Added
+- **KNOWN tier — `.env` exact-value detection** (IG D57–D62/D70–D75;
+  Luna pilot: 3 proposal rounds + 3 plan rounds, all folded). Preflight
+  now checks whether values currently in your own `.env` files appear in
+  sessions, logs, or cron output — the zero-config differentiator, no
+  registration, no config:
+  1. **Exact-value pass** — reads the default `.env` sources
+     (`$HERMES_HOME/.env`, `./.env`), builds an in-memory
+     `sha256(value) → [keys...]` index of eligible values (non-secret
+     keys excluded, ≥8 chars, non-trivial), and intersects it with
+     value-like candidate runs in the scan. Matches are **KNOWN** rows:
+     masked 2+2, `known: true`, `source_key` (alphabetically first key),
+     `type: "KNOWN"`; `count` preserves per-occurrence hits. The pass
+     never reports its own `.env` sources (path + inode self-match
+     exclusion) and is **preflight-only** — `watch` and `setup` are
+     unchanged.
+  2. **New tier, partition updated** — `findings = known +
+     raw_detections + key_name_mentions + already_masked` (row-level
+     partition; `totals.known` = distinct values, `totals.known_rows` =
+     row count). KNOWN rows appear in `top_values`, families, locations
+     and affected_files (additive `known` counts). JSON is the stable
+     fact surface; diagnostics (one masked line per unreadable/malformed
+     source) are text-only.
+  3. **`status.confirmed_active` activated in place** — `true` when ≥1
+     KNOWN row, `null` otherwise (null = pass disabled OR active with
+     no matches — documented). No `false` state in v0.5.0.
+  4. **Exit-code extension (single predicate, D75)** — preflight exits
+     `1` iff `known > 0 OR credential_shaped > 0` (documented extension;
+     the 0/1/2/3 severity ladder is deferred to a later wave as one
+     packaged contract change).
+  5. **Non-disclosure hard boundary** — the pass never puts raw values
+     in logs, exceptions, tracebacks or diagnostics (sanitized adapter,
+     typed internal error codes, CLI-level generic error path); battery
+     A6 injects failures at every boundary with a raw sentinel and
+     asserts absence everywhere.
+  6. **Docs + battery** — format-spec gains the published candidate
+     grammar + exclusions (quotes delimit runs; interior quotes,
+     whitespace, Unicode, commas, brackets, backslashes, shell escapes,
+     multi-line never match), source-state matrix, and exit semantics;
+     assessment-schema gains `known`/`known_rows`/`known` counts and
+     KNOWN row rules; README's ".env values" claim is now literal.
+     Battery A1–A18 (57 new checks) incl. the v0.4.2-era consumer probe
+     (`tests/consumers/v0.4.2-json-probe.py`) and pinned perf protocol
+     (baseline `30eb783`, 5k + 50k trees, ≤10% or ≤5 s).
+
 ## [v0.4.2] - 2026-08-20
 
 ### Added

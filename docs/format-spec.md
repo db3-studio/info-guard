@@ -351,20 +351,80 @@ Report sections, in order (each printed only when its data is non-empty):
    forensic mode only). Source-masked rows stay count-only in both modes.
 
 Taxonomy — a partition, stated in the report: every raw hit is classified
-into exactly one of **credential-shaped** (token-format values + gitleaks
+into exactly one of **KNOWN** (v0.5.0 — your `.env` values, identity-verified),
+**credential-shaped** (token-format values + gitleaks
 HIGH-CONFIDENCE — the actionable set), **key-name mention** (includes
 reference/noise rows; a future tier may split them), or **already-masked**
-(the prevention layer working). `findings = raw_detections +
+(the prevention layer working). `findings = known + raw_detections +
 key_name_mentions + already_masked`, exactly — the partition holds over
-RAW hits. `credential_shaped` is the deduplicated row count of the
+RAW hits at ROW level (each `file:line:value` row is exactly one tier);
+`totals.known` is the distinct-VALUE rollup (≤ `totals.known_rows`, the
+row-level KNOWN count — both are reported so the reconciliation is
+checkable). `credential_shaped` is the deduplicated row count of the
 credential-shaped class (≤ `raw_detections`); the headline, family,
 location and affected-file tables all sum to it.
 
 The candidate unit is the unique **`file:line:value` row**: when several
 detectors flag the same value on the same line (key-shape + token-prefix +
-gitleaks can all fire), the row counts once. `totals.raw_detections` keeps
-the raw detector-fire count and `totals.distinct_values` the value-level
-count — the summary line states all three so every table's sum reconciles.
+gitleaks can all fire), the row counts once — and when the value is a
+KNOWN `.env` match, the KNOWN tier wins the row (identity-verified beats
+shape-guess; the shape row is dropped, never counted as credential-shaped).
+`totals.raw_detections` keeps the raw detector-fire count and
+`totals.distinct_values` the value-level count — the summary line states
+all three so every table's sum reconciles.
+
+### The KNOWN tier — `.env` exact-value detection (v0.5.0)
+
+**What it does:** preflight reads your default `.env` sources
+(`$HERMES_HOME/.env`, `./.env` — existing files only, the same sources
+`build` uses), builds an in-memory `sha256(value) → [keys...]` index of
+every **eligible** value (key not in the non-secret list, `len ≥ 8`, not
+trivial, ≤ 4 KB), and intersects it with value-like candidate runs found
+in the scan (`[A-Za-z0-9_\-./+=:@%?&~#]{8,}`, ≤ 256 candidates per line).
+A match is reported as a **KNOWN** row: masked 2+2, `rule
+known-env:<KEY>` (alphabetically first key across sources),
+`known: true`, `source_key: <KEY>`, `type: "KNOWN"`. The scan's own
+`.env` sources are excluded from matching (canonical path + inode
+identity — the pass never reports its own input). All other detectors
+are untouched. The pass is **preflight-only** — `watch` and `setup` do
+not run it (their behavior is unchanged).
+
+**Candidate grammar (exact-match doctrine — published, with exclusions):**
+
+| Construct | Behavior |
+|---|---|
+| `[A-Za-z0-9_\-./+=:@%?&~#]{8,}` run | candidate; sha256'd and intersected |
+| surrounding quotes | delimit runs (quote chars not in the grammar; no strip step) |
+| quote char INSIDE a value | the value can never be a candidate (documented exclusion) |
+| whitespace, Unicode, commas, brackets, backslashes, shell escapes, multi-line | never candidates (documented exclusions, negative fixtures) |
+| `KEY=value`-style line | ONE run including `KEY=` (both `=` and `_` are grammar chars) — matches only if the whole run equals an eligible `.env` value |
+| partial fragments | never match — exact token equality only |
+| same-line repeats | one row, `count` preserves occurrences |
+
+**Source aggregation:** per-key last-parse-wins WITHIN a file; the same
+key in two files contributes BOTH parsed values; the same value under
+different keys maps to all keys (`source_key` = alphabetically first).
+**Source states:** `absent` (not in the default list — no diagnostic),
+`unreadable` (read fails), `malformed` (non-empty, zero valid entries),
+`ok`. Each unreadable/malformed source emits **one masked diagnostic
+line** in the text report's KNOWN section; JSON is stable
+(`confirmed_active` + `totals.known`, never a diagnostics field). The
+pass stays active if ≥1 source parses; **disabled only when zero sources
+are ok** — the text report then emits exactly one line:
+`KNOWN pass: no .env sources — disabled`. Source state never affects
+exit status.
+
+**Vocabulary (D60):** KNOWN rows "match a current eligible `.env` value;
+review whether it is still live" — never "leak", never "confirmed".
+`status.confirmed_active` is `true` when ≥1 KNOWN row, `null` otherwise
+(null = pass disabled OR pass active with no matches — deliberately not
+distinguished in v0.5.0).
+
+**Exit codes (v0.5.0 — documented extension):** `0` = clean, **`1` iff
+`known > 0 OR credential_shaped > 0`**, `2` = usage error. The severity
+ladder (0 clean / 1 shape / 2 usage / 3 KNOWN, KNOWN dominates) is
+deferred to a later wave (D75) and ships as ONE packaged contract change
+(format-spec + CHANGELOG + release notes + consumer tests together).
 
 Date discipline: historical date ranges come from **session filename
 timestamps** (`session_YYYYMMDD…`), never filesystem mtime.
@@ -379,9 +439,13 @@ whole lines, so `Authorization: Bearer <jwt>` yields an actionable JWT
 row (unattributed when no key context); `Authorization: ***` counts
 already-masked.
 
-Exit codes: **0 = clean**, **1 = findings** (any credential-shaped value),
+Exit codes: **0 = clean**, **1 = findings** (any KNOWN `.env` value OR any
+credential-shaped value — single-predicate extension, v0.5.0; previously
+credential-shaped only),
 **2 = usage error**. gitleaks is optional: without it the scan runs the
-key-shape pass only and says so.
+key-shape pass only and says so. The severity ladder (0/1/2/3 with KNOWN
+dominating) is deferred to a later wave (D75) as one packaged contract
+change.
 
 ## Version notes
 

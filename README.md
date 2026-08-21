@@ -63,9 +63,16 @@ and logs may hold secrets that predate redaction:
 ```
 
 Zero-config, read-only, nothing written, output fully masked. Scans
-`<home>/sessions`, `<home>/logs`, and `<home>/cron/output` with two passes:
-key-shape regexes (`KEY=value` with secret-family keys, known token prefixes)
-and gitleaks' already-tuned ruleset. **gitleaks is optional** — the core
+`<home>/sessions`, `<home>/logs`, and `<home>/cron/output` with three
+passes: key-shape regexes (`KEY=value` with secret-family keys, known
+token prefixes), gitleaks' already-tuned ruleset, and — since v0.5.0 —
+an **exact-value pass against your own `.env` files**: if a value
+currently in a secret-eligible `.env` key appears anywhere in the scan,
+it is reported as a **KNOWN** (identity-verified) row, marked
+`KNOWN (your .env values) — N in M files`. This makes the preflight
+claim literal: it really does check whether `.env` values are showing
+up in sessions, logs, and cron output — no registration, no config.
+**gitleaks is optional** — the core
 product never needs it — but it powers this scan's provider-format tier. If
 it's missing, preflight explains the benefit and offers to install it
 (`go install` or the GitHub release binary into `~/.local/bin`); non-tty
@@ -81,8 +88,8 @@ and an Exposed/Mixed/Protected status circle); EXPOSURE LOCATIONS with
 candidate + masked counts and area status; RECOMMENDED ACTIONS; and
 APPENDIX A — the finding-ledger sample (`--full` prints the complete ledger
 plus APPENDIX B, the detection telemetry). Tiers are a partition — every
-finding is exactly one of credential-shaped / key-name mention /
-already-masked. Full format contract: `docs/format-spec.md`.
+finding is exactly one of KNOWN (your .env values) / credential-shaped /
+key-name mention / already-masked. Full format contract: `docs/format-spec.md`.
 
 Already installed? Preflight detects it (engine marker + pattern file) and
 frames the run as a health check: findings are at-rest residue that masking
@@ -106,7 +113,11 @@ second implementation; `preflight watch` re-runs the scan and reports NEW
 credential-shaped values against a sha256-only baseline
 (`<state>/info-guard/watch-baseline.json`, 0600) — cron-friendly, exit 1
 on new values, `--reset` to clear, union-kept across tool/gitleaks
-upgrades. Contract: `docs/format-spec.md`.
+upgrades. Exit codes (v0.5.0, single-predicate extension): preflight
+exits 1 when KNOWN values or credential-shaped values are found (`known
+> 0 OR credential_shaped > 0`); 0 when clean; 2 on usage errors. The
+severity ladder (0/1/2/3) is deferred to a later wave — see format-spec.
+Contract: `docs/format-spec.md`.
 
 **Privacy & credential handling:** preflight is safe-by-construction —
 values are masked before they leave the machine, never echoed, and the scan
