@@ -55,6 +55,7 @@ from agent.redact import redact_sensitive_text
 
 PASS = 0
 FAIL = 0
+SKIP = 0
 
 def check(name, cond, detail=""):
     global PASS, FAIL
@@ -64,6 +65,13 @@ def check(name, cond, detail=""):
     else:
         FAIL += 1
         print(f"  \u2717 {name} {detail}")
+
+def skip(name, reason=""):
+    """Mark a check deferred/not-applicable (A# counting — the executable
+    denominator excludes skipped checks; reported separately)."""
+    global SKIP
+    SKIP += 1
+    print(f"  \u2013 {name} (skipped: {reason})")
 
 def write(p, obj):
     with open(p, "w") as f:
@@ -2512,6 +2520,8 @@ for home, expect in ((h1, 3), (h7, 0)):
           e_txt == e_json == e_out == expect,
           f"text={e_txt} json={e_json} out={e_out}")
 
-print(f"\n[test] {PASS} passed, {FAIL} failed")
+print(f"\n[test] {PASS} passed, {FAIL} failed"
+      f" (discovered={PASS + FAIL + SKIP} executed={PASS + FAIL} "
+      f"passed={PASS} skipped={SKIP} failed={FAIL})")
 sys.exit(1 if FAIL else 0)
 PYEOF

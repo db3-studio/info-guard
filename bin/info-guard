@@ -2922,8 +2922,18 @@ def _literals_add(args):
         out = dict(doc) if isinstance(doc, dict) else {}
         out["version"] = 2
         out["literals"] = entries
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        _atomic_write_json(CUSTOM_LITERALS, out)
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            _atomic_write_json(CUSTOM_LITERALS, out)
+        except OSError:
+            # Canonical write failure (Wave A A2/MAJ-5): exit 2, never a
+            # traceback, never a silent no-op — the registry is the
+            # authoritative declaration surface; a failed write must be
+            # loud and operational.
+            print(f"[info-guard] ✗ cannot write {CUSTOM_LITERALS} — "
+                  f"registry unchanged (permissions? disk?)",
+                  file=sys.stderr)
+            return 2
     else:
         entries = existing  # no-op: never rewrite (evidence MIN-1)
     by_value = {}
