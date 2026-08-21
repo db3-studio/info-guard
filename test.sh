@@ -47,6 +47,7 @@ import sys
 import tempfile
 import time
 import hashlib
+from pathlib import Path
 
 CHECKOUT = sys.argv[1]
 sys.path.insert(0, CHECKOUT)
@@ -1958,6 +1959,108 @@ check("A12: every excluded construct never matches (negative fixtures)",
 # ── A13: no value_id anywhere ──
 check("A13: no value_id in JSON or text",
       "value_id" not in r10.stdout and "value_id" not in r1.stdout)
+# A13b (MIN-1 r1): recursive absence over every JSON document + surfaces
+def key_walk(o, key):
+    if isinstance(o, dict):
+        return key in o or any(key_walk(v, key) for v in o.values())
+    if isinstance(o, list):
+        return any(key_walk(v, key) for v in o)
+    return False
+check("A13b: recursive value_id absence across all generated JSON",
+      not key_walk(json.loads(r10.stdout), "value_id")
+      and not key_walk(json.loads(r7j.stdout), "value_id")
+      and not key_walk(json.loads(r11.stdout), "value_id"))
+
+# ── A12b (MIN-3 r1): size/limit boundary behavior (4 KB value, 2 MB
+# source, 256-candidate line cap) — no crash, no leak, deterministic ──
+h12b = mkhome("sessions")
+bigval = "b" * 4096                                  # exactly 4 KB
+overval = "c" * 4097                                 # > 4 KB → skipped
+with open(os.path.join(h12b, ".env"), "w") as f:
+    f.write(f"BIG4K={bigval}\nOVER={overval}\n")
+with open(os.path.join(h12b, "sessions", "s12b.jsonl"), "w") as f:
+    f.write(f"{bigval}\n{overval}\n")
+r12b = ig_run(h12b, ["preflight", "--json"])
+o12b = json.loads(r12b.stdout)
+chk12b = o12b["totals"]["known"] == 1 and o12b["totals"]["known_rows"] == 1
+chk12b = chk12b and [v for v in o12b["top_values"] if v.get("known")][0][
+    "source_key"] == "BIG4K"
+check("A12b: 4 KB value matched, >4 KB value skipped (no crash)",
+      chk12b, f"known={o12b['totals']['known']}")
+# >2 MB source → skipped with malformed diagnostic, no crash
+h12c = mkhome("sessions")
+with open(os.path.join(h12c, ".env"), "w") as f:
+    f.write(f"TOK={envval}\n")
+with open(os.path.join(h12c, "sessions", "s12c.jsonl"), "w") as f:
+    f.write(f"{envval}\n")
+big_src = os.path.join(h12c, "cwd"); os.makedirs(big_src, exist_ok=True)
+with open(os.path.join(big_src, ".env"), "w") as f:
+    f.write("# padding\n" * 300000)                  # ~3 MB
+r12c = ig_run(h12c, ["preflight"], cwd=big_src)
+check("A12c: >2 MB source skipped with diagnostic, no crash",
+      "malformed — skipped" in r12c.stdout
+      and "KNOWN (your .env values) — 1 in 1 files" in r12c.stdout,
+      f"rc={r12c.returncode}")
+# 256-candidate line cap: a line with >256 matching candidates still
+# matches deterministically and never crashes
+h12d = mkhome("sessions")
+with open(os.path.join(h12d, ".env"), "w") as f:
+    f.write(f"CAPTOK={envval}\n")
+with open(os.path.join(h12d, "sessions", "s12d.jsonl"), "w") as f:
+    f.write(" ".join([envval] * 300) + "\n")        # 300 occurrences, one line
+r12d = ig_run(h12d, ["preflight", "--json"])
+o12d = json.loads(r12d.stdout)
+tv12d = [v for v in o12d["top_values"] if v.get("known")]
+check("A12d: 256-cap line — one row, capped count, no crash",
+      o12d["totals"]["known_rows"] == 1
+      and len(tv12d) == 1 and tv12d[0]["count"] <= 256,
+      f"rows={o12d['totals']['known_rows']} count={tv12d[0]['count'] if tv12d else None}")
+
+# ── Parser characterization (MAJ-5 r1): _load_env pre/post refactor
+# byte-identical — duplicate keys, quoting/comments, invalid lines,
+# empty values, read errors, SystemExit text + type ──
+char_cases = [
+    ["A=1", "A=2"],                       # duplicate key → last wins
+    ['Q="quoted"', "SQ='sq'"],            # quoting stripped
+    ["C=val # comment", "D=hash#kept"],   # comments only when preceded by ws
+    ["bad line", "=novalue", "1BAD=x"],   # invalid → skipped
+    ["E=", "F=  "],                       # empty values
+    ["", "   ", "# only comment"],        # blank/comment lines
+]
+# Load BOTH parsers as modules: baseline = v0.4.2 binary via git show,
+# new = current binary (copied to .py for importlib, same trick as A6).
+import importlib.util as _ilu
+_base_src = subprocess.run(
+    ["git", "-C", os.getcwd(), "show", "30eb783:bin/info-guard"],
+    capture_output=True, text=True, check=True).stdout
+_base_mod = os.path.join(tmp, "ig-base.py")
+open(_base_mod, "w").write(_base_src)
+_base = _ilu.spec_from_file_location("igbase", _base_mod)
+_bm = _ilu.module_from_spec(_base); _base.loader.exec_module(_bm)
+_new = _ilu.spec_from_file_location("ignew", igmod)
+_nm = _ilu.module_from_spec(_new); _new.loader.exec_module(_nm)
+char_ok = True
+char_dir = os.path.join(tmp, "char"); os.makedirs(char_dir, exist_ok=True)
+for i, case in enumerate(char_cases):
+    p_new = os.path.join(char_dir, f"new{i}.env")
+    p_old = os.path.join(char_dir, f"old{i}.env")
+    open(p_new, "w").write("\n".join(case) + "\n")
+    open(p_old, "w").write("\n".join(case) + "\n")
+    new = _nm._load_env(Path(p_new))
+    old = _bm._load_env(Path(p_old))
+    char_ok = char_ok and new == old
+check("MAJ5: parser characterization — old vs new identical on all cases",
+      char_ok, f"cases={len(char_cases)}")
+# SystemExit text+type unchanged on unreadable source
+sys_exit_ok = True
+for fn in (_bm._load_env, _nm._load_env):
+    try:
+        fn(Path("/nonexistent/ig/.env"))
+        sys_exit_ok = False
+    except SystemExit as e:
+        sys_exit_ok = sys_exit_ok and "cannot read env source" in str(e)
+check("MAJ5: SystemExit text+type identical on unreadable source",
+      sys_exit_ok)
 
 # ── A14: perf protocol (baseline 30eb783 vs HEAD, 5k + 50k trees) ──
 base_ig = os.path.join(tmp, "ig-baseline")
@@ -2098,6 +2201,13 @@ rf17 = ig_run(h, ["preflight"], cwd=c)
 check("A17: empty(ok)/malformed → 1 diagnostic, pass active",
       rf17.stdout.count("malformed — skipped") == 1
       and "KNOWN pass: no .env sources — disabled" not in rf17.stdout)
+# MIN-4 r1: mixed valid + malformed lines in ONE file → ok, NO diagnostic
+h, c = env_home(f"OK={envval}\nbroken line\n# comment\n", None)
+scanfile(h, f"{envval}\n")
+rm17 = ig_run(h, ["preflight"], cwd=c)
+check("A17: mixed valid+malformed in one file → ok, no diagnostic",
+      "malformed — skipped" not in rm17.stdout
+      and "KNOWN (your .env values) — 1 in 1 files" in rm17.stdout)
 # valid/malformed → 1 diagnostic, active
 h, c = env_home(f"TOK={envval}\n", "broken\n")
 scanfile(h, f"{envval}\n")
