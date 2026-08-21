@@ -1870,6 +1870,52 @@ check("A6: assessment-path sentinel injection — generic, no leak, no partial J
       and not rw2.stdout.strip().startswith("{"),
       f"rc={rw2.returncode} out={rw2.stdout[-120:]!r} err={rw2.stderr[-120:]!r}")
 
+# (f) Wave A (Phase 7/A23): watch-path sentinel injection — the new
+# watch env integration must degrade the same way as preflight: env-pass
+# failure -> KNOWN tier disabled (generic degrade), no raw leak, stdout
+# stays valid JSON, the run completes (baseline created). Env-pass
+# failure is a detector-tier degrade, NOT a scan operational failure
+# (gitleaks missing is the exit-2 case; the env pass is additive).
+with open(wrap, "w") as f:
+    f.write("import importlib.util, sys, os\n"
+            "spec = importlib.util.spec_from_file_location("
+            f"'ig', {igmod!r})\n"
+            "m = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(m)\n"
+            f"SENT = {SENT!r}\n"
+            "def boom(*a, **k):\n"
+            "    raise RuntimeError(SENT + ' in watch env')\n"
+            "m._env_sources = boom\n"
+            "sys.exit(m.main(sys.argv[1:]))\n")
+rw3 = subprocess.run([sys.executable, wrap, "watch", "--json", "--reset"],
+                     env=env_w, capture_output=True, text=True, timeout=300)
+check("A23: watch env-pass sentinel injection — no leak, JSON intact, completes",
+      SENT not in rw3.stdout + rw3.stderr
+      and "KNOWN pass disabled" in rw3.stderr
+      and rw3.stdout.strip().startswith("{"),
+      f"rc={rw3.returncode} out={rw3.stdout[-120:]!r} err={rw3.stderr[-120:]!r}")
+
+# (g) Wave A (Phase 7/A23): _value_id_map sentinel injection — the
+# annotation lookup must never leak raw values or crash JSON purity.
+with open(wrap, "w") as f:
+    f.write("import importlib.util, sys, os\n"
+            "spec = importlib.util.spec_from_file_location("
+            f"'ig', {igmod!r})\n"
+            "m = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(m)\n"
+            f"SENT = {SENT!r}\n"
+            "def boom(*a, **k):\n"
+            "    raise RuntimeError(SENT + ' in id map')\n"
+            "m._value_id_map = boom\n"
+            "sys.exit(m.main(sys.argv[1:]))\n")
+rw4 = subprocess.run([sys.executable, wrap, "preflight", "--json"],
+                     env=env_w, capture_output=True, text=True, timeout=300)
+check("A23: _value_id_map sentinel injection — no leak, exit 2",
+      SENT not in rw4.stdout + rw4.stderr
+      and rw4.returncode == 2
+      and "internal error" in rw4.stderr,
+      f"rc={rw4.returncode} out={rw4.stdout[-120:]!r} err={rw4.stderr[-120:]!r}")
+
 # ── A7: no sources → one disabled line + null + 0; golden ──
 h7 = mkhome("sessions", "logs", "cron/output")
 with open(os.path.join(h7, "sessions", "s7.jsonl"), "w") as f:

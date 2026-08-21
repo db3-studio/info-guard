@@ -829,6 +829,15 @@ def cmd_watch(args):
     if not gitleaks_ok:
         say("[info-guard] watch: ⚠ gitleaks not found on PATH — key-shape "
             "pass only")
+    if env_meta and env_meta.get("disabled"):
+        # KNOWN tier disabled (no ok sources or env-pass failure): the
+        # watch population excludes env-matched values this run — say so
+        # (preflight precedent; advisory to stderr in JSON mode).
+        say("[info-guard] watch: KNOWN pass disabled (no usable .env "
+            "sources) — env-matched values not tracked this run")
+    elif env_meta and env_meta.get("diagnostics"):
+        for _d in env_meta["diagnostics"]:
+            say(_d)
     all_hits.sort(key=lambda h: (h[2], h[3]))
     current = _watch_values(all_hits, env_meta)
     # One assessment per run (A2): totals + per-file map for the
