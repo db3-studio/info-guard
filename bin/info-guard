@@ -2789,7 +2789,7 @@ _ENGINE_MARKERS = {
 # (v2026.8.18 -> (2026, 8, 18)); the .2-style suffixes compare correctly
 # via zero-padding.
 _SUPPORTED_MIN = (2026, 8, 3)     # v0.20.0 (v2026.8.3)
-_SUPPORTED_MAX = (2026, 8, 18)    # v0.20.4 (v2026.8.18)
+_SUPPORTED_MAX = (2026, 8, 19)    # v0.20.5 (v2026.8.19)
 
 
 def _fmt_version(t):

@@ -48,7 +48,7 @@ roadmap as v2.
 
 Requires Hermes Agent **v0.20.0+** — the patch is apply-checked and the
 upstream test suite passes 15/15 against v0.20.0, v0.20.1, v0.20.2,
-v0.20.3 (2026.8.16.2), and v0.20.4 (2026.8.18) — one version-tolerant
+v0.20.3 (2026.8.16.2), v0.20.4 (2026.8.18), and v0.20.5 (2026.8.19) — one version-tolerant
 patch; `test.sh` is the package's own 35-check battery, separate from the
 upstream suite.
 Takes about two minutes.
@@ -241,7 +241,7 @@ Version history: see [CHANGELOG.md](CHANGELOG.md) for what changed in each
 release.
 
 The patch is one version-tolerant artifact, verified across the tested
-range (**v0.20.0 – v0.20.4**). `hermes update` autostashes and restores
+range (**v0.20.0 – v0.20.5**). `hermes update` autostashes and restores
 working-tree changes, so within the tested range the patch usually rides
 the update untouched — but a release that changes the patched code
 (v0.20.2 and v0.20.4 both did) can break the stash restore, and an

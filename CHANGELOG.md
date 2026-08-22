@@ -45,6 +45,11 @@ Wave B (P3, IG D103) — honeytokens + exit 4 normative + `review_list`
 - `literals list` shows `kind` for honeytokens (2+2 masked display —
   the `mask: full` directive is redaction-surface-only, never a CLI
   rendering directive).
+- **Hermes supported range bumped to v0.20.5 (2026.8.19)** — D266 compat
+  review (FIX-STAGED 2026-08-22): the version-tolerant patch applies
+  cleanly across all six release tags + origin/main (6/6 matrix); fix is
+  the tested-range claim in the four sites (`_SUPPORTED_MAX`,
+  README ×2, format-spec, CI matrix ref list + all-five→all-six).
 
 ## [v0.6.1] - 2026-08-21
 

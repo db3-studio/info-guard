@@ -825,10 +825,11 @@ baseline schema bump — the population change is the semantic change).
 
 - Requires Hermes Agent **v0.20.0+**. One version-tolerant patch: apply-checked
   and 15/15 test suite against v0.20.0 (2026.8.3), v0.20.1 (2026.8.13),
-  v0.20.2 (2026.8.16), v0.20.3 (2026.8.16.2), and v0.20.4 (2026.8.18) —
+  v0.20.2 (2026.8.16), v0.20.3 (2026.8.16.2), v0.20.4 (2026.8.18), and
+  v0.20.5 (2026.8.19) —
   v0.20.2 drifted `hermes_cli/main.py` (dotenv loading rework) and v0.20.4
   drifted `gateway/run.py` (media-policy module extraction); the hunk
-  contexts were rebased/trimmed to anchor on lines identical across all five.
+  contexts were rebased/trimmed to anchor on lines identical across all six.
 - `install.sh` / `uninstall.sh` fail loudly if the patch doesn't apply after
   a `hermes update` — never silently. `install.sh` also replaces an older
   applied patch in place (update Info Guard before Hermes — see README).
