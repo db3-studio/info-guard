@@ -4,6 +4,71 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 
 > Convention: micro-version fixes within the same workstream are consolidated into the latest entry of that wave, not captured per tag.
 
+## [v0.8.0] - 2026-08-22
+
+Wave C (P4 Self-Sustain, IG D113) — Phase A: `update` (W10), patch heal
+(W11), batteries in `check` (W12), and the cron offering (W6). Binding
+contract: `proposals/self-sustain.md` v1.6 (workspace). Phase B (viewers)
+ships in the same v0.8.0 release.
+
+### Added
+- **`info-guard update [--check] [--json] [--rollback]`** — updates the
+  package from the configured HTTPS origin (strict `vX.Y.Z` tags only,
+  origin-qualified selection, checkout by commit id, verified install via
+  install.sh, version-source agreement). `--check` is read-only and exits
+  1 when a newer release exists (regardless of `--json`); `--rollback`
+  returns to the last verified release by commit id (no local tag
+  required) and is mutually exclusive with `--check`. JSON envelope
+  `info-guard/update/v1` documents every outcome (stdout carries only the
+  envelope in `--json` mode).
+- **`check --heal`** — explicit engine repair (never automatic): restores
+  and reapplies a half-reverted patch, replaces a stale applied patch in
+  place, applies a missing one. Exit 0 healed / 1 attempted-and-failed /
+  2 could-not-attempt.
+- **Seven-check smoke in `check`** — the health verdict proves the engine
+  actually masks (exact-value/full/short/key-pattern masking, broken- and
+  missing-pattern fail-safes, file-read sentinel); a failing smoke names
+  the check and exits 1.
+- **`check --battery`** — runs the full sandboxed battery (scratch home +
+  scratch checkout, bounded timeout, byte-no-mutation of the real state).
+- **ACTIVE-by-upstream** — a Hermes whose HEAD already carries the patch
+  (upstream merge) is accepted only when markers are in HEAD, both
+  apply-checks fail, and the behavioral battery passes; marker-compatible
+  but behaviorally wrong engines fail closed ("compatibility review
+  required").
+- **Install manifest transaction** — `install.json` gains
+  `previous_version`/`previous_commit` and a transient `pending` record
+  (crash-recovered by the next update/rollback); a durable
+  `refs/info-guard/previous` ref protects rollback from reflog expiry.
+  Ordinary installs preserve the records.
+- **`install.sh --cron [SCHEDULE]` / `--no-cron`** — opt-in managed cron
+  line running `check` (default `0 6 * * *`; strict five-field schedule
+  grammar; `%`/control characters rejected at serialization; managed-line
+  ownership marker; unrelated crontab entries preserved; uninstall
+  removes only managed lines; `--no-cron` on every internal invocation).
+- **Stale-cron probe in `check`** — read-only warning when a managed line
+  points at a missing or version-stale binary (warning is exit 0 — not a
+  health verdict; documented limitation).
+
+### Changed
+- **`install.sh`** — lock-first target-safety sequence (snapshot →
+  inspect → revalidate → restore); PARTIAL engines restore-and-reapply
+  instead of dying; dirty patched files in the attribution-exact
+  MISSING/PARTIAL states are refused (exit 2, file preserved);
+  ACTIVE-mismatch remains replace-in-place (attribution limitation
+  documented); exit 2 = operational/could-not-attempt, 1 =
+  attempted-and-failed.
+- **`check`** — unreadable pattern file is now operational (exit 2);
+  invalid JSON content remains a broken verdict (exit 1) with a recovery
+  message.
+- **`uninstall.sh`** — removes this package's managed cron lines
+  (unrelated entries untouched).
+
+### Fixed
+- (Phase A surfaces carry the preflight/watch 0–4 ladder untouched; the
+  update/heal/cron contracts are additive.)
+
+
 ## [v0.7.0] - 2026-08-22
 
 Wave B (P3, IG D103) — honeytokens + exit 4 normative + `review_list`

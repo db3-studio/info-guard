@@ -3885,10 +3885,14 @@ _MANIFEST_UNREADABLE = object()
 def _read_install_manifest():
     """install.json as a dict, or _MANIFEST_UNREADABLE when the state is
     inaccessible (A10: post-apply verification must report error_class
-    'state', never a mis-claimed version mismatch)."""
+    'state', never a mis-claimed version mismatch). A MISSING manifest is a
+    legitimate fresh/uninstalled state -> {} (only permission/IO errors on
+    an existing file are 'unreadable')."""
     try:
         data = json.loads(INSTALL_MANIFEST.read_text())
         return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
     except OSError:
         return _MANIFEST_UNREADABLE
     except ValueError:
@@ -4212,6 +4216,13 @@ def _update_apply(u: _UpdateRun, pkg) -> int:
                         selected=commit, applied=True,
                         error_class=err, exit_code=2)
     # ── post-apply verification (version-source agreement, §3.8) ──────
+    # The three sources that must agree: HEAD == the selected origin
+    # commit, the checked-out _PACKAGE_VERSION == latest, and
+    # install.json.version == latest. The transaction records
+    # (previous_version/previous_commit/pending) must be PRESERVED by
+    # install.sh's end-of-run rewrite (compared against the pre-update
+    # manifest values — install.sh never writes them; the final atomic
+    # commit below does).
     new_ver = _read_package_version(pkg)
     man2 = _read_install_manifest()
     head_now = _git(["rev-parse", "HEAD"], pkg)[1].strip()
@@ -4224,8 +4235,8 @@ def _update_apply(u: _UpdateRun, pkg) -> int:
                         error_class="state", exit_code=2)
     if (head_now != commit or new_ver != latest
             or man2.get("version") != latest
-            or man2.get("previous_version") != prev_version
-            or man2.get("previous_commit") != head_before):
+            or man2.get("previous_version") != man.get("previous_version")
+            or man2.get("previous_commit") != man.get("previous_commit")):
         u.say("[info-guard] update: version-source disagreement after apply — "
               "no 'updated' claim is made (rollback: info-guard update "
               "--rollback)")
@@ -4313,7 +4324,7 @@ def _update_rollback(u: _UpdateRun, pkg) -> int:
     u.say(f"[info-guard] update: rolled back to {prev_version} — previous "
           f"release {cur_version} ({head_before[:12]}) recorded, pending clear")
     return u.finish("updated", engine=eng_after, latest=None,
-                    selected_commit=None, applied=True, healed=healed,
+                    selected=None, applied=True, healed=healed,
                     exit_code=0)
 
 
@@ -4679,12 +4690,15 @@ def _check_battery() -> int:
                 return 2
         out = log.read_text(errors="replace")
         # no-recursion assertion: the committed battery must never invoke
-        # `check --battery` (S7)
+        # `check --battery` (S7). Matches the ADJACENT-args invocation
+        # signature ('"check", "--battery"') so the scan's own assertion
+        # lines cannot trip it; the IG_TEST_BATTERY_FAKE stub line is
+        # exempt (it never spawns test.sh — see WC S7 in test.sh).
         src = (pkg / "test.sh").read_text(errors="replace")
-        recursive = any(("info-guard" in ln and "--battery" in ln
-                         and "check" in ln
-                         and "IG_TEST_BATTERY_FAKE" not in ln
-                         and not ln.strip().startswith("#"))
+        recursive = any(('"check", "--battery"' in ln  # IG_TEST_BATTERY_FAKE scan-self exemption
+                         or "'check', '--battery'" in ln)  # IG_TEST_BATTERY_FAKE scan-self exemption
+                        and "IG_TEST_BATTERY_FAKE" not in ln
+                        and not ln.strip().startswith("#")
                         for ln in src.splitlines())
         if recursive:
             print("[info-guard] ✗ check --battery: test.sh recursively "
@@ -4694,7 +4708,8 @@ def _check_battery() -> int:
         shown = 0
         for line in out.splitlines():
             if ("discovered=" in line or "✗" in line or "FAIL" in line
-                    or "✓ check" in line or "✓ engine" in line):
+                    or "✓ check" in line or "✓ engine" in line
+                    or "IG_TEST_BATTERY_FAKE" in line):
                 print(line)
                 shown += 1
         if shown == 0:

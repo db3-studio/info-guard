@@ -821,6 +821,174 @@ baseline is correct and runs are quiet. The pre-rebaseline alarm is
 expected and documented; the baseline file schema itself is unchanged (no
 baseline schema bump — the population change is the semantic change).
 
+## Wave C Phase A — `update`, `check --heal`/`--battery`, and cron (v0.8.0)
+
+The preflight/watch 0–4 ladder is **untouched**; `check` keeps its 0/1/2
+meanings (0 healthy · 1 completed broken verdict · 2 usage OR operational).
+This section adds only the declared new contracts (proposal
+`self-sustain.md` v1.6, IG D113).
+
+### `info-guard update` — surface and exit table
+
+```
+info-guard update [--check] [--json] [--rollback]
+```
+
+- The package is the git checkout containing the running binary (resolved
+  via `__file__`; `~/.info-guard` is the documented canonical location, not
+  a logic-level assumption). A non-git package is refused (exit 2,
+  `error_class: not_git`).
+- The configured origin is the **trust anchor** (HTTPS git only — a
+  non-HTTPS origin is refused before any fetch, exit 2). Release
+  candidates are exactly the origin's `vX.Y.Z` tags (strict grammar, no
+  suffixes; annotated tags peeled); local tags are never a selection
+  source.
+- **`--check`** is read-only in every state: `git ls-remote --tags origin`
+  only — no fetch, no refs/index/worktree/`FETCH_HEAD` mutation, no
+  repair. A newer matching release exists → **exit 1 regardless of
+  `--json`** (report-only). Up to date → exit 0 (a broken engine is
+  informational in `--check`).
+- **Default mode** is the explicit mutation: stale-`pending` recovery
+  first → dirty-tree refusal (never auto-stash) → discovery → transaction
+  (`pending` written pre-checkout) → fetch `refs/tags/<t>` (FETCH_HEAD
+  only, no local tag) → verify FETCH_HEAD == selected commit → checkout by
+  **commit id** (detached HEAD — install.sh/uninstall.sh use `$HERE`,
+  never a branch) → `install.sh --no-config --no-cron` → verification →
+  durable `refs/info-guard/previous` → atomic manifest commit. Current tag
+  with a broken engine → heal-only install (no tag change).
+- **`--rollback`** (mutually exclusive with `--check`, usage exit 2):
+  resolves the previous commit from `refs/info-guard/previous` (fallback
+  `install.json.previous_commit`), checks out **by commit id** (no local
+  tag required), re-runs install.sh, verifies against the recorded
+  `previous_version`, and commits a coherent post-rollback manifest. If
+  the recorded commit is unavailable: exit 2, `previous release commit no
+  longer available locally — cannot roll back`.
+
+| Exit | Meaning |
+|---:|---|
+| 0 | up to date · updated and verified · heal-only path healed · rollback complete |
+| 1 | newer version available (`--check` only) · heal attempted-and-failed leaving the engine detected-broken |
+| 2 | usage OR operational failure (not a git checkout · dirty package tree · lock held · fetch/verify/version-source disagreement · state inaccessible during verification · heal could not be attempted) |
+
+Never exits 3/4. **Version-source agreement** (three sources must agree
+after apply): the checked-out origin commit (verified via FETCH_HEAD), the
+checked-out `bin/info-guard` `_PACKAGE_VERSION`, and
+`install.json.version`. Disagreement → exit 2 `version_mismatch`, never an
+"updated"/"verified" claim.
+
+### The `update --json` envelope (`info-guard/update/v1`)
+
+One shape for every reachable outcome; in `--json` mode stdout carries
+ONLY this object (all diagnostics, including delegated install/test
+output, go to stderr):
+
+```json
+{"schema": "info-guard/update/v1", "status": "up_to_date|updated|update_available|heal_failed|error",
+ "current": "<version|null>", "latest": "<version|null>", "selected_commit": "<sha|null>",
+ "engine": "ACTIVE|PARTIAL|MISSING|DRIFT|UNKNOWN", "applied": false, "healed": false,
+ "error_class": "none|usage|network|dirty_tree|not_git|lock|checkout|install|tag_mismatch|version_mismatch|verify|state|repair"}
+```
+
+- `current` = the running binary's `_PACKAGE_VERSION` (on `updated`
+  outcomes it is the INVOKING version — the next invocation reports the
+  new one; consumers comparing `current` vs `latest` expect
+  `current < latest` on the run that performed the update).
+- `applied: true, healed: false` is the required partial-outcome
+  representation whenever the selected commit was checked out but install
+  or verification did not complete (consumers key on `engine` + `status` +
+  `error_class` + exit together).
+- `update --check` can never produce checkout/install/verify/state rows —
+  it performs none of those operations.
+
+### `check --heal` — the explicit mutation boundary
+
+- `check` stays report-only by default; `check --heal` (explicit flag
+  only, never automatic from a scheduler) repairs a PARTIAL/MISSING/DRIFT
+  engine through the canonical `install.sh --no-config --no-cron`.
+- Exit: 0 healed · 1 repair attempted but the engine is still broken
+  (completed verdict) · 2 the repair could not be attempted (operational:
+  lock held, dirty patched target file refusal, unwritable target,
+  invalid/unreadable target version, no target checkout).
+- **ACTIVE artifact-mismatch replace-by-design caveat:** in the ACTIVE
+  artifact-mismatch state (markers complete, working-tree patch differs
+  from the package's artifact), heal replaces the stale applied patch in
+  place. Content attribution cannot distinguish a stale product patch from
+  a pre-existing operator edit in that state (current bytes cannot
+  reconstruct history), so an operator edit present in that state before
+  the heal is **replaced by design** — documented here and in the README.
+  Operator protection in the attribution-exact MISSING/PARTIAL states is
+  fail-closed refusal (exit 2, file preserved); in every branch an
+  external modification between snapshot and final revalidation is
+  detected and aborts (exit 2). The residual sub-second window between the
+  final revalidation and the restore is documented: no external-race
+  guarantee extends across it.
+
+### The seven-check smoke and `check --battery`
+
+- Default `check` runs an in-process, read-only, ≤10s **smoke** proving the
+  engine actually masks (not just that markers exist): exact-value partial
+  masking (head/tail/floor) · `mask: "full"` → `***` · short-value floor
+  (≤10 chars fully masked) · key-pattern `KEY=value` · broken pattern file
+  fail-safe fallback (no unmasked gap, no repair) · missing pattern file
+  no-op with built-in redaction intact · file_read sentinel (a masked
+  value can never be written back). Smoke failure → exit 1 with the
+  failing check named.
+- `check --battery` runs the full committed `test.sh` in a sandbox
+  (scratch `HERMES_HOME` + scratch target checkout), bounded by a 30-minute
+  timeout (timeout → exit 2, distinct message), asserts the real
+  package/target/registry/state/git metadata are byte-unchanged and that
+  the battery never recursively invokes `check --battery`. Exit: 0 all
+  green · 1 battery verdict broken · 2 operational.
+
+### W6 cron — `install.sh --cron [SCHEDULE]` / `--no-cron`
+
+- Opt-in only: `--cron` installs one managed line running the package's
+  `check` on the default `0 6 * * *` unless SCHEDULE is given. When neither
+  flag is given, an interactive TTY is prompted; **non-interactive default
+  installs nothing**. Every internal invocation (`check --heal`, all
+  `update` paths, recovery, rollback) passes `--no-cron` — internal
+  installs never surface the prompt (A14).
+- **Schedule grammar:** exactly 5 whitespace-separated fields; each field
+  `*` OR one integer OR one inclusive range `lo-hi` (min ≤ max) OR a
+  comma list of integers within bounds — minute 0–59 · hour 0–23 ·
+  day-of-month 1–31 · month 1–12 · weekday 0–7 (7 ≡ 0). Steps (`*/5`),
+  named fields, wrong field counts, newlines, and `%` are **rejected →
+  exit 2, nothing written**.
+- **Managed line** (canonical quoted form, always emitted):
+  `0 6 * * * HERMES_HOME='…' '<pkg>/bin/info-guard' check  # info-guard-managed:'<pkg>'`
+  — every interpolated value single-quote wrapped with `'\''` escaping; the
+  schedule prefix is required (a schedule-less line is invalid cron).
+  `%` in the executable path, any state path, or the ownership-marker
+  value is **rejected at serialization** (cron's daemon layer parses `%`
+  before the shell — quoting does not protect it) → exit 2, nothing
+  written, no ownership marker. Control characters and newlines are
+  rejected likewise.
+- Re-runs replace ONLY this package's exact managed lines; unrelated
+  entries are preserved byte-for-byte. All crontab read-modify-write
+  operations hold `<state>/cron-install.lock` (flock). `uninstall.sh`
+  removes only this package's managed lines.
+- `crontab` unavailable/unwritable → `install.sh --cron` exits 2 (never a
+  silent no-op).
+- **Stale-cron probe (`check`, read-only):** scans the operator's crontab
+  for `info-guard-managed` lines with a quoted-string tokenizer, rejects
+  `%`/control-character-bearing lines (never executed), and warns when the
+  resolved absolute binary is missing or its `--version` differs from the
+  running binary. **Warning ≠ health verdict: stale-cron warnings return
+  exit 0 — exit-code-only automation cannot see them** (documented
+  limitation). The probe never mutates the crontab and never executes
+  arbitrary crontab text. When `crontab` is unavailable, `check` prints a
+  fixed `cron probe unavailable` warning and still exits per its health
+  verdict (exit 0 unless another problem exists).
+
+### D42 ordering contract
+
+Run `info-guard update` BEFORE `hermes update` — an untested Hermes
+release may not accept the patch. After `hermes update` (which rewrites
+the checkout), run `info-guard check --heal` (or `info-guard update`) to
+restore the engine. `check`'s supported-range floor remains the
+enforcement guard.
+
+
 ## Version notes
 
 - Requires Hermes Agent **v0.20.0+**. One version-tolerant patch: apply-checked

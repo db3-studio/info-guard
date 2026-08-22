@@ -178,8 +178,15 @@ _file_dirty() {
 }
 
 _marker_in_head() {
-    local rel="$1" marker="$2"
-    git -C "$CHECKOUT" show "HEAD:$rel" 2>/dev/null | grep -q "$marker"
+    # case-match on captured output (NEVER `git show | grep -q`: with
+    # set -o pipefail, grep -q's early exit SIGPIPEs git and the pipeline
+    # reports 141 even on a match — spurious misses on large files)
+    local rel="$1" marker="$2" content
+    content="$(git -C "$CHECKOUT" show "HEAD:$rel" 2>/dev/null || true)"
+    case "$content" in
+        *"$marker"*) return 0 ;;
+    esac
+    return 1
 }
 
 # ── 3. lock-first sequence: snapshot → inspect → revalidate → restore ────

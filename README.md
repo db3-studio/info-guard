@@ -248,20 +248,42 @@ the update untouched — but a release that changes the patched code
 untested release may not accept the patch at all. The order that never
 strands you:
 
-1. **Update Info Guard first** (a minute, any time):
-   `git pull` the package, then re-run `~/.info-guard/install.sh`. Since v0.20.4
-   support (2026-08-18), install.sh detects an older applied patch and
-   **replaces it in place** — your pattern file and custom literals are
-   never touched.
-2. **`info-guard check`** — expect OK. If it exits non-zero, resolve
-   before updating Hermes.
+1. **Update Info Guard first** — `~/.info-guard/bin/info-guard update`
+   (one command: fetches the newest release tag from the configured
+   origin over HTTPS, checks out that exact commit, re-runs install.sh,
+   and verifies). Since v0.20.4 support (2026-08-18), install.sh detects
+   an older applied patch and **replaces it in place** — your pattern
+   file and custom literals are never touched. Or the manual form:
+   `git pull` the package, then re-run `~/.info-guard/install.sh`.
+2. **`info-guard check`** — expect OK. It now also runs a seven-check
+   smoke that proves the engine actually masks, not just that the patch
+   markers exist. If it exits non-zero, resolve before updating Hermes.
 3. **`hermes update`** — the freshly-applied patch rides the updater's
    stash; within the tested range it restores cleanly.
 4. **After the update: `info-guard check`** — OK means the patch
-   survived. Non-zero means the release drifted it: pull the latest Info
-   Guard and re-run `~/.info-guard/install.sh`. If install.sh reports the patch
-   "does not apply", hold `hermes update` until this package ships a
-   rebase for that release — it never silently degrades.
+   survived. Non-zero means the release drifted it:
+   `~/.info-guard/bin/info-guard check --heal` (or `info-guard update`)
+   restores the engine automatically — install.sh restores and reapplies
+   a half-reverted patch and replaces a stale one in place. If install.sh
+   reports the patch "does not apply", hold `hermes update` until this
+   package ships a rebase for that release — it never silently degrades.
+
+**`info-guard update`** is always an explicit command — nothing in this
+package updates itself on a schedule. `update --check` is read-only
+(reports a newer release with exit 1 — convenient for scripts). A failed
+update never strands you: `info-guard update --rollback` returns to the
+last verified release by commit id (no local tag required). The update
+JSON envelope (`--json`) is documented in
+[docs/format-spec.md](docs/format-spec.md).
+
+**Heal boundary disclosure:** `check --heal` (and `update`) replace a
+stale applied patch in place when the markers are complete but the
+working-tree patch differs from this package's artifact. In that state
+content attribution cannot distinguish a stale product patch from a
+pre-existing operator edit, so such an edit is **replaced by design**
+(the same limitation applies to `install.sh`). In the attribution-exact
+states (patch missing or partial), an operator edit is refused with exit
+2 and left untouched.
 
 `check` enforces the floor: it verifies the applied patch matches this
 package's artifact **and** that your Hermes version is within the tested
@@ -279,6 +301,20 @@ Cron's five fields are **minute, hour, day-of-month, month, day-of-week** —
 `0 * * * *` means "every hour, at minute 0". The `||` reads as "only when
 `check` fails" (non-zero exit): a healthy check stays silent, a broken one
 runs the echo — which your cron can mail, log, or pipe anywhere.
+
+**Managed cron (optional, opt-in):** `install.sh --cron` installs one
+managed line running `check` on a default `0 6 * * *` schedule (or pass
+your own: `install.sh --cron "5 4 * * *"`). The line pins the state root
+and uses absolute paths; re-running replaces only that managed line and
+uninstall removes it. Non-interactive installs install nothing unless you
+say `--cron`; internal commands (`check --heal`, `update`) never prompt
+for cron. The schedule grammar is strict (five fields, `*`/numbers/ranges/
+lists — no `*/5` steps, no names, no `%`), and paths containing `%` are
+refused (cron treats `%` specially even inside quotes). `check` probes
+managed lines read-only and warns (exit 0 — a warning, not a health
+verdict) when a line points at a missing or stale binary, so exit-code-only
+automation won't see it. See [docs/format-spec.md](docs/format-spec.md)
+for the full contract.
 
 ## Uninstall
 
