@@ -4405,14 +4405,71 @@ check("WC A11: upstream merge behavioral gate",
       f"wrong-install={a11_ok4}")
 
 # ── WC SMOKE-1..7: the in-process smoke is the health gate ─────────────
-# (healthy install: check exit 0 — the smoke ran green in-process; broken
-# engine fixture: check names the failing smoke checks + exit 1)
+# (plan §6.2/§N.3 canonical names: the seven masking assertions the
+# in-process smoke runs, asserted individually so the ledger proves each
+# one — same fixture corpus as the battery's redact() helper, one source,
+# never a second corpus; the healthy/broken engine-gate checks follow
+# under the non-colliding WC SMOKE-GATE names.
+# NOTE: the smoke checks use a DEDICATED pattern file, not the shared
+# pfile — the external-audit C5 batch rewrites pfile mid-run with a
+# different literal set, so checks running after it must not rely on
+# pfile's original contents)
+smoke_pfile = os.path.join(tmp, "smoke-patterns.json")
+write(smoke_pfile, {
+    "mask": {"head": 2, "tail": 2, "floor": 12},
+    "literals": [
+        DEFAULT_LIT,
+        {"value": FULL_LIT, "mask": "full"},
+        SHORT_LIT,
+    ],
+    "key_patterns": {"IG_PROBE_PIN": True},
+})
+check("WC SMOKE-1: exact-value partial masking",
+      redact(DEFAULT_LIT, patterns=smoke_pfile) == "ig...45",
+      f"got {redact(DEFAULT_LIT, patterns=smoke_pfile)!r}")
+check("WC SMOKE-2: full mask",
+      redact(FULL_LIT, patterns=smoke_pfile) == "***",
+      f"got {redact(FULL_LIT, patterns=smoke_pfile)!r}")
+check("WC SMOKE-3: short-value floor",
+      redact(SHORT_LIT, patterns=smoke_pfile) == "***",
+      f"got {redact(SHORT_LIT, patterns=smoke_pfile)!r}")
+check("WC SMOKE-4: key-pattern masking",
+      redact("IG_PROBE_PIN=1234", patterns=smoke_pfile) == "IG_PROBE_PIN=***",
+      f"got {redact('IG_PROBE_PIN=1234', patterns=smoke_pfile)!r}")
+# 5: broken pattern file -> fail-safe fallback, no unmasked gap, NO repair
+# (mirrors _smoke_failed()'s probe: prime the cache, corrupt the file with
+# a newer mtime, assert no unmasked gap AND the file is left untouched)
+smoke_broken = os.path.join(tmp, "smoke-broken.json")
+write(smoke_broken, {"mask": {"head": 2, "tail": 2, "floor": 12},
+                     "literals": ["ig-broken-probe"], "key_patterns": {}})
+_t5 = time.time()
+redact("ig-broken-probe", patterns=smoke_broken)   # prime the cache
+os.utime(smoke_broken, (_t5, _t5))
+with open(smoke_broken, "w") as _f:
+    _f.write("{not json")
+os.utime(smoke_broken, (_t5 + 2, _t5 + 2))
+_out5 = redact("ig-broken-probe", patterns=smoke_broken)
+check("WC SMOKE-5: broken-pattern fail-safe",
+      "ig-broken-probe" not in _out5
+      and open(smoke_broken).read() == "{not json",
+      f"out={_out5!r} repaired={open(smoke_broken).read()!r}")
+# 6: missing pattern file -> no-op; built-in redaction still works
+os.environ.pop("HERMES_REDACT_PATTERNS", None)
+check("WC SMOKE-6: missing-pattern no-op",
+      redact_sensitive_text("hello world") == "hello world",
+      f"got {redact_sensitive_text('hello world')!r}")
+# 7: file_read sentinel — a masked value can never be written back
+_sent7 = redact(f"value={DEFAULT_LIT}", file_read=True, patterns=smoke_pfile)
+check("WC SMOKE-7: file-read sentinel",
+      _sent7 != f"value={DEFAULT_LIT}" and "ig-probe" not in _sent7
+      and "12345" not in _sent7, f"got {_sent7!r}")
+# engine-gate checks (the smoke as the health gate; broken engine fixture:
+# check exits 1 and names the failing smoke checks)
 r = _wc_run(["check"], a11_home)   # healthy ACTIVE-by-upstream install
-check("WC SMOKE: healthy check runs the in-process smoke green (exit 0)",
+check("WC SMOKE-GATE: healthy check runs the in-process smoke green (exit 0)",
       r.returncode == 0, f"rc={r.returncode}")
-for _sn in range(1, 8):
-    check(f"WC SMOKE-{_sn}: broken engine named by the smoke gate",
-          a11_ok3, f"fixture rc={r.returncode}")
+check("WC SMOKE-GATE: broken engine named by the smoke gate (exit 1)",
+      a11_ok3, "wrong-engine check must exit 1 and name WC SMOKE-1..7")
 
 # ── WC A13 + WC S3: cron lifecycle and safety ──────────────────────────
 a13_home = Path(WC_TMP, "a13-home")
@@ -4779,7 +4836,8 @@ new19 = subprocess.run(["git", "-C", str(a19_pkg), "rev-parse", "HEAD"],
                        capture_output=True, text=True).stdout.strip()
 a19_ok2 = ref19 == old19 and new19 != old19
 # delete the local tag -> rollback must still work (commit id only)
-subprocess.run(["git", "-C", str(a19_pkg), "tag", "-d", "v0.7.0"], check=True)
+subprocess.run(["git", "-C", str(a19_pkg), "tag", "-d", "v0.7.0"],
+               check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 r = subprocess.run([sys.executable, str(a19_pkg / "bin" / "info-guard"),
                     "update", "--rollback", "--json"], env=_wc_env(a19_home),
                    cwd=str(a19_pkg), capture_output=True, text=True,
@@ -4860,13 +4918,14 @@ subprocess.run(["git", "-C", str(s1_pkg), "-c", "user.email=ig@test",
                check=True)
 moved = subprocess.run(["git", "-C", str(s1_pkg), "rev-parse", "HEAD"],
                        capture_output=True, text=True).stdout.strip()
-subprocess.run(["git", "-C", str(s1_pkg), "tag", "-f", "v0.8.0"], check=True)
+subprocess.run(["git", "-C", str(s1_pkg), "tag", "-f", "v0.8.0"], check=True,
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 subprocess.run(["git", "-C", str(s1_pkg), "push", "-q", "-f", str(s1_remote),
                 "v0.8.0"], check=True)
 subprocess.run(["git", "-C", str(s1_pkg), "checkout", "-q", "v0.7.0"],
                check=True)
 subprocess.run(["git", "-C", str(s1_pkg), "branch", "-D", "wc-bump"],
-               check=True)
+               check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 r = subprocess.run([sys.executable, str(s1_pkg / "bin" / "info-guard"),
                     "update", "--json"], env=_wc_env(s1_home),
                    cwd=str(s1_pkg), capture_output=True, text=True,
