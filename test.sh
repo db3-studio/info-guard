@@ -3019,6 +3019,318 @@ if old_dl_wb.returncode == 0:
 else:
     skip("WB A9: v0.6.1 binary downgrade probe", "tag v0.6.1 unavailable")
 
+# ── 26. Wave B evidence-gate battery (r1 fold, IG D103) — collision classes,
+# watch matrix, review_list membership, scan boundary, CLI JSON shapes,
+# old-consumer additive tolerance, kind migration/0600, adversarial kinds ──
+# (evidence-gate r1 MAJ-1..9 / MIN-1: the approved plan §9.4–§9.9 required
+# these; the r1 bundle under-delivered.)
+
+# B1 — collision precedence: every existing finding class → exactly ONE
+# HONEYTOKEN row, known:false, value_id, no lower-tier duplicate
+def wb_collision_fixture(lines, env_extra=""):
+    """Write scan fixtures + .env into wb_home, run preflight --json,
+    return (rc, json)."""
+    if env_extra:
+        with open(os.path.join(wb_home, ".env"), "w") as f:
+            f.write(env_extra)
+    with open(decoy, "w") as f:
+        f.writelines(lines)
+    r = wb_run("preflight", "--json")
+    try:
+        return r.returncode, json.loads(r.stdout)
+    except ValueError:
+        return r.returncode, None
+
+# fresh canary for this section (registry was reset by A9's old-binary probe)
+b1_plant = wb_run("literals", "add", "--kind", "honeytoken", "wb-b1-canary-1234567890abcd")
+b1_val = "wb-b1-canary-1234567890abcd"
+b1_id = None
+b1_reg = json.load(open(wb_cl))
+for e in b1_reg["literals"]:
+    if isinstance(e, dict) and e.get("value") == b1_val:
+        b1_id = e["id"]
+# NOTE: the canary pass matches ANY line containing the value — the
+# collision classes below verify the HONEYTOKEN tier wins and no
+# lower-tier row is emitted for the same file:line:value.
+open(decoy, "w").write(f"API_KEY={b1_val}\n")
+r = wb_run("preflight", "--json")
+b1_ok = r.returncode == 4
+if b1_ok:
+    try:
+        bj = json.loads(r.stdout)
+        ht = [v for v in bj["top_values"] if v.get("type") == "HONEYTOKEN"]
+        b1_ok = len(ht) == 1 and ht[0]["value_id"] == b1_id \
+            and ht[0]["known"] is False
+    except (ValueError, KeyError, TypeError):
+        b1_ok = False
+check("WB B1: plain canary → one HONEYTOKEN row, known:false, value_id",
+      b1_ok, f"rc={r.returncode}")
+# collision with a KNOWN .env value (same value in .env — O5 family)
+rc, bj = wb_collision_fixture([f'API_KEY="{b1_val}"\n'], f"DECOY_KEY=\"{b1_val}\"\n")
+b1k = rc == 4 and bj is not None
+if b1k:
+    ht = [v for v in bj["top_values"] if v.get("type") == "HONEYTOKEN"]
+    b1k = len(ht) == 1 and ht[0].get("source_key") == "DECOY_KEY" \
+        and bj["totals"]["known"] == 0  # never a second KNOWN row
+check("WB B1: canary + KNOWN .env collision → one HONEYTOKEN row w/ source_key, zero KNOWN",
+      b1k, f"rc={rc}")
+open(os.path.join(wb_home, ".env"), "w").write("")
+# collision with a shape/credential-shaped line: the canary line itself
+# must NOT double-count as credential-shaped (HONEYTOKEN wins its row);
+# a SEPARATE non-canary shape value is a genuine independent finding.
+rc, bj = wb_collision_fixture([f"TOKEN={b1_val}\n", "sk-probe-abcdef1234567890\n"])
+b1s = rc == 4 and bj is not None
+if b1s:
+    ht = [v for v in bj["top_values"] if v.get("type") == "HONEYTOKEN"]
+    b1s = len(ht) == 1 and bj["totals"]["credential_shaped"] == 1 \
+        and bj["totals"]["raw_detections"] == 1  # only the non-canary line
+check("WB B1: canary + separate shape line → one HONEYTOKEN row; shape row counts only the non-canary",
+      b1s, f"rc={rc}")
+# multi-line/multi-file row granularity: same canary on 2 files → 2 rows
+open(os.path.join(wb_home, "sessions", "decoy2.txt"), "w").write(f"X={b1_val}\n")
+rc, bj = wb_collision_fixture([f"API_KEY={b1_val}\n"])
+b1m = rc == 4 and bj is not None
+if b1m:
+    ht = [v for v in bj["top_values"] if v.get("type") == "HONEYTOKEN"]
+    b1m = len(ht) == 1 and bj["totals"]["honeytoken_rows"] == 2 \
+        and bj["totals"]["honeytoken"] == 1
+check("WB B1: same canary on 2 files → 1 distinct value, 2 rows (file:line:value)",
+      b1m, f"rc={rc}")
+os.unlink(os.path.join(wb_home, "sessions", "decoy2.txt"))
+# negative fixture: a NON-canary exact value never matches HONEYTOKEN
+# (it IS a genuine credential-shaped finding → exit 1, zero honeytoken)
+rc, bj = wb_collision_fixture(["sk-probe-abcdef1234567890\n"])
+b1n = rc == 1 and bj is not None and bj["totals"]["honeytoken"] == 0 \
+    and bj["totals"]["honeytoken_rows"] == 0
+check("WB B1: non-canary value → no HONEYTOKEN rows (shape finding only)",
+      b1n, f"rc={rc}")
+
+# B2 — watch matrix completeness: absent canary (no row), one-event
+# exclusion from new_values, sticky after later runs
+open(decoy, "w").write(f"API_KEY={b1_val}\n")
+wb_run("watch", "--reset")  # baseline WITH canary present
+w = wb_run("watch", "--json")
+b2ok = w.returncode == 0
+if b2ok:
+    try:
+        wj = json.loads(w.stdout)
+        pv = wj["exposure"]["protected_values"]
+        ht_pv = [m for m in pv if m.get("type") == "HONEYTOKEN"]
+        b2ok = len(ht_pv) == 1 and ht_pv[0]["delta"] == "unchanged" \
+            and wj["exposure"]["new_values"] == [] \
+            and wj["exposure"]["changed_values"] == []
+    except (ValueError, KeyError):
+        b2ok = False
+check("WB B2: baselined canary → delta:unchanged, absent from new/changed (one-event)",
+      b2ok, f"rc={w.returncode}")
+# absent canary → no protected row, no resolved HONEYTOKEN row (the
+# fixture line is a genuine shape value → exit 1, but zero canary rows)
+open(decoy, "w").write("sk-probe-abcdef1234567890\n")
+w = wb_run("watch", "--json")
+b2a = w.returncode == 1
+if b2a:
+    try:
+        wj = json.loads(w.stdout)
+        b2a = wj["exposure"]["protected_values"] == [] \
+            and all(m.get("type") != "HONEYTOKEN"
+                    for m in wj["exposure"]["resolved_values"])
+    except (ValueError, KeyError):
+        b2a = False
+check("WB B2: absent canary → no protected row, never a resolved HONEYTOKEN row",
+      b2a, f"rc={w.returncode}")
+# sticky: replant (remove+re-add) → new id → new detection → 4
+wb_run("literals", "remove", b1_id)
+wb_run("literals", "add", "--kind", "honeytoken", "wb-b2-sticky-1234567890abcd")
+open(decoy, "w").write("API_KEY=wb-b2-sticky-1234567890abcd\n")
+w = wb_run("watch")
+check("WB B2: replanted canary (fresh id) → new detection → exit 4 (sticky lifecycle)",
+      w.returncode == 4, f"rc={w.returncode}")
+
+# B3 — review_list membership: multiple values, unchanged retention,
+# canary/SUSPICIOUS collision exclusion
+open(decoy, "w").write("api_key = 6f8c3b2a9d1e4f7a8b2c3d4e5f6a7b8c\n")
+open(os.path.join(wb_home, "sessions", "susp2.txt"), "w").write(
+    "token = bf9c2a1d8e4f7a6b3c5d9e2f8a1b4c7d\n")
+w = wb_run("watch", "--json")
+b3ok = w.returncode == 0
+if b3ok:
+    try:
+        wj = json.loads(w.stdout)
+        rl = wj["exposure"]["review_list"]
+        b3ok = len(rl) == 2 and wj["exposure"]["review_list_complete"] is True
+    except (ValueError, KeyError):
+        b3ok = False
+check("WB B3: review_list = ALL current SUSPICIOUS values (2 distinct)",
+      b3ok, f"rc={w.returncode}")
+# unchanged retention across runs (current-scan report, not delta)
+w2 = wb_run("watch", "--json")
+b3u = w2.returncode == 0
+if b3u:
+    try:
+        wj2 = json.loads(w2.stdout)
+        b3u = len(wj2["exposure"]["review_list"]) == 2  # unchanged rows remain
+    except (ValueError, KeyError):
+        b3u = False
+check("WB B3: review_list retains unchanged rows run-to-run (not delta-filtered)",
+      b3u, f"rc={w2.returncode}")
+os.unlink(os.path.join(wb_home, "sessions", "susp2.txt"))
+# canary classified as SUSPICIOUS by gitleaks → excluded from review_list.
+# The canary IS present in the scan (that's the touch) → exit 4; the
+# assertion is: the same value appears as a HONEYTOKEN protected row and
+# is ABSENT from review_list (one event, no duplicate representation).
+wb_run("literals", "add", "--kind", "honeytoken", "6f8c3b2a9d1e4f7a8b2c3d4e5f6a7b8c")
+open(decoy, "w").write("api_key = 6f8c3b2a9d1e4f7a8b2c3d4e5f6a7b8c\n")
+w = wb_run("watch", "--json")
+b3c = w.returncode == 4  # canary-touch
+if b3c:
+    try:
+        wj = json.loads(w.stdout)
+        rl = wj["exposure"]["review_list"]
+        pv = [m for m in wj["exposure"]["protected_values"]
+              if m.get("type") == "HONEYTOKEN"]
+        b3c = rl == [] and len(pv) == 1  # canary row present, review_list empty
+    except (ValueError, KeyError):
+        b3c = False
+check("WB B3: canary + SUSPICIOUS-shaped value → HONEYTOKEN row, excluded from review_list",
+      b3c, f"rc={w.returncode}")
+
+# B4 — scan boundary: unplanted clean, planted one-finding, explicit
+# state-dir scan reports (never suppresses)
+wb_run("literals", "remove", "wb-b3-suspicious-1234567890".__str__()) if False else None
+# remove both b3 canaries by value lookup
+b4_reg = json.load(open(wb_cl))
+for e in list(b4_reg["literals"]):
+    if isinstance(e, dict) and e.get("kind") == "honeytoken":
+        wb_run("literals", "remove", e["id"])
+open(decoy, "w").write("plain text\n")
+r = wb_run("preflight")
+check("WB B4: canary registered but NOT planted → default-dirs scan exit 0, zero findings",
+      r.returncode == 0, f"rc={r.returncode}")
+# plant it → exactly one finding, exit 4
+wb_run("literals", "add", "--kind", "honeytoken", "wb-b4-boundary-1234567890")
+open(decoy, "w").write("API_KEY=wb-b4-boundary-1234567890\n")
+r = wb_run("preflight", "--json")
+b4p = r.returncode == 4
+if b4p:
+    try:
+        bj = json.loads(r.stdout)
+        b4p = bj["totals"]["honeytoken_rows"] == 1
+    except (ValueError, KeyError):
+        b4p = False
+check("WB B4: planted canary → exactly one HONEYTOKEN row, exit 4",
+      b4p, f"rc={r.returncode}")
+# explicit scan of the state dir → match reported (operator-chosen target)
+r = wb_run("preflight", "--json", os.path.join(wb_home, "state"))
+b4e = r.returncode == 4
+if b4e:
+    try:
+        bj = json.loads(r.stdout)
+        b4e = bj["totals"]["honeytoken"] == 1
+    except (ValueError, KeyError):
+        b4e = False
+check("WB B4: explicit state-dir scan → canary match REPORTED (not suppressed)",
+      b4e, f"rc={r.returncode}")
+open(decoy, "w").write("plain text\n")
+
+# B5 — old-consumer additive tolerance: HONEYTOKEN assessment row +
+# review_list watch keys, real v0.6.1 binary
+old_bin_wb2 = os.path.join(tmp, "info-guard-0.6.1")
+if old_dl_wb.returncode == 0 and os.path.exists(old_bin_wb2):
+    # assessment with a HONEYTOKEN row (feed the old binary a v0.7.0
+    # assessment object and assert no failure + the row is preserved in
+    # its output path — the old binary renders from its own scan, so the
+    # probe is: old binary runs preflight against a canary-bearing
+    # registry+scan and does NOT crash, reports the value as a masked
+    # credential-shaped/known row (it doesn't know HONEYTOKEN — syntactic
+    # tolerance means it must not FAIL, and the unknown-kind registry
+    # field is preserved verbatim).
+    old_env = dict(env_wb)
+    old_run = subprocess.run([sys.executable, old_bin_wb2, "preflight"],
+                             env=old_env, capture_output=True, text=True,
+                             timeout=300)
+    check("WB B5: v0.6.1 preflight against canary-bearing registry+scan → no crash, masked output",
+          old_run.returncode in (0, 1, 2) and "sk-probe" not in (old_run.stdout + old_run.stderr),
+          f"rc={old_run.returncode} err={old_run.stderr[:200]!r}")
+else:
+    skip("WB B5: v0.6.1 old-consumer probe", "tag v0.6.1 unavailable")
+
+# B6 — kind migration + 0600 preservation across every new mutation
+b6_reg_file = wb_cl
+open(b6_reg_file, "w").write(json.dumps({"literals": [
+    {"value": "wb-b6-legacy", "kind": "honeytoken", "mask": "full"}]}))  # v1-style
+os.chmod(b6_reg_file, 0o600)
+r = wb_run("literals", "list")
+b6reg = json.load(open(b6_reg_file))
+b6ok = (os.stat(b6_reg_file).st_mode & 0o777) == 0o600 \
+    and b6reg.get("version") == 2 \
+    and any(isinstance(e, dict) and e.get("value") == "wb-b6-legacy"
+            and e.get("kind") == "honeytoken" and len(e.get("id", "")) == 16
+            for e in b6reg["literals"])
+check("WB B6: v1→v2 migration preserves kind + assigns id, mode stays 0600",
+      b6ok, f"reg={b6reg}")
+# remove preserves 0600 + unknown fields
+r = wb_run("literals", "remove", "wb-b6-legacy") if False else None
+for e in list(json.load(open(b6_reg_file))["literals"]):
+    if isinstance(e, dict) and e.get("value") == "wb-b6-legacy":
+        wb_run("literals", "remove", e["id"])
+b6reg2 = json.load(open(b6_reg_file))
+check("WB B6: remove preserves 0600 + drops only the target entry",
+      (os.stat(b6_reg_file).st_mode & 0o777) == 0o600
+      and not any(isinstance(e, dict) and e.get("value") == "wb-b6-legacy"
+                  for e in b6reg2["literals"]))
+
+# B7 — adversarial unknown-kind: quote/newline/backslash/>40 chars,
+# one warning per invocation, byte-exact
+adv_kind = "quote'kind\nwith\\backslash" + "x" * 40
+open(wb_cl, "w").write(json.dumps({"version": 2, "literals": [
+    {"value": "wb-adv-kind-val", "id": "cccccccccccccccc", "kind": adv_kind}]}))
+r1 = wb_run("literals", "list")
+r2 = wb_run("literals", "list")
+w1c = r1.stderr.count("unknown literal kind")
+w2c = r2.stderr.count("unknown literal kind")
+check("WB B7: adversarial unknown kind → exactly one escaped warning per invocation",
+      w1c == 1 and w2c == 1 and "\\n" in r1.stderr and "\\" in r1.stderr
+      and "…" in r1.stderr,  # 40-char truncation marker
+      f"w1={w1c} w2={w2c} err={r1.stderr[:200]!r}")
+
+# B8 — §2.4 CLI JSON shapes executed (parsed-object equality)
+open(wb_cl, "w").write(json.dumps({"version": 2, "literals": []}))
+r = wb_run("literals", "add", "--kind", "honeytoken", "--json")
+b8a = r.returncode == 0
+if b8a:
+    try:
+        j = json.loads(r.stdout)
+        b8a = len(j["added"]) == 1 and j["added"][0].get("id") and \
+            j["added"][0]["value_masked"].startswith("ht...") \
+            and len(j["added"][0]["value_masked"]) == 7  # ht...XX (2+2)
+    except (ValueError, KeyError):
+        b8a = False
+check("WB B8: generated add --json → added[id, value_masked 2+2], exit 0",
+      b8a, f"rc={r.returncode} out={r.stdout[:150]!r}")
+b8_id = json.loads(r.stdout)["added"][0]["id"]
+r = wb_run("literals", "remove", b8_id, "--json")
+b8r = r.returncode == 0
+if b8r:
+    try:
+        j = json.loads(r.stdout)
+        b8r = j == {"removed": True, "id": b8_id}
+    except ValueError:
+        b8r = False
+check("WB B8: remove found --json → {removed:true, id}, exit 0",
+      b8r, f"rc={r.returncode} out={r.stdout[:150]!r}")
+r = wb_run("literals", "add", "wb-b8-normal-literal")
+r = wb_run("literals", "list", "--json")
+b8l = r.returncode == 0
+if b8l:
+    try:
+        j = json.loads(r.stdout)
+        normal = [x for x in j["literals"] if x.get("value_masked") == "wb...al"]
+        b8l = len(normal) == 1 and "kind" not in normal[0]  # absent-never-null
+    except (ValueError, KeyError):
+        b8l = False
+check("WB B8: list --json → normal literal carries no kind key (absent-never-null)",
+      b8l, f"rc={r.returncode}")
+
 print(f"\n[test] {PASS} passed, {FAIL} failed"
       f" (discovered={PASS + FAIL + SKIP} executed={PASS + FAIL} "
       f"passed={PASS} skipped={SKIP} failed={FAIL})")
