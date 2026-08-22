@@ -7,7 +7,8 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 ## [v0.7.0] - 2026-08-22
 
 Wave B (P3, IG D103) — honeytokens + exit 4 normative + `review_list`
-(W2). Binding contract: `proposals/honeytokens.md` (workspace, v1.3).
+(W2). Binding contract: `proposals/honeytokens.md` (workspace, v1.4,
+amended by IG D105).
 
 ### Added
 - **Honeytoken plant** — `literals add --kind honeytoken [VALUE]`:
@@ -42,6 +43,10 @@ Wave B (P3, IG D103) — honeytokens + exit 4 normative + `review_list`
 - Exit ladder in `docs/format-spec.md`: 4 is now normative (was
   reserved); the watch reduction gains watch-side 4; consumer obligations
   updated (codes > 4 remain unexpected).
+- Honeytoken watch deltas: `decreased` is now NORMATIVE (IG D105) — a
+  still-present baselined canary with fewer occurrences serializes
+  `delta: "decreased"` + `count_before`, exit 0 (informational; matches
+  the general protected-value contract).
 - `literals list` shows `kind` for honeytokens (2+2 masked display —
   the `mask: full` directive is redaction-surface-only, never a CLI
   rendering directive).
