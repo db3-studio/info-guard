@@ -41,6 +41,7 @@ PY="$(command -v python3)"
 "$PY" - "$CHECKOUT" <<'PYEOF'
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -458,6 +459,180 @@ inst_manifest = json.load(
 check("install: install.json records the extracted version",
       inst_manifest.get("version") == expected_ver,
       f"manifest={inst_manifest.get('version')!r} want={expected_ver!r}")
+
+# 11f. install→uninstall round-trip: the two scripts must agree end-to-end
+#      on the SAME checkout — install applies, uninstall restores the
+#      exact base tree (the highest-value uninstall guarantee).
+scratch4 = os.path.join(tmp, "roundtrip")
+os.makedirs(scratch4, exist_ok=True)
+for rel in ("agent/redact.py", "cli.py", "gateway/run.py",
+            "hermes_cli/config.py", "hermes_cli/main.py"):
+    d = os.path.join(scratch4, os.path.dirname(rel))
+    os.makedirs(d, exist_ok=True)
+    clean = subprocess.run(["git", "-C", CHECKOUT, "show", f"HEAD:{rel}"],
+                           capture_output=True, text=True, check=True).stdout
+    with open(os.path.join(scratch4, rel), "w") as f:
+        f.write(clean)
+subprocess.run(["git", "-C", scratch4, "init", "-q"], check=True)
+subprocess.run(["git", "-C", scratch4, "add", "-A"], check=True)
+subprocess.run(["git", "-C", scratch4, "-c", "user.email=ig@test",
+                "-c", "user.name=ig-test", "commit", "-q", "-m", "base"],
+               check=True)
+rt_home = os.path.join(tmp, "roundtrip-home")
+env_rt = dict(os.environ)
+env_rt["HERMES_HOME"] = rt_home
+rt_inst = subprocess.run(
+    ["bash", os.path.join(os.getcwd(), "install.sh"), "--checkout", scratch4,
+     "--no-config", "--no-test"],
+    env=env_rt, capture_output=True, text=True, timeout=300)
+rt_after_inst = subprocess.run(
+    ["git", "-C", scratch4, "apply", "--reverse", "--check", PATCH_PATH],
+    capture_output=True)
+check("round-trip: install.sh applies the artifact cleanly",
+      rt_inst.returncode == 0 and rt_after_inst.returncode == 0,
+      f"rc={rt_inst.returncode} rev={rt_after_inst.returncode} "
+      f"out={rt_inst.stdout[-250:]!r} err={rt_inst.stderr[-250:]!r}")
+rt_uninst = subprocess.run(
+    ["bash", os.path.join(os.getcwd(), "uninstall.sh"), "--checkout", scratch4,
+     "--no-config", "--yes", "--keep-state"],
+    env=env_rt, capture_output=True, text=True, timeout=120)
+rt_diff = subprocess.run(
+    ["git", "-C", scratch4, "diff", "--exit-code", "HEAD"],
+    capture_output=True)
+check("round-trip: uninstall.sh restores the exact base tree",
+      rt_uninst.returncode == 0 and rt_diff.returncode == 0,
+      f"rc={rt_uninst.returncode} diff={rt_diff.returncode} "
+      f"out={rt_uninst.stdout[-250:]!r} err={rt_uninst.stderr[-250:]!r}")
+
+# 11g. drifted 5/5 tree (uninstall-side mirror of 11a): markers all
+#      present but content tampered -> reverse-apply must fail LOUDLY
+#      with restore guidance, and the tree must be left fully intact
+#      (never a half-removal).
+scratch5 = os.path.join(tmp, "uninstall-drift")
+os.makedirs(scratch5, exist_ok=True)
+for rel in ("agent/redact.py", "cli.py", "gateway/run.py",
+            "hermes_cli/config.py", "hermes_cli/main.py"):
+    d = os.path.join(scratch5, os.path.dirname(rel))
+    os.makedirs(d, exist_ok=True)
+    clean = subprocess.run(["git", "-C", CHECKOUT, "show", f"HEAD:{rel}"],
+                           capture_output=True, text=True, check=True).stdout
+    with open(os.path.join(scratch5, rel), "w") as f:
+        f.write(clean)
+subprocess.run(["git", "-C", scratch5, "init", "-q"], check=True)
+subprocess.run(["git", "-C", scratch5, "add", "-A"], check=True)
+subprocess.run(["git", "-C", scratch5, "-c", "user.email=ig@test",
+                "-c", "user.name=ig-test", "commit", "-q", "-m", "base"],
+               check=True)
+subprocess.run(["git", "-C", scratch5, "apply", PATCH_PATH], check=True)
+drift_f = os.path.join(scratch5, "gateway", "run.py")
+drift_src = open(drift_f).read()
+open(drift_f, "w").write(
+    drift_src.replace("HERMES_REDACT_PATTERNS", "HERMES_REDACT_PATTERNS ", 1))
+drift_probe = subprocess.run(
+    ["git", "-C", scratch5, "apply", "--reverse", "--check", PATCH_PATH],
+    capture_output=True)
+check("uninstall: precondition — drifted 5/5 tree fails reverse-check",
+      drift_probe.returncode != 0)
+drift_uninst = subprocess.run(
+    ["bash", os.path.join(os.getcwd(), "uninstall.sh"), "--checkout", scratch5,
+     "--no-config", "--yes", "--keep-state"],
+    env=env_u, capture_output=True, text=True, timeout=120)
+dout = drift_uninst.stdout + drift_uninst.stderr
+check("uninstall: drifted 5/5 tree fails loud with restore guidance",
+      drift_uninst.returncode != 0 and "reverse-apply failed" in dout
+      and "patch removed" not in dout,
+      f"rc={drift_uninst.returncode} out={dout[-300:]!r}")
+drift_markers = subprocess.run(
+    ["bash", "-c",
+     "n=0; "
+     'grep -q _redact_registry_patterns "$1/agent/redact.py" && n=$((n+1)); '
+     'grep -q redact_patterns "$1/hermes_cli/config.py" && n=$((n+1)); '
+     'grep -q HERMES_REDACT_PATTERNS "$1/hermes_cli/main.py" && n=$((n+1)); '
+     'grep -q HERMES_REDACT_PATTERNS "$1/cli.py" && n=$((n+1)); '
+     'grep -q HERMES_REDACT_PATTERNS "$1/gateway/run.py" && n=$((n+1)); '
+     "echo $n",
+     "ig-mark", scratch5],
+    capture_output=True, text=True)
+check("uninstall: drifted tree left fully intact (5/5 markers)",
+      drift_markers.stdout.strip() == "5",
+      f"markers={drift_markers.stdout.strip()!r}")
+
+# 11h. idempotent re-run: README claims "safe to re-run" — a second
+#      uninstall on a clean tree says "nothing to reverse", exit 0,
+#      tree unchanged.
+idem = subprocess.run(
+    ["bash", os.path.join(os.getcwd(), "uninstall.sh"), "--checkout", scratch3,
+     "--no-config", "--yes", "--keep-state"],
+    env=env_u, capture_output=True, text=True, timeout=120)
+idem_diff = subprocess.run(
+    ["git", "-C", scratch3, "diff", "--exit-code", "HEAD"],
+    capture_output=True)
+check("uninstall: idempotent re-run — 'nothing to reverse', exit 0, tree unchanged",
+      idem.returncode == 0 and "nothing to reverse" in (idem.stdout + idem.stderr)
+      and idem_diff.returncode == 0,
+      f"rc={idem.returncode} diff={idem_diff.returncode} out={idem.stdout[-200:]!r}")
+
+# 11i. state-dir handling: the DEFAULT moves <home>/state/info-guard to
+#      *.bak-<timestamp> (safety copy, never deleted); --keep-state
+#      leaves it in place. Also covers the real scenario of uninstalling
+#      after the engine is already gone (0/5) — state still cleaned.
+state_dir = os.path.join(uihome, "state")
+os.makedirs(os.path.join(state_dir, "info-guard"), exist_ok=True)
+with open(os.path.join(state_dir, "info-guard", "custom_literals.json"), "w") as f:
+    f.write('{"literals": []}\n')
+sd1 = subprocess.run(
+    ["bash", os.path.join(os.getcwd(), "uninstall.sh"), "--checkout", scratch3,
+     "--no-config", "--yes"],
+    env=env_u, capture_output=True, text=True, timeout=120)
+baks = [p for p in os.listdir(state_dir) if p.startswith("info-guard.bak-")]
+check("uninstall: default moves state dir to *.bak-<timestamp>",
+      sd1.returncode == 0
+      and not os.path.exists(os.path.join(state_dir, "info-guard"))
+      and len(baks) == 1
+      and os.path.exists(os.path.join(state_dir, baks[0], "custom_literals.json")),
+      f"rc={sd1.returncode} baks={baks}")
+os.makedirs(os.path.join(state_dir, "info-guard"), exist_ok=True)
+with open(os.path.join(state_dir, "info-guard", "custom_literals.json"), "w") as f:
+    f.write('{"literals": []}\n')
+sd2 = subprocess.run(
+    ["bash", os.path.join(os.getcwd(), "uninstall.sh"), "--checkout", scratch3,
+     "--no-config", "--yes", "--keep-state"],
+    env=env_u, capture_output=True, text=True, timeout=120)
+baks2 = [p for p in os.listdir(state_dir) if p.startswith("info-guard.bak-")]
+check("uninstall: --keep-state leaves state dir in place, no new .bak",
+      sd2.returncode == 0
+      and os.path.exists(os.path.join(state_dir, "info-guard"))
+      and len(baks2) == 1,
+      f"rc={sd2.returncode} baks={baks2}")
+
+# 11j. marker-list consistency: install.sh / uninstall.sh /
+#      bin/info-guard _ENGINE_MARKERS must describe the SAME (file,
+#      marker) set — the structural invariant whose drift (one of three
+#      copies weakened) caused the S2 regression. The battery now locks
+#      it, so adding a 6th patched file can't silently desync.
+def _marker_pairs(text):
+    pairs = set()
+    for m in re.finditer(r'grep -q "([^"]+)"\s+"\$CHECKOUT/([^"]+)"', text):
+        pairs.add((m.group(2), m.group(1)))
+    for m in re.finditer(r'"([^"]+)": "([^"]+)"', text):
+        pairs.add((m.group(1), m.group(2)))
+    return pairs
+
+install_src = open(os.path.join(os.getcwd(), "install.sh")).read()
+uninstall_src = open(os.path.join(os.getcwd(), "uninstall.sh")).read()
+ig_bin_src = open(os.path.join(os.getcwd(), "bin", "info-guard")).read()
+m_install = _marker_pairs(
+    install_src.split("_marker_count()")[1].split('echo "$n"')[0])
+m_uninstall = _marker_pairs(
+    uninstall_src.split("_marker_count()")[1].split('echo "$n"')[0])
+m_bin = _marker_pairs(
+    ig_bin_src.split("_ENGINE_MARKERS")[1].split("_SUPPORTED_MIN")[0])
+check("markers: install.sh == uninstall.sh (5 pairs)",
+      m_install == m_uninstall and len(m_install) == 5,
+      f"install={sorted(m_install)} uninstall={sorted(m_uninstall)}")
+check("markers: both scripts == bin/info-guard _ENGINE_MARKERS",
+      m_install == m_bin and len(m_bin) == 5,
+      f"scripts={sorted(m_install)} bin={sorted(m_bin)}")
 
 # ── 12. preflight v2.1 report: structure, tiers, masking, exit codes ──
 pf_home = os.path.join(tmp, "pf-home")
