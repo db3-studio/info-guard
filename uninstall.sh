@@ -68,10 +68,27 @@ if [ "$YES" != "1" ]; then
 fi
 
 # ── 1. reverse the patch (only if applied) ──────────────────────────────
-if grep -q "_redact_registry_patterns" "$CHECKOUT/agent/redact.py"; then
+# Same 5-marker integrity check as install.sh / `check` (external-audit
+# B2/F5; S2 regression): a single-marker grep misses a partially-reverted
+# patch and would report "nothing to reverse" while 4 files stay patched.
+_marker_count() {
+    local n=0
+    grep -q "_redact_registry_patterns" "$CHECKOUT/agent/redact.py" 2>/dev/null && n=$((n+1))
+    grep -q "redact_patterns"            "$CHECKOUT/hermes_cli/config.py" 2>/dev/null && n=$((n+1))
+    grep -q "HERMES_REDACT_PATTERNS"     "$CHECKOUT/hermes_cli/main.py" 2>/dev/null && n=$((n+1))
+    grep -q "HERMES_REDACT_PATTERNS"     "$CHECKOUT/cli.py" 2>/dev/null && n=$((n+1))
+    grep -q "HERMES_REDACT_PATTERNS"     "$CHECKOUT/gateway/run.py" 2>/dev/null && n=$((n+1))
+    echo "$n"
+}
+MARKERS=$(_marker_count)
+if [ "$MARKERS" = "5" ]; then
     git -C "$CHECKOUT" apply -R "$HERE/patch/redactor-registry-patterns.patch" \
         || die "reverse-apply failed — the checkout drifted; restore manually (git -C $CHECKOUT checkout -- agent/redact.py cli.py gateway/run.py hermes_cli/config.py hermes_cli/main.py)"
     say "patch removed (reverse-applied)"
+elif [ "$MARKERS" != "0" ]; then
+    die "engine PARTIAL ($MARKERS/5 markers) — a failed hermes update likely half-reverted the patch.
+     Refusing to uninstall a partial engine. Restore the patched files first, then re-run uninstall.sh:
+       git -C $CHECKOUT checkout -- agent/redact.py cli.py gateway/run.py hermes_cli/config.py hermes_cli/main.py"
 else
     say "patch not applied — nothing to reverse"
 fi

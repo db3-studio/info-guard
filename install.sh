@@ -125,7 +125,10 @@ fi
 # Install manifest: records WHICH package version installed the engine —
 # the preflight report header and `check` show it. Rewritten on every
 # install so re-installs update the recorded version.
-IG_VERSION="$(grep -oP '_PACKAGE_VERSION = "\K[^"]+' "$HERE/bin/info-guard" || echo unknown)"
+# Portable version extraction (S3): `grep -oP` is GNU-only — BSD grep
+# (macOS) would silently fall through to "unknown". awk is POSIX.
+IG_VERSION="$(awk -F'"' '/_PACKAGE_VERSION = /{print $2; exit}' "$HERE/bin/info-guard")"
+[ -n "$IG_VERSION" ] || IG_VERSION=unknown
 cat > "$STATE_DIR/install.json" <<EOF
 {"version": "$IG_VERSION", "installed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 EOF

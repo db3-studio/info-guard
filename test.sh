@@ -369,6 +369,96 @@ check("check: missing engine exits 1",
       chk2.returncode == 1,
       f"rc={chk2.returncode} out={chk2.stdout[-200:]!r}")
 
+# 11d. uninstall integrity (S2): a PARTIAL engine must be refused loudly,
+#      never reported as "nothing to reverse" — regression for the
+#      single-marker bug (external audit S2). Precondition asserted: the
+#      partial tree still fails the full reverse-check (something IS left
+#      to reverse), proving the old behavior would have lied.
+scratch2 = os.path.join(tmp, "uninstall-partial")
+os.makedirs(scratch2, exist_ok=True)
+for rel in ("agent/redact.py", "cli.py", "gateway/run.py",
+            "hermes_cli/config.py", "hermes_cli/main.py"):
+    d = os.path.join(scratch2, os.path.dirname(rel))
+    os.makedirs(d, exist_ok=True)
+    clean = subprocess.run(["git", "-C", CHECKOUT, "show", f"HEAD:{rel}"],
+                           capture_output=True, text=True, check=True).stdout
+    with open(os.path.join(scratch2, rel), "w") as f:
+        f.write(clean)
+subprocess.run(["git", "-C", scratch2, "init", "-q"], check=True)
+subprocess.run(["git", "-C", scratch2, "add", "-A"], check=True)
+subprocess.run(["git", "-C", scratch2, "-c", "user.email=ig@test",
+                "-c", "user.name=ig-test", "commit", "-q", "-m", "base"],
+               check=True)
+subprocess.run(["git", "-C", scratch2, "apply", PATCH_PATH], check=True)
+# half-revert: restore ONLY agent/redact.py -> 4/5 markers remain
+subprocess.run(["git", "-C", scratch2, "checkout", "--", "agent/redact.py"],
+               check=True)
+partial_probe = subprocess.run(
+    ["git", "-C", scratch2, "apply", "--reverse", "--check", PATCH_PATH],
+    capture_output=True)
+check("uninstall: precondition — partial tree still fails reverse-check",
+      partial_probe.returncode != 0)
+uihome = os.path.join(tmp, "uninstall-home")
+env_u = dict(os.environ)
+env_u["HERMES_HOME"] = uihome
+uninst = subprocess.run(
+    ["bash", os.path.join(os.getcwd(), "uninstall.sh"), "--checkout", scratch2,
+     "--no-config", "--yes", "--keep-state"],
+    env=env_u, capture_output=True, text=True, timeout=120)
+uout = uninst.stdout + uninst.stderr
+check("uninstall: partial engine (4/5) refused loudly, not 'nothing to reverse'",
+      uninst.returncode != 0 and "PARTIAL" in uout
+      and "nothing to reverse" not in uout,
+      f"rc={uninst.returncode} out={uout[-300:]!r}")
+# full engine (5/5) -> clean reverse-apply, tree back to the base commit
+scratch3 = os.path.join(tmp, "uninstall-full")
+os.makedirs(scratch3, exist_ok=True)
+for rel in ("agent/redact.py", "cli.py", "gateway/run.py",
+            "hermes_cli/config.py", "hermes_cli/main.py"):
+    d = os.path.join(scratch3, os.path.dirname(rel))
+    os.makedirs(d, exist_ok=True)
+    clean = subprocess.run(["git", "-C", CHECKOUT, "show", f"HEAD:{rel}"],
+                           capture_output=True, text=True, check=True).stdout
+    with open(os.path.join(scratch3, rel), "w") as f:
+        f.write(clean)
+subprocess.run(["git", "-C", scratch3, "init", "-q"], check=True)
+subprocess.run(["git", "-C", scratch3, "add", "-A"], check=True)
+subprocess.run(["git", "-C", scratch3, "-c", "user.email=ig@test",
+                "-c", "user.name=ig-test", "commit", "-q", "-m", "base"],
+               check=True)
+subprocess.run(["git", "-C", scratch3, "apply", PATCH_PATH], check=True)
+uninst2 = subprocess.run(
+    ["bash", os.path.join(os.getcwd(), "uninstall.sh"), "--checkout", scratch3,
+     "--no-config", "--yes", "--keep-state"],
+    env=env_u, capture_output=True, text=True, timeout=120)
+tree_back = subprocess.run(
+    ["git", "-C", scratch3, "diff", "--exit-code", "HEAD"],
+    capture_output=True)
+check("uninstall: full engine (5/5) reverse-applies to clean base",
+      uninst2.returncode == 0 and tree_back.returncode == 0,
+      f"rc={uninst2.returncode} diff={tree_back.returncode} "
+      f"out={uninst2.stdout[-250:]!r} err={uninst2.stderr[-250:]!r}")
+
+# 11e. install-manifest version extraction (S3): must be portable (no
+#      GNU-only grep -oP) and exact. Re-run the SAME command install.sh
+#      uses, cross-check against the source literal, and verify the
+#      manifest 11a's install actually wrote.
+pkg_src = open(os.path.join(os.getcwd(), "bin", "info-guard")).read()
+expected_ver = pkg_src.split('_PACKAGE_VERSION = "')[1].split('"')[0]
+ver_extract = subprocess.run(
+    ["bash", "-c",
+     "awk -F'\"' '/_PACKAGE_VERSION = /{print $2; exit}' \"$1\"",
+     "ig-ver", os.path.join(os.getcwd(), "bin", "info-guard")],
+    capture_output=True, text=True)
+check("install: manifest version extraction portable + exact",
+      ver_extract.returncode == 0 and ver_extract.stdout.strip() == expected_ver,
+      f"got={ver_extract.stdout.strip()!r} want={expected_ver!r}")
+inst_manifest = json.load(
+    open(os.path.join(ihome, "state", "info-guard", "install.json")))
+check("install: install.json records the extracted version",
+      inst_manifest.get("version") == expected_ver,
+      f"manifest={inst_manifest.get('version')!r} want={expected_ver!r}")
+
 # ── 12. preflight v2.1 report: structure, tiers, masking, exit codes ──
 pf_home = os.path.join(tmp, "pf-home")
 for sub in ("sessions", "logs", "cron/output"):
@@ -394,7 +484,7 @@ pf = subprocess.run(
 pfo = pf.stdout + pf.stderr
 check("preflight: findings exit code 1", pf.returncode == 1,
       f"rc={pf.returncode} out={pfo[-300:]!r}")
-for section in ("Info Guard v0.6.0 — Preflight Security Assessment",
+for section in ("Info Guard v0.6.1 — Preflight Security Assessment",
                 "STATUS", "EXECUTIVE SUMMARY", "WHAT MATTERS",
                 "CREDENTIAL EXPOSURE BY FAMILY",
                 "EXPOSURE LOCATIONS",
@@ -554,7 +644,7 @@ ver = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
     capture_output=True, text=True, timeout=60)
 check("--version prints the package version",
-      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.6.0",
+      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.6.1",
       f"rc={ver.returncode} out={ver.stdout.strip()!r}")
 
 # 12d. detection gaps (v0.3.1): Authorization family + dot-structured

@@ -250,13 +250,26 @@ optional install) is left alone — it's a standalone tool.
 ## Add your own secrets
 
 The sanctioned way (v0.4.2) — registers the value, assigns its `value_id`
-(printed), and writes the file for you:
+(printed), and writes the file for you. **Prefer `--file`** — a value
+passed directly on the command line lands in your shell history and is
+visible to other local users via `ps`/`/proc/<pid>/cmdline` while the
+process runs (the same doctrine `docs/full-stack.md` holds: no value ever
+transits a chat or a shell history):
 
 ```bash
-./bin/info-guard literals add "someone@example.com"
-./bin/info-guard literals add "anything-sensitive" --mask full
+printf '%s\n' "someone@example.com" "anything-sensitive" > /tmp/ig-values.txt
+./bin/info-guard literals add --file /tmp/ig-values.txt
 ./bin/info-guard literals list
 ```
+
+`--file` reads one value per line (blank lines and `#` comments are
+ignored); `--mask STYLE` applies to every value in the file. For
+per-value masks, edit the JSON form below instead.
+
+> **Warning:** `literals add VALUE...` accepts values directly as
+> arguments for convenience, but command-line arguments are visible to
+> other local users while the process runs and persist in shell history.
+> Use `--file` for anything actually sensitive.
 
 You can still edit `<hermes-home>/state/info-guard/custom_literals.json`
 directly (plain strings or `{"value", "mask"}` dicts are fine — the app
