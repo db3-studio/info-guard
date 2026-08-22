@@ -46,14 +46,13 @@ roadmap as v2.
 
 ## Install
 
-Requires Hermes Agent **v0.20.0+** — the patch is apply-checked and the
-upstream test suite passes 15/15 against v0.20.0, v0.20.1, v0.20.2,
-v0.20.3 (2026.8.16.2), v0.20.4 (2026.8.18), and v0.20.5 (2026.8.19) — one version-tolerant
-patch; `test.sh` is the package's own 35-check battery, separate from the
+Requires Hermes Agent **v0.20.0+** — the patch is one version-tolerant
+artifact, CI-checked across the supported range (**v0.20.0 – v0.20.5**);
+`test.sh` is the package's own verification battery, separate from the
 upstream suite.
 Takes about two minutes.
 
-**Defaults at a glance** (all overridable — see `./bin/info-guard --help`):
+**Defaults at a glance** (all overridable — see `~/.info-guard/bin/info-guard --help`):
 
 | Setting | Default |
 |---|---|
@@ -63,7 +62,7 @@ Takes about two minutes.
 | State dir | `$HERMES_HOME/state/info-guard/` |
 | Pattern file | `<state>/redact_patterns.json` (`<state>` = the state dir above), chmod 600 |
 | Preflight scan dirs | `<home>/sessions`, `<home>/logs`, `<home>/cron/output` (`<home>` = `$HERMES_HOME`) |
-| Exit codes | 0 clean · 1 findings-or-delta alarm · 2 usage or operational error · 3 KNOWN present (preflight only) · 4 reserved |
+| Exit codes | 0 clean · 1 findings-or-delta alarm · 2 usage or operational error · 3 KNOWN present (preflight only) · 4 canary at rest (honeytoken) — preflight + watch |
 
 **Step 1 — download.** Get the checkout — nothing is installed or
 modified yet:
@@ -81,8 +80,8 @@ whether you're *already* leaking without knowing it — Hermes' own transcripts
 and logs may hold secrets that predate redaction:
 
 ```bash
-./bin/info-guard preflight          # sample report — one example per family
-./bin/info-guard preflight --full   # complete deduplicated ledger, same masking
+~/.info-guard/bin/info-guard preflight          # sample report — one example per family
+~/.info-guard/bin/info-guard preflight --full   # complete deduplicated ledger, same masking
 ```
 
 Zero-config, read-only, nothing written, output fully masked. Scans
@@ -179,17 +178,17 @@ how you work:
 
 ```bash
 cd ~/.info-guard
-./install.sh          # patches the Hermes Agent checkout (agent/redact.py + 3 entry points), seeds the pattern file, runs the test battery
+~/.info-guard/install.sh          # patches the Hermes Agent checkout (agent/redact.py + 3 entry points), seeds the pattern file, runs the test battery
 ```
 
 That is the whole mechanism: `install.sh` patches your Hermes Agent checkout
 (`agent/redact.py` + 3 entry points) so the pattern file is read at every
-message boundary — and `./uninstall.sh` reverses it cleanly.
+message boundary — and `~/.info-guard/uninstall.sh` reverses it cleanly.
 
 **Your Hermes agent:**
 
-> Follow the README at ~/.info-guard: run ./install.sh, then ./bin/info-guard
-> build, then verify with ./test.sh.
+> Follow the README at ~/.info-guard: run ~/.info-guard/install.sh, then
+> ~/.info-guard/bin/info-guard build, then verify with ~/.info-guard/test.sh.
 
 The agent will read `docs/format-spec.md` for the file format and
 `docs/full-stack.md` for the optional full stack.
@@ -207,7 +206,7 @@ The agent will read `docs/format-spec.md` for the file format and
 **Step 4 — build your pattern file:**
 
 ```bash
-./bin/info-guard build   # pulls every secret-shaped KEY=value from your .env sources
+~/.info-guard/bin/info-guard build   # pulls every secret-shaped KEY=value from your .env sources
 ```
 
 Masking is live immediately; a restart of running Hermes processes (gateway,
@@ -215,10 +214,10 @@ web UI) picks it up on next start.
 
 **Step 4b (optional) — the guided build wizard (`info-guard setup`):**
 the interactive version of Step 4's `build` — run it instead of
-`./bin/info-guard build` if you want the wizard:
+`~/.info-guard/bin/info-guard build` if you want the wizard:
 
 ```bash
-./bin/info-guard setup
+~/.info-guard/bin/info-guard setup
 ```
 
 The wizard walks every preflight candidate one at a time — **values shown
@@ -249,7 +248,7 @@ untested release may not accept the patch at all. The order that never
 strands you:
 
 1. **Update Info Guard first** (a minute, any time):
-   `git pull` the package, then re-run `./install.sh`. Since v0.20.4
+   `git pull` the package, then re-run `~/.info-guard/install.sh`. Since v0.20.4
    support (2026-08-18), install.sh detects an older applied patch and
    **replaces it in place** — your pattern file and custom literals are
    never touched.
@@ -259,7 +258,7 @@ strands you:
    stash; within the tested range it restores cleanly.
 4. **After the update: `info-guard check`** — OK means the patch
    survived. Non-zero means the release drifted it: pull the latest Info
-   Guard and re-run `./install.sh`. If install.sh reports the patch
+   Guard and re-run `~/.info-guard/install.sh`. If install.sh reports the patch
    "does not apply", hold `hermes update` until this package ships a
    rebase for that release — it never silently degrades.
 
@@ -272,7 +271,7 @@ to whatever your scheduler supports (cron mail, ntfy, a log line):
 
 ```cron
 # adjust the path if you didn't install to ~/.info-guard
-0 * * * * ~/.info-guard/bin/info-guard check || echo "info-guard: BROKEN — run install.sh"
+0 * * * * ~/.info-guard/bin/info-guard check || echo "info-guard: BROKEN — run ~/.info-guard/install.sh"
 ```
 
 Cron's five fields are **minute, hour, day-of-month, month, day-of-week** —
@@ -283,7 +282,7 @@ runs the echo — which your cron can mail, log, or pipe anywhere.
 ## Uninstall
 
 ```bash
-./uninstall.sh            # confirm prompt; --yes to skip it
+~/.info-guard/uninstall.sh            # confirm prompt; --yes to skip it
 ```
 
 Cleanly reverses install: reverse-applies the patch (skipped if absent),
@@ -305,8 +304,8 @@ transits a chat or a shell history):
 
 ```bash
 printf '%s\n' "someone@example.com" "anything-sensitive" > /tmp/ig-values.txt
-./bin/info-guard literals add --file /tmp/ig-values.txt
-./bin/info-guard literals list
+~/.info-guard/bin/info-guard literals add --file /tmp/ig-values.txt
+~/.info-guard/bin/info-guard literals list
 ```
 
 `--file` reads one value per line (blank lines and `#` comments are
@@ -326,7 +325,7 @@ assigns `id` fields on the next load; nothing you add is ever stripped):
 {"literals": ["someone@example.com", {"value": "anything-sensitive", "mask": "full"}]}
 ```
 
-Then `./bin/info-guard build`. Live within seconds — no restarts, survives
+Then `~/.info-guard/bin/info-guard build`. Live within seconds — no restarts, survives
 rebuilds. Email addresses, phone numbers, API tokens, names, anything you
 decide is sensitive. The `id` on each entry is the `value_id` that
 `watch --json` emits on protected rows — the join key for alert consumers.
@@ -342,7 +341,7 @@ More examples — value types, mask styles, key patterns — in
 ## Test
 
 ```bash
-./test.sh
+~/.info-guard/test.sh
 ```
 
 Synthetic values only — no real secrets. Verifies exact-value masking

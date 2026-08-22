@@ -56,6 +56,15 @@ amended by IG D105).
   the tested-range claim in the four sites (`_SUPPORTED_MAX`,
   README ×2, format-spec, CI matrix ref list + all-five→all-six).
 
+### Fixed
+- **README path-consistency pass** — every user-facing invocation now uses
+  the absolute `~/.info-guard/...` form (works from any cwd; matches the
+  canonical install location and the cron example); stale counts removed
+  ("15/15" → CI-matrix framing; the battery count is dropped so it can't
+  drift); the defaults-table exit code says "4 canary at rest (honeytoken)
+  — preflight + watch" (normative since v0.7.0); supported-versions
+  paragraph tidied to the v0.20.0–v0.20.5 range statement.
+
 ## [v0.6.1] - 2026-08-21
 
 Audit-response patch release (external audit, 2026-08-21 — findings
