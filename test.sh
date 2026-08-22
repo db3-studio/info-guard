@@ -5482,6 +5482,7 @@ check("WC A17: hostile env check reports only lines and safe keys",
       r.returncode == 1
       and all(re.fullmatch(r"\d+: [A-Za-z_][A-Za-z0-9_]*|\d+:",
                            ln) for ln in r.stdout.splitlines())
+      and "7: KEY6" in r.stdout          # dot-source attempt flagged too
       and V_LIT not in r.stdout + r.stderr
       and "touch" not in r.stdout + r.stderr
       and "source" not in r.stdout + r.stderr,

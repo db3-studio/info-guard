@@ -276,9 +276,12 @@ def _report_env_violations(report, lineno, key, raw_value):
 # command substitution, backticks, redirects, pipes, background/AND-OR
 # separators, and nested source/. attempts. A URL's '&' separator is a
 # shell separator too — the grammar check is deliberately stricter than
-# build's value extraction (Phase B plan r1 MAJ-1 fold option (a)).
+# build's value extraction (Phase B plan r1 MAJ-1 fold option (a)). The
+# dot-source form ('. file') is anchored to the value start or a
+# separator — a bare word-boundary before '.' would never match
+# (non-word char at both sides).
 _SHELL_PAYLOAD_RE = re.compile(
-    r"\$\(|`|[;|><&]|\b(?:source|\.)\s+")
+    r"\$\(|`|[;|><&]|\bsource\s+|(?:^|[\s=;|&])\.\s+")
 
 
 def _load_env(path: Path):
