@@ -71,6 +71,22 @@ Usage:
                                     --kind honeytoken plants a canary).
   info-guard literals list         List registered literals (masked only).
   info-guard literals remove ID    Remove one literal by id (Wave B).
+  info-guard pipe                  Mask stdin against the registry
+                                    (fail-closed: missing matcher -> exit 2,
+                                    no passthrough).
+  info-guard view <surface> <arg>  Masked viewers (read-only display):
+                                    systemd-unit <name> | docker-env
+                                    <container> | compose-config <path> |
+                                    file <path>. Child output is masked
+                                    before emission; child stderr is never
+                                    forwarded raw.
+  info-guard env [FILE] [--check|--keys]
+                                    Keys + lengths only — never values.
+                                    --check = non-executing grammar
+                                    validation (line numbers + safe keys,
+                                    exit 1 on malformed lines).
+                                    --keys = bare sorted unique key names.
+                                    Prefer masked viewers over raw dumps.
 
 Sources merged by `build`:
   1. Every KEY=value pair from the env files, except:
@@ -129,6 +145,9 @@ _SUBCOMMAND_USAGE = {
     "update": "info-guard update [--check] [--json] [--rollback]   Update the package from the configured origin (run BEFORE `hermes update` — D42 ordering contract)",
     "literals": "info-guard literals add VALUE... [--mask STYLE] [--file FILE] [--json]   Register custom literals (ids assigned)\n"
                 "info-guard literals list [--json]   List registered literals (id + masked value)",
+    "pipe": "info-guard pipe    Mask stdin against the registry (fail-closed: missing matcher -> exit 2, no passthrough)",
+    "view": "info-guard view <surface> <arg>   Masked viewer: systemd-unit <name> | docker-env <container> | compose-config <path> | file <path>",
+    "env": "info-guard env [FILE] [--check|--keys]   Keys + lengths only (never values); --check = non-executing grammar validation; --keys = bare sorted unique keys",
 }
 
 VALID_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -172,7 +191,7 @@ def _is_non_secret_key(k: str) -> bool:
             or NON_SECRET_FLAG_RE.search(k))
 
 
-def _parse_env_lines(lines):
+def _parse_env_lines(lines, report=None):
     """Pure parser: [KEY: value] from already-split lines. Returns
     (entries, saw_content, saw_valid_entry). NO I/O — read/decode errors
     are the caller's job (_load_env raises SystemExit with a path-only
@@ -181,27 +200,85 @@ def _parse_env_lines(lines):
     documented .env grammar (v0.4.x characterization: byte-identical
     behavior, verified by the battery's parser-characterization block).
     saw_content = any non-blank line; saw_valid_entry = >=1 valid
-    KEY=value pair (the env-pass malformed-source classifier)."""
+    KEY=value pair (the env-pass malformed-source classifier).
+
+    `report` (optional, W13 env --check): a callback
+    report(lineno, category, safe_key_or_None) invoked for every line the
+    CHECK surface classifies as a grammar violation, plus
+    report(lineno, "valid", key, value) for every valid assignment (the
+    default env viewer consumes the valid events for its per-line
+    key-length output — the same per-line verdict the build path uses).
+    The callback is a reporting CHANNEL ONLY — the valid-assignment
+    extraction above is byte-identical with or without it (build/matcher
+    build call without report; env/--check call with it). Violation
+    categories (Phase B plan r1 MAJ-1/MAJ-2 folds,
+    self-sustain-phase-b §4.3):
+      bad-key-form       no '=' / invalid key token
+      unterminated-quote value starts with a quote char that never closes
+      control-characters any C0/C1 control character in the line
+      shell-payload      value carries a shell-execution construct
+                         ($(, backtick, ;, |, >, <, &, source/. attempts)
+                         — classified as a violation under the A17
+                         exit-1 row; never executed, never evaluated
+    `safe_key` is the key token only when it matches the key grammar AND
+    is not a registered literal AND contains no registered value (checked
+    by the caller against the loaded pattern doc)."""
     out = {}
     saw_content = saw_valid_entry = False
-    for line in lines:
+    for idx, line in enumerate(lines):
+        lineno = idx + 1
         line = line.strip()
         if not line:
             continue
         saw_content = True
         if line.startswith("#") or "=" not in line:
+            if report is not None and "=" not in line \
+                    and not line.startswith("#"):
+                report(lineno, "bad-key-form", None)
             continue
         k, _, v = line.partition("=")
         k = k.strip().strip('"').strip("'")
         if not VALID_KEY_RE.match(k):
+            if report is not None:
+                report(lineno, "bad-key-form", None)
             continue
+        if report is not None:
+            _report_env_violations(report, lineno, k, v)
         v = v.strip().strip('"').strip("'")
         # strip trailing comments (only when preceded by whitespace; a
         # # inside the value is part of the value)
         v = re.sub(r"\s+#.*$", "", v)
         out[k] = v
         saw_valid_entry = True
+        if report is not None:
+            report(lineno, "valid", k, v)
     return out, saw_content, saw_valid_entry
+
+
+def _report_env_violations(report, lineno, key, raw_value):
+    """W13 env --check violation overlay over the shared .env grammar
+    (Phase B plan §4.3). Called only when a check-mode report callback is
+    active; never changes the build path's extracted entries. Categories
+    are value-free by design — no raw line, value, or quote payload is
+    ever passed to the reporter."""
+    if any(ord(c) < 32 or 127 <= ord(c) < 160 for c in raw_value):
+        report(lineno, "control-characters", key)
+        return
+    v = raw_value.strip()
+    if len(v) >= 2 and v[0] in "\"'" and v[-1] != v[0]:
+        report(lineno, "unterminated-quote", key)
+        return
+    if _SHELL_PAYLOAD_RE.search(v):
+        report(lineno, "shell-payload", key)
+
+
+# Shell-execution constructs in a .env value (W13 A17 hostile class):
+# command substitution, backticks, redirects, pipes, background/AND-OR
+# separators, and nested source/. attempts. A URL's '&' separator is a
+# shell separator too — the grammar check is deliberately stricter than
+# build's value extraction (Phase B plan r1 MAJ-1 fold option (a)).
+_SHELL_PAYLOAD_RE = re.compile(
+    r"\$\(|`|[;|><&]|\b(?:source|\.)\s+")
 
 
 def _load_env(path: Path):
@@ -352,6 +429,129 @@ def _mask_value(v: str) -> str:
     if len(v) <= 10:
         return "***"
     return v[:2] + "..." + v[-2:]
+
+
+# ── W13 viewers (Phase B) — shared stream-masking engine ────────────────
+# Product-owned masked-stream engine for `pipe` and `view` (fail-closed
+# per proposal §6.1: missing/unreadable pattern file -> masking
+# unavailable, exit 2, NO passthrough; the house redact_pipe.py
+# pass-through semantics are explicitly NOT productized). Semantics
+# mirror the engine's _redact_registry_patterns one-for-one (exact
+# literals longest-first; per-entry mask style; doc default head/tail/
+# floor; key_patterns KEY= / KEY: / JSON forms; empty key values pass
+# through) — the same masking algorithm the smoke asserts, never a
+# second one. Read-only: never writes the registry, matcher, state, or
+# any source file, and never executes or evaluates text.
+_MASK_DEFAULT = {"head": 2, "tail": 2, "floor": 12}
+# Control bytes are stripped from displayed head/tail (engine
+# _DISPLAY_CONTROL_RE parity — a value containing newlines must not
+# break viewer line framing).
+_DISPLAY_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _mask_policy(value: str, spec) -> str:
+    """Mask one matched value per the pattern doc's mask policy: 'full'
+    -> ***; dict -> head/tail/floor (invalid/self-defeating -> default);
+    absent -> the length-driven default (2+2, floor 12). Mirrors the
+    engine's _resolve_mask/_apply_mask/mask_secret semantics."""
+    if spec == "full":
+        return "***"
+    if isinstance(spec, dict):
+        try:
+            head = max(0, int(spec.get("head", _MASK_DEFAULT["head"])))
+            tail = max(0, int(spec.get("tail", _MASK_DEFAULT["tail"])))
+            floor = max(1, int(spec.get("floor", _MASK_DEFAULT["floor"])))
+        except (TypeError, ValueError):
+            head, tail, floor = (_MASK_DEFAULT["head"],
+                                 _MASK_DEFAULT["tail"],
+                                 _MASK_DEFAULT["floor"])
+        if head + tail >= floor:      # would display the whole value
+            head, tail, floor = (_MASK_DEFAULT["head"],
+                                 _MASK_DEFAULT["tail"],
+                                 _MASK_DEFAULT["floor"])
+    else:
+        head, tail, floor = (_MASK_DEFAULT["head"],
+                             _MASK_DEFAULT["tail"],
+                             _MASK_DEFAULT["floor"])
+    value = _DISPLAY_CTRL_RE.sub("", value)
+    if len(value) < floor:
+        return "***"
+    return value[:head] + "..." + value[-tail:]
+
+
+def _load_pattern_doc():
+    """Canonical MATCHER load for the viewers. Returns (doc, state):
+    state 'ok' -> the parsed pattern doc (never None); 'missing' ->
+    missing/unreadable file (fail-closed long diagnostic); 'malformed' ->
+    present but not a usable JSON object (fixed short diagnostic). Reads
+    ONLY; never migrates, repairs, or writes (viewer no-mutation rule,
+    D69 canonical writer untouched)."""
+    try:
+        text = MATCHER.read_text()
+    except OSError:
+        return None, "missing"
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return None, "malformed"
+    if not isinstance(doc, dict):
+        return None, "malformed"
+    return doc, "ok"
+
+
+def _mask_stream(text: str, doc: dict) -> str:
+    """Mask one text stream against a loaded pattern doc. Returns the
+    masked text. Callers establish availability BEFORE passing any
+    source bytes (fail-closed: no unmasked input is ever emitted or
+    written before masking is established)."""
+    lit_values = []
+    lit_masks = {}
+    for item in doc.get("literals", []) or []:
+        if isinstance(item, dict):
+            v = item.get("value")
+            if not isinstance(v, str) or not v:
+                continue
+            lit_values.append(v)
+            if "mask" in item:
+                lit_masks[v] = item["mask"]
+        elif isinstance(item, str) and item:
+            lit_values.append(item)
+    # Longest-first: alternation is first-match, not longest — a shorter
+    # literal that prefixes a longer one must never win (engine parity).
+    lit_values = sorted(set(lit_values), key=len, reverse=True)
+    keys = [k for k in (doc.get("key_patterns") or {})
+            if isinstance(k, str) and k]
+    default_mask = doc.get("mask")
+    if lit_values:
+        lit_re = re.compile("|".join(re.escape(l) for l in lit_values))
+
+        def _lit(m):
+            spec = lit_masks.get(m.group(0))
+            if spec is None:
+                spec = default_mask
+            return _mask_policy(m.group(0), spec)
+        text = lit_re.sub(_lit, text)
+    if keys:
+        key_re = re.compile(
+            r"(?i)\b(" + "|".join(re.escape(k) for k in keys)
+            + r")(['\"]?)(\s*)([=:])(\s*)"
+            + r"(?:\"([^\"\n]*)\"|'([^'\n]*)'|([^\s\"',;}{}\])]+))")
+
+        def _k(m):
+            if m.group(6) is not None:
+                q, val = '"', m.group(6)
+            elif m.group(7) is not None:
+                q, val = "'", m.group(7)
+            else:
+                q, val = "", m.group(8) or ""
+            if not val:
+                return m.group(0)      # empty value — nothing to mask
+            return (m.group(1) + (m.group(2) or "") + m.group(3) + m.group(4)
+                    + m.group(5) + q
+                    + _mask_policy(val, default_mask)
+                    + q)
+        text = key_re.sub(_k, text)
+    return text
 
 
 def _n(x) -> str:
@@ -4895,6 +5095,263 @@ def cmd_check(args):
     return 0
 
 
+# ── W13 viewers (Phase B) — pipe / view / env ───────────────────────────
+# Proposal §6.0 output boundary (binding): argv exec only, child stdout
+# captured-masked-emitted, child stderr never forwarded raw (fixed
+# value-free categories), explicit child-status handling, D55 rules,
+# non-disclosure. Every diagnostic below is a FIXED string — no
+# operator-supplied argument, child output, source path, or registry
+# value is ever interpolated into stderr or stdout.
+
+_VIEW_SURFACES = ("systemd-unit", "docker-env", "compose-config", "file")
+
+# Surface absence-pattern lists (plan r1 MAJ-4 fold; pinned in the
+# format-spec diagnostics table — the pattern selects a category ONLY,
+# it is never emitted).
+_VIEW_ABSENCE_RE = {
+    "systemd-unit": re.compile(r"not be found|No such", re.IGNORECASE),
+    "docker-env": re.compile(r"No such object|not found", re.IGNORECASE),
+    "compose-config": re.compile(r"no such file|not found", re.IGNORECASE),
+}
+
+
+def _viewer_unknown_option(args) -> bool:
+    """D55: an unknown --* flag yields ONLY the fixed warning (the option
+    text and value are NEVER echoed — a --bad=<registered-secret> option
+    must not appear in stderr) and exits 2. Returns True when handled."""
+    for a in args:
+        if a.startswith("--") and a != "--":
+            print("warning: unknown option", file=sys.stderr)
+            return True
+    return False
+
+
+def cmd_pipe(args):
+    """W13 pipe (proposal §6.1): mask stdin against the registry.
+    Fail-closed: masking availability is established BEFORE stdin is
+    read; a missing/unreadable matcher exits 2 with the fixed diagnostic
+    and NO stdout passthrough. Pattern file present but empty registry =
+    masking established, exit 0."""
+    if _viewer_unknown_option(args):
+        return 2
+    if args:
+        print(_SUBCOMMAND_USAGE["pipe"], file=sys.stderr)
+        return 2
+    doc, state = _load_pattern_doc()
+    if state == "missing":
+        print("masking: unavailable (no pattern file — run install.sh + "
+              "build)", file=sys.stderr)
+        return 2
+    if state == "malformed":
+        print("masking: unavailable", file=sys.stderr)
+        return 2
+    data = sys.stdin.buffer.read().decode("utf-8", errors="replace")
+    sys.stdout.write(_mask_stream(data, doc))
+    return 0
+
+
+def _view_child(argv):
+    """Run one child by argument vector (never a shell string). Returns
+    (rc, stdout, stderr); rc is 'NOTFOUND' when the tool is absent from
+    PATH, 'TIMEOUT' is never produced (no timeout by design)."""
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True)
+        return p.returncode, p.stdout, p.stderr
+    except FileNotFoundError:
+        return "NOTFOUND", "", ""
+
+
+def _view_source_failure(surface, rc, stderr_text) -> int:
+    """Source-failure classification (plan r1 MAJ-4 fold): tool missing
+    -> `source: not found`; child exit matches the surface's absence
+    pattern -> `source: not found`; any other failure -> `source:
+    failed`. The pattern is matched internally and NEVER emitted."""
+    if rc == "NOTFOUND":
+        print("source: not found", file=sys.stderr)
+        return 2
+    if surface == "systemd-unit" and rc == 4:
+        print("source: not found", file=sys.stderr)
+        return 2
+    if surface in _VIEW_ABSENCE_RE and \
+            _VIEW_ABSENCE_RE[surface].search(stderr_text or ""):
+        print("source: not found", file=sys.stderr)
+        return 2
+    print("source: failed", file=sys.stderr)
+    return 2
+
+
+def _view_emit(surface, text):
+    """Mask-before-emit for one captured source. Masking must be
+    established before any output: a successful source with an
+    unavailable matcher exits 2 with `masking: unavailable` and the
+    captured source is DISCARDED (never emitted, never written)."""
+    doc, state = _load_pattern_doc()
+    if state != "ok":
+        print("masking: unavailable", file=sys.stderr)
+        return 2
+    sys.stdout.write(_mask_stream(text, doc))
+    return 0
+
+
+def cmd_view(args):
+    """W13 view (proposal §6.2): masked views of operator-named generic
+    surfaces. Explicit surface + explicit name/path only; never a
+    defaulted deployment path. Child stdout is captured, masked, and
+    emitted; child stderr is never forwarded raw."""
+    if not args:
+        print(_SUBCOMMAND_USAGE["view"], file=sys.stderr)
+        return 2
+    surface = args[0]
+    if surface not in _VIEW_SURFACES:
+        print(_SUBCOMMAND_USAGE["view"], file=sys.stderr)
+        return 2
+    rest = args[1:]
+    if _viewer_unknown_option(rest):
+        return 2
+    if surface == "file":
+        if len(rest) != 1:
+            print(_SUBCOMMAND_USAGE["view"], file=sys.stderr)
+            return 2
+        path = Path(rest[0])
+        if not path.exists():
+            print("source: not found", file=sys.stderr)
+            return 2
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            print("source: failed", file=sys.stderr)
+            return 2
+        return _view_emit(surface, text)
+    if len(rest) != 1:
+        print(_SUBCOMMAND_USAGE["view"], file=sys.stderr)
+        return 2
+    arg = rest[0]
+    if surface == "systemd-unit":
+        rc, out, err = _view_child(["systemctl", "cat", arg])
+        if rc != 0:
+            rc2, out2, err2 = _view_child(["systemctl", "--user", "cat", arg])
+            if rc2 == 0:
+                return _view_emit(surface, out2)
+            # classify from the combined attempts (category selection only)
+            if rc == "NOTFOUND" and rc2 == "NOTFOUND":
+                print("source: not found", file=sys.stderr)
+                return 2
+            if (rc == 4 or _VIEW_ABSENCE_RE[surface].search(err or "")
+                    or rc2 == 4 or _VIEW_ABSENCE_RE[surface].search(err2 or "")):
+                print("source: not found", file=sys.stderr)
+                return 2
+            print("source: failed", file=sys.stderr)
+            return 2
+        return _view_emit(surface, out)
+    if surface == "docker-env":
+        rc, out, err = _view_child(
+            ["docker", "inspect",
+             "-f", "{{range .Config.Env}}{{println .}}{{end}}", arg])
+        if rc != 0:
+            return _view_source_failure(surface, rc, err)
+        return _view_emit(surface, out)
+    # compose-config
+    rc, out, err = _view_child(
+        ["docker", "compose", "-f", arg, "config"])
+    if rc != 0:
+        return _view_source_failure(surface, rc, err)
+    return _view_emit(surface, out)
+
+
+def _env_safe_key(key, doc):
+    """Safe-key rule (plan r1 MIN-4 fold): the token matches the key
+    grammar (caller-guaranteed) AND is not itself a registered literal
+    AND contains no registered value. When the pattern doc is
+    unavailable, safety cannot be established -> not safe (line number
+    only, never the key token)."""
+    if doc is None:
+        return False
+    lits = []
+    for item in doc.get("literals", []) or []:
+        if isinstance(item, dict):
+            if isinstance(item.get("value"), str):
+                lits.append(item["value"])
+        elif isinstance(item, str):
+            lits.append(item)
+    if key in lits:
+        return False
+    return not any(lit in key for lit in lits if lit)
+
+
+def cmd_env(args):
+    """W13 env (proposal §6.3): keys + lengths only — never values.
+    FILE is explicit (D51: no house default path). --check is a
+    NON-EXECUTING grammar validation sharing the build parser
+    (_parse_env_lines with a report channel — nothing is sourced,
+    captured, or evaluated). --check and --keys are mutually exclusive
+    (usage exit 2, D55)."""
+    check = keys = False
+    positional = []
+    for a in args:
+        if a == "--check":
+            check = True
+        elif a == "--keys":
+            keys = True
+        elif a == "-":
+            positional.append(a)          # a file literally named '-'
+        elif a.startswith("-"):
+            print("warning: unknown option", file=sys.stderr)
+            return 2
+        else:
+            positional.append(a)
+    if check and keys:
+        print(_SUBCOMMAND_USAGE["env"], file=sys.stderr)
+        return 2
+    if len(positional) != 1:
+        print(_SUBCOMMAND_USAGE["env"], file=sys.stderr)
+        return 2
+    path = Path(positional[0])
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        print("file: unreadable", file=sys.stderr)
+        return 2
+    doc, _state = _load_pattern_doc()
+    events = {}
+
+    def _report(lineno, category, key, value=None):
+        events.setdefault(lineno, []).append((category, key, value))
+    _parse_env_lines(lines, report=_report)
+    if check:
+        violations = [(ln, ev[1]) for ln, evs in sorted(events.items())
+                      for ev in evs if ev[0] != "valid"]
+        for lineno, key in violations:
+            if key is not None and _env_safe_key(key, doc):
+                print(f"{lineno}: {key}")
+            else:
+                print(f"{lineno}:")
+        return 1 if violations else 0
+    if keys:
+        entries, _saw, _ok = _parse_env_lines(lines)
+        for k in sorted(entries):
+            print(k)
+        return 0
+    # default mode: per-line KEY = <N chars> from the SHARED parser's
+    # per-line verdicts (one grammar); blank lines (empty or
+    # whitespace-only) pass through as blank output lines; comments and
+    # malformed lines are DROPPED, never echoed (they may contain
+    # literal secrets). N = decoded Unicode code points, not bytes
+    # (plan r1 MIN-1 fold — diverges from the house wrapper's wc -c).
+    for lineno, raw in enumerate(lines, 1):
+        stripped = raw.strip()
+        if not stripped:
+            print()
+            continue
+        evs = events.get(lineno)
+        if not evs:
+            continue
+        valid = [ev for ev in evs if ev[0] == "valid"]
+        if not valid:
+            continue
+        print(f"{valid[0][1]} = <{len(valid[0][2])} chars>")
+    return 0
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
@@ -4924,6 +5381,12 @@ def main(argv):
         return cmd_check(rest)
     if cmd == "update":
         return cmd_update(rest)
+    if cmd == "pipe":
+        return cmd_pipe(rest)
+    if cmd == "view":
+        return cmd_view(rest)
+    if cmd == "env":
+        return cmd_env(rest)
     if cmd == "literals":
         return cmd_literals(rest)
     print(f"[info-guard] unknown command: {cmd} (try `info-guard --help`)")
