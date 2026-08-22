@@ -4463,15 +4463,22 @@ def _unsafe_cron_value(v: str) -> bool:
 
 def _parse_managed_line(line: str):
     """Parse one managed crontab line -> (exe_path, hermes_home) or None.
-    Grammar: leading NAME='…' assignments, then the executable word
-    '<pkg>/bin/info-guard', then `check`, then `# info-guard-managed:'<pkg>'`.
-    %/control characters anywhere -> rejected (None)."""
+    Grammar: <5 schedule fields> then leading NAME='…' assignments, then
+    the executable word '<pkg>/bin/info-guard', then `check`, then
+    `# info-guard-managed:'<pkg>'`. %/control characters anywhere ->
+    rejected (None)."""
     toks = _shell_tokens(line)
-    if not toks:
+    if not toks or len(toks) < 6:
         return None
+    # the first five bare tokens are the schedule fields (quoted forms are
+    # never valid in the schedule — the grammar rejects them)
+    schedule = toks[:5]
+    if any(("'" in t) or (t.startswith("#")) or ("=" in t) for t in schedule):
+        return None
+    rest = toks[5:]
     exe, hermes_home, i = None, None, 0
-    while i < len(toks):
-        t = toks[i]
+    while i < len(rest):
+        t = rest[i]
         if "=" in t and not t.startswith("#"):
             k, _, v = t.partition("=")
             if k == "HERMES_HOME" and hermes_home is None:
@@ -4485,11 +4492,11 @@ def _parse_managed_line(line: str):
         break
     if exe is None:
         return None
-    rest = toks[i:]
-    if not rest or rest[0] != "check":
+    tail = rest[i:]
+    if not tail or tail[0] != "check":
         return None
     marker_ok = False
-    for t in rest[1:]:
+    for t in tail[1:]:
         if t == "#":
             continue
         if t.startswith(_CRON_MARKER_PREFIX):

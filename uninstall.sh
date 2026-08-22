@@ -106,6 +106,41 @@ else
     say "no hermes CLI on PATH — config key left as-is (inert without the engine)"
 fi
 
+# ── 2.5 cron managed-line removal (W6/S5 — only exact managed lines for
+#      THIS package; every unrelated entry preserved byte-for-byte) ──────
+_cron_quote() { # single-quote wrap with '\'' escaping (canonical form)
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+_remove_managed_cron() {
+    command -v crontab >/dev/null 2>&1 \
+        || { say "cron: no crontab on PATH — nothing to remove"; return 0; }
+    # product lockfile lives under the state dir; if the state dir is
+    # absent, no cooperating cron operation can be running — remove without
+    # locking rather than recreating the state dir on uninstall
+    if [ -d "$STATE_DIR" ]; then
+        exec 8>"$STATE_DIR/cron-install.lock" 2>/dev/null \
+            || { say "cron: cannot acquire the cron lock — managed line left in place"; return 0; }
+        if ! flock -n 8; then
+            say "cron: another cron operation in progress — managed line left in place (re-run uninstall to remove it)"
+            return 0
+        fi
+    fi
+    local marker current kept
+    marker="# info-guard-managed:$(_cron_quote "$HERE")"
+    current="$(crontab -l 2>/dev/null || true)"
+    kept="$(printf '%s\n' "$current" | grep -vF -- "$marker" | sed '/^$/d' || true)"
+    if [ "$(printf '%s' "$kept")" != "$(printf '%s' "$current")" ]; then
+        if printf '%s\n' "$kept" | crontab -; then
+            say "cron: removed the managed line(s) for this package"
+        else
+            say "cron: crontab write failed — managed line(s) left in place"
+        fi
+    else
+        say "cron: no managed line for this package present"
+    fi
+}
+_remove_managed_cron
+
 # ── 3. state dir ────────────────────────────────────────────────────────
 if [ "$KEEP_STATE" = "1" ]; then
     say "state dir left in place (--keep-state): $STATE_DIR"

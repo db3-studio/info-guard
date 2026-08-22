@@ -360,12 +360,115 @@ _write_manifest
 say "wrote $STATE_DIR/install.json (manifest: v$IG_VERSION)"
 
 # ── 9. cron offering (W6/S5 — opt-in only; internal calls pass --no-cron) ─
-_cron_install() {
-    # implemented in install.sh's cron section (Wave C Step 5) — validated
-    # schedule, shell-escaped paths, % rejection, managed-line ownership,
-    # <state>/cron-install.lock serialization. Exit 2 on any refusal.
-    # (The full implementation lives below this function.)
-    :
+# Managed-line grammar (canonical quoted form — the quoted forms are ALWAYS
+# emitted, never only when the path contains specials):
+#   HERMES_HOME='<escaped>' '<escaped pkg>/bin/info-guard' check  # info-guard-managed:'<escaped pkg>'
+# Every interpolated value is single-quote wrapped with the '\'' escape.
+# '%' is REJECTED (never escaped) — cron's daemon layer parses '%' as an
+# input separator BEFORE the shell, so shell quoting does not protect it.
+_is_int() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+
+_cron_reject() { # any unsafe value -> 0 (reject). % / newline / control chars.
+    local v
+    for v in "$@"; do
+        case "$v" in
+            *'%'*) return 0 ;;
+        esac
+        printf '%s' "$v" | grep -q '[[:cntrl:]]' && return 0
+    done
+    return 1
+}
+
+_cron_quote() { # single-quote wrap with '\'' escaping (canonical form)
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+_cron_schedule_valid() { # strict 5-field grammar (proposal §7)
+    local s="$1" i f
+    case "$s" in
+        *$'\n'*|*'%'*|*[!0-9*,\-[:space:]]*) return 1 ;;
+    esac
+    [ "$(printf '%s' "$s" | awk '{print NF}')" = "5" ] || return 1
+    i=0
+    # while-read (NOT `for f in $s` — an unquoted expansion would glob the
+    # '*' fields against the cwd)
+    while IFS= read -r f; do
+        i=$((i+1))
+        local min=0 max=0
+        case $i in
+            1) min=0; max=59 ;;
+            2) min=0; max=23 ;;
+            3) min=1; max=31 ;;
+            4) min=1; max=12 ;;
+            5) min=0; max=7 ;;
+        esac
+        case "$f" in
+            '*') ;;
+            *','*)
+                # while-read over the comma parts (no glob expansion)
+                while IFS= read -r part; do
+                    _is_int "$part" || return 1
+                    [ "$part" -ge "$min" ] && [ "$part" -le "$max" ] || return 1
+                done <<< "$(printf '%s' "$f" | tr ',' '\n')" ;;
+            *'-'*)
+                local lo="${f%%-*}" hi="${f##*-}"
+                _is_int "$lo" || return 1
+                _is_int "$hi" || return 1
+                [ "$lo" -ge "$min" ] && [ "$hi" -le "$max" ] && [ "$lo" -le "$hi" ] || return 1 ;;
+            *)
+                _is_int "$f" || return 1
+                [ "$f" -ge "$min" ] && [ "$f" -le "$max" ] || return 1 ;;
+        esac
+    done <<< "$(printf '%s' "$s" | tr ' ' '\n')"
+    return 0
+}
+
+_cron_managed_line() { # $1 = schedule; prints the canonical managed line
+    # <schedule> HERMES_HOME='…' '<pkg>/bin/info-guard' check  # info-guard-managed:'<pkg>'
+    # (the schedule prefix is REQUIRED — a crontab line without the 5
+    # schedule fields is invalid cron; proposal §7 mandates it)
+    printf "%s HERMES_HOME=%s %s check  # info-guard-managed:%s\n" \
+        "$1" \
+        "$(_cron_quote "$HERMES_HOME")" \
+        "$(_cron_quote "$HERE/bin/info-guard")" \
+        "$(_cron_quote "$HERE")"
+}
+
+_cron_install() { # $1 = schedule ("" -> default 0 6 * * *)
+    local schedule="${1:-0 6 * * *}"
+    # rejection block: unsafe package/state path -> exit 2, nothing written
+    if _cron_reject "$HERE" "$HERMES_HOME"; then
+        die2 "cron: package or state path contains '%' or control characters — refusing to write an unsafe managed line (nothing written, no ownership marker)"
+    fi
+    if ! _cron_schedule_valid "$schedule"; then
+        die2 "cron: invalid schedule (strict 5-field grammar: minute 0-59, hour 0-23, day-of-month 1-31, month 1-12, weekday 0-7; '*' / int / lo-hi / a,b,c only; no steps, names, '%' or newlines) — nothing written"
+    fi
+    command -v crontab >/dev/null 2>&1 \
+        || die2 "cron: crontab unavailable on PATH — cannot install a managed line (nothing written)"
+    mkdir -p "$STATE_DIR" || die2 "cron: state dir not writable: $STATE_DIR (nothing written)"
+    # product lockfile serializes every read-modify-write of the crontab
+    exec 8>"$STATE_DIR/cron-install.lock"
+    if ! flock -n 8; then
+        die2 "cron: another cron operation in progress (lock held: $STATE_DIR/cron-install.lock) — nothing written"
+    fi
+    local line marker
+    line="$(_cron_managed_line "$schedule")"
+    marker="# info-guard-managed:$(_cron_quote "$HERE")"
+    local current kept
+    current="$(crontab -l 2>/dev/null || true)"
+    # replace ONLY this package's exact managed lines; preserve every
+    # unrelated entry byte-for-byte; never touch another package's lines
+    kept="$(printf '%s\n' "$current" | grep -vF -- "$marker" | sed '/^$/d' || true)"
+    local out
+    out="$(printf '%s\n%s\n' "$kept" "$line")"
+    if printf '%s\n' "$out" | crontab -; then
+        local n
+        n="$(crontab -l 2>/dev/null | grep -cF -- "$marker" || true)"
+        say "cron: installed one managed line (schedule: $schedule; ${n} owned line(s) present)"
+        say "cron: command: $line"
+    else
+        die2 "cron: crontab write failed — nothing changed"
+    fi
 }
 
 if [ "$CRON_MODE" = "yes" ]; then
@@ -375,7 +478,8 @@ elif [ "$CRON_MODE" = "no" ]; then
 elif [ -t 0 ]; then
     # interactive TTY: ask (never silently installs a job)
     printf '[info-guard] install a managed cron line running `info-guard check`? (default schedule 0 6 * * *) [y/N] '
-    read -r ans
+    ans=""
+    read -r -p "" ans || ans=""
     case "$ans" in
         y|Y) _cron_install "" ;;
         *) say "no cron installed" ;;
