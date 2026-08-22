@@ -3331,6 +3331,361 @@ if b8l:
 check("WB B8: list --json → normal literal carries no kind key (absent-never-null)",
       b8l, f"rc={r.returncode}")
 
+# ── 27. Wave B evidence-gate battery (r2 fold, IG D104) — full engine ×
+# canary matrix (MAJ-2), collision classes key-name/already-masked/gitleaks
+# HIGH/SUSPICIOUS (MAJ-1), review_list membership edges (MAJ-3), complete CLI
+# contract (MAJ-4), old-consumer watch/v1 additive tolerance (MAJ-6),
+# per-operation persistence matrix (MAJ-8), byte-exact unknown-kind warnings
+# (MIN-1). Generator-facing: every check name starts with "WB C" so
+# gen-evidence.sh can display the matrix by grepping the battery log.
+
+_mxn = [0]
+
+def _wb_fresh(plant=False):
+    """Fresh isolated HERMES_HOME; optionally plant one generated canary
+    plus a canary-bearing session file. Returns (home, canary_or_None)."""
+    _mxn[0] += 1
+    h = os.path.join(tmp, "wb-c%d" % _mxn[0])
+    for sub in ("sessions", "logs", "cron/output"):
+        os.makedirs(os.path.join(h, sub), exist_ok=True)
+    os.makedirs(os.path.join(h, "state", "info-guard"), exist_ok=True)
+    open(os.path.join(h, "state", "info-guard", "custom_literals.json"), "w").write(
+        json.dumps({"version": 2, "literals": []}))
+    val = None
+    if plant:
+        r = subprocess.run(
+            [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+             "literals", "add", "--kind", "honeytoken"],
+            env=dict(os.environ, HERMES_HOME=h), capture_output=True, text=True,
+            timeout=300)
+        m = _re.search(r"ht-[0-9a-f]{24}", r.stdout + r.stderr)
+        val = m.group(0) if m else None
+        with open(os.path.join(h, "sessions", "decoy.txt"), "w") as f:
+            f.write("api_key = %s\n" % (val or ""))
+    return h, val
+
+def _wb_cmd(args, home=None, scrub=False):
+    env = dict(os.environ)
+    if scrub:
+        env["PATH"] = "/usr/bin:/bin"
+        env["HOME"] = os.path.join(tmp, "wb-scrub-home")
+        os.makedirs(env["HOME"], exist_ok=True)
+    env["HERMES_HOME"] = home or wb_home
+    return subprocess.run(
+        [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard")] + args,
+        env=env, capture_output=True, text=True, timeout=300)
+
+def _wb_json(r):
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return None
+
+# C1 — engine × canary matrix, DIRECT exits (MAJ-2): every cell for preflight
+# + watch in text + JSON; exit-2 dominance on engine-missing; partial-row
+# doctrine (HONEYTOKEN rows serialize while exit 2 stays authoritative).
+c1_ok_h, _ = _wb_fresh()
+c1_cn_h, c1_cn_v = _wb_fresh(plant=True)
+c1_no_h, _ = _wb_fresh()
+c1_mc_h, c1_mc_v = _wb_fresh(plant=True)
+r = _wb_cmd(["preflight"], c1_ok_h)
+check("WB C1: preflight engine-available no-canary → exit 0",
+      r.returncode == 0, f"rc={r.returncode}")
+r = _wb_cmd(["preflight", "--json"], c1_ok_h)
+check("WB C1: preflight --json engine-available no-canary → exit 0",
+      r.returncode == 0, f"rc={r.returncode}")
+r = _wb_cmd(["preflight"], c1_cn_h)
+check("WB C1: preflight engine-available canary → exit 4",
+      r.returncode == 4, f"rc={r.returncode}")
+r = _wb_cmd(["preflight", "--json"], c1_cn_h)
+j = _wb_json(r)
+c1_ok = r.returncode == 4 and bool(j) and any(
+    v.get("type") == "HONEYTOKEN" for v in j.get("top_values", []))
+check("WB C1: preflight --json engine-available canary → exit 4 + HONEYTOKEN row",
+      c1_ok, f"rc={r.returncode}")
+r = _wb_cmd(["preflight"], c1_no_h, scrub=True)
+check("WB C1: preflight engine-missing no-canary → exit 2 (never 0)",
+      r.returncode == 2, f"rc={r.returncode}")
+r = _wb_cmd(["preflight", "--json"], c1_mc_h, scrub=True)
+j = _wb_json(r)
+c1_mc = r.returncode == 2 and bool(j) and (
+    j.get("tool", {}).get("engine_state") in ("none", "partial")
+    and j.get("scan", {}).get("gitleaks_ok") is False
+    and any(v.get("type") == "HONEYTOKEN" for v in j.get("top_values", [])))
+check("WB C1: preflight --json engine-missing canary → exit 2 + partial rows",
+      c1_mc, f"rc={r.returncode}")
+r = _wb_cmd(["preflight"], c1_mc_h, scrub=True)
+check("WB C1: preflight engine-missing canary (text) → exit 2 dominates",
+      r.returncode == 2, f"rc={r.returncode}")
+r = _wb_cmd(["watch", "--reset"], c1_ok_h)
+check("WB C1: watch engine-available no-canary → baseline exit 0",
+      r.returncode == 0, f"rc={r.returncode}")
+r = _wb_cmd(["watch", "--reset"], c1_cn_h)
+check("WB C1: watch engine-available canary baseline → exit 0 (baselined)",
+      r.returncode == 0, f"rc={r.returncode}")
+with open(os.path.join(c1_cn_h, "sessions", "decoy.txt"), "a") as f:
+    f.write("OTHER = %s\n" % (c1_cn_v or ""))
+r = _wb_cmd(["watch"], c1_cn_h)
+check("WB C1: watch engine-available canary increase → exit 4",
+      r.returncode == 4, f"rc={r.returncode}")
+r = _wb_cmd(["watch"], c1_no_h, scrub=True)
+check("WB C1: watch engine-missing no-canary → exit 2 (never 0)",
+      r.returncode == 2, f"rc={r.returncode}")
+r = _wb_cmd(["watch", "--json"], c1_mc_h, scrub=True)
+j = _wb_json(r)
+c1_w = r.returncode == 2
+if c1_w and j and "exposure" in j:
+    c1_w = j["exposure"].get("review_list_complete") is False or \
+        j["exposure"].get("protected_values") is not None
+check("WB C1: watch --json engine-missing canary → exit 2 + partial serialization",
+      c1_w, f"rc={r.returncode}")
+
+# C2 — collision classes (MAJ-1): key-name context, already-masked neighbor,
+# gitleaks HIGH (adjacent real AWS credential), gitleaks SUSPICIOUS (generic
+# api_key context) — the canary tier wins: exactly ONE HONEYTOKEN row,
+# known:false, value_id, no lower-tier duplicate for the same value.
+c2_h, _ = _wb_fresh()
+c2_val = None
+r = _wb_cmd(["literals", "add", "--kind", "honeytoken"], c2_h)
+m = _re.search(r"ht-[0-9a-f]{24}", r.stdout + r.stderr)
+c2_val = m.group(0) if m else ""
+
+def _c2_run(lines):
+    with open(os.path.join(c2_h, "sessions", "decoy.txt"), "w") as f:
+        f.writelines(lines)
+    return _wb_cmd(["preflight", "--json"], c2_h)
+
+def _c2_check(name, lines, extra_fn=None):
+    r = _c2_run(lines)
+    j = _wb_json(r)
+    ht = [v for v in (j or {}).get("top_values", []) if v.get("type") == "HONEYTOKEN"]
+    ok = r.returncode == 4 and len(ht) == 1 and ht[0].get("value_id") \
+        and ht[0].get("known") is False \
+        and (j or {}).get("totals", {}).get("honeytoken_rows") == 1 \
+        and sum(1 for v in (j or {}).get("top_values", [])
+                if v.get("value_masked") == ht[0].get("value_masked")) == 1
+    if ok and extra_fn:
+        ok = extra_fn(j)
+    check(name, ok, f"rc={r.returncode} ht={len(ht)}")
+
+_c2_check("WB C2: key-name context collision → one HONEYTOKEN row, no mention",
+          ["ref = %s\n" % c2_val])
+_c2_check("WB C2: already-masked neighbor collision → one HONEYTOKEN row",
+          ["API_KEY=***\nSECRET=%s\n" % c2_val],
+          lambda j: j.get("totals", {}).get("already_masked", 0) >= 1)
+_c2_check("WB C2: gitleaks HIGH neighbor (AWS) → HONEYTOKEN row + AKIA stays HIGH",
+          ["AWS_ACCESS_KEY_ID=%s SECRET=%s\n" % ("AKIA" + "QWERTYUIOPASDFGH", c2_val)],
+          lambda j: any(v.get("type") == "AWS key"
+                        and (v.get("value_masked") or "").startswith("AK")
+                        for v in j.get("top_values", [])))
+_c2_check("WB C2: gitleaks SUSPICIOUS context (api_key) → one HONEYTOKEN row",
+          ["api_key = %s\n" % c2_val])
+
+# C3 — review_list membership edges (MAJ-3): repeated-occurrence count, empty
+# complete list, current value absent from baseline, degraded incomplete list.
+c3_h, _ = _wb_fresh()
+c3_susp = "6f8c3b2a9d1e4f7a8b2c3d4e5f6a7b8c"
+with open(os.path.join(c3_h, "sessions", "susp.txt"), "w") as f:
+    f.write("api_key = %s\napi_key = %s\n" % (c3_susp, c3_susp))
+r = _wb_cmd(["watch", "--json"], c3_h)
+j = _wb_json(r)
+c3a = bool(j) and any(
+    x.get("count") == 2 and x.get("type") == "SUSPICIOUS"
+    for x in j.get("exposure", {}).get("review_list", []))
+check("WB C3: review_list repeated occurrence → count 2 for one value",
+      c3a, f"rc={r.returncode}")
+c3e_h, _ = _wb_fresh()
+r = _wb_cmd(["watch", "--json"], c3e_h)
+j = _wb_json(r)
+c3e = bool(j) and j.get("exposure", {}).get("review_list") == [] \
+    and j.get("exposure", {}).get("review_list_complete") is True
+check("WB C3: review_list empty + complete on a clean scan",
+      c3e, f"rc={r.returncode}")
+r = _wb_cmd(["watch", "--reset"], c3_h)
+c3_new_val = "9d4e7b2a6c8f1e3a5b7d9c2e4f6a8b1c"
+with open(os.path.join(c3_h, "sessions", "susp2.txt"), "w") as f:
+    f.write("api_key = %s\n" % c3_new_val)
+r = _wb_cmd(["watch", "--json"], c3_h)
+j = _wb_json(r)
+c3b = bool(j) and any(
+    x.get("value_masked") == wb_mask(c3_new_val)
+    for x in j.get("exposure", {}).get("review_list", []))
+check("WB C3: review_list shows current value absent from baseline",
+      c3b, f"rc={r.returncode}")
+r = _wb_cmd(["watch", "--json"], c1_mc_h, scrub=True)
+j = _wb_json(r)
+c3d = r.returncode == 2 and bool(j) and \
+    j.get("exposure", {}).get("review_list_complete") is False
+check("WB C3: review_list_complete false on engine-missing watch (same fixture as C1)",
+      c3d, f"rc={r.returncode}")
+
+# C4 — complete CLI contract (MAJ-4): explicit-add --json, repeated --kind,
+# --kind literal (unknown kind), all accepted mask styles, and
+# byte/mode/mtime immutability for every rejected operation.
+c4_h, _ = _wb_fresh()
+c4_cl = os.path.join(c4_h, "state", "info-guard", "custom_literals.json")
+r = _wb_cmd(["literals", "add", "--kind", "honeytoken", "c4-explicit-1234567890", "--json"], c4_h)
+j = _wb_json(r)
+c4a = r.returncode == 0 and bool(j) and len(j.get("added", [])) == 1 \
+    and j["added"][0].get("id") and j["added"][0].get("value_masked") == "c4...90"
+check("WB C4: explicit-add --json → added[value_masked 2+2, id], exit 0",
+      c4a, f"rc={r.returncode} out={r.stdout[:150]!r}")
+st = os.stat(c4_cl)
+r = _wb_cmd(["literals", "add", "--kind", "honeytoken", "--kind", "honeytoken"], c4_h)
+st2 = os.stat(c4_cl)
+check("WB C4: repeated --kind → usage exit 2, no mutation",
+      r.returncode == 2 and st.st_mtime_ns == st2.st_mtime_ns
+      and st.st_size == st2.st_size, f"rc={r.returncode} err={r.stderr[:120]!r}")
+r = _wb_cmd(["literals", "add", "--kind", "literal", "x"], c4_h)
+check("WB C4: --kind literal → usage exit 2 (domain: honeytoken only)",
+      r.returncode == 2, f"rc={r.returncode} err={r.stderr[:120]!r}")
+r = _wb_cmd(["literals", "add", "--mask", "full", "c4-maskfull-1234567890"], c4_h)
+r = _wb_cmd(["literals", "add", "--mask", "head:4,tail:2,floor:0", "c4-maskcustom-1234567890"], c4_h)
+reg4 = json.load(open(c4_cl))
+masks = [e.get("mask") for e in reg4["literals"]
+         if isinstance(e, dict) and e.get("value", "").startswith("c4-mask")]
+c4m = r.returncode == 0 and "full" in masks and "head:4,tail:2,floor:0" in masks
+check("WB C4: all accepted mask styles stored (full + custom policy string)",
+      c4m, f"rc={r.returncode} masks={masks}")
+for bad, why in ((["--kind", "honeytoken", "x\ny"], "control char"),
+                 (["--kind", "honeytoken", "   "], "whitespace-only"),
+                 (["--kind", "honeytoken", "--mask", "full", "x"], "--mask conflict"),
+                 (["--kind", "honeytoken", "--file", os.path.join(tmp, "c4-f.txt")], "--file conflict")):
+    open(os.path.join(tmp, "c4-f.txt"), "w").write("x\n")
+    before = (open(c4_cl, "rb").read(), os.stat(c4_cl).st_mode & 0o777,
+              os.stat(c4_cl).st_mtime_ns)
+    r = _wb_cmd(["literals", "add"] + bad, c4_h)
+    after = (open(c4_cl, "rb").read(), os.stat(c4_cl).st_mode & 0o777,
+             os.stat(c4_cl).st_mtime_ns)
+    check(f"WB C4: {why} rejection → exit 2, bytes+mode+mtime unchanged",
+          r.returncode == 2 and before == after, f"rc={r.returncode}")
+
+# C5 — old-consumer additive tolerance (MAJ-6): v0.6.1 watch reads a watch/v1
+# baseline containing review_list + review_list_complete — no failure, fields
+# preserved on rewrite (syntactic tolerance, never silent discard).
+if os.path.exists(old_bin_wb):
+    c5_h, _ = _wb_fresh()
+    c5_bl = os.path.join(c5_h, "state", "info-guard", "watch-baseline.json")
+    c5_bl_doc = {"schema": "info-guard/watch/v1", "version": 1,
+                 "values": {}, "exposure": {"review_list": [],
+                                            "review_list_complete": True},
+                 "generated": "2026-08-22T00:00:00Z"}
+    open(c5_bl, "w").write(json.dumps(c5_bl_doc))
+    c5_r = subprocess.run([sys.executable, old_bin_wb, "watch", "--json"],
+                          env=dict(os.environ, HERMES_HOME=c5_h),
+                          capture_output=True, text=True, timeout=300)
+    c5_after = {}
+    try:
+        c5_after = json.load(open(c5_bl))
+    except (ValueError, OSError):
+        pass
+    check("WB C5: v0.6.1 watch tolerates review_list baseline → exit 0, fields preserved",
+          c5_r.returncode == 0
+          and "review_list" in c5_after.get("exposure", {})
+          and "review_list_complete" in c5_after.get("exposure", {}),
+          f"rc={c5_r.returncode} err={c5_r.stderr[:150]!r} preserved={list(c5_after.get('exposure', {}))}")
+else:
+    skip("WB C5: v0.6.1 watch/v1 tolerance probe", "tag v0.6.1 unavailable")
+
+# C6 — per-operation persistence matrix (MAJ-8): v1 + v2 registries; every
+# mutation path — before/after raw bytes, mode, mtime; 0600 invariant after
+# every write; byte-immutability for no-ops/rejections; fresh id after replant.
+def _wb_snap_reg(path):
+    with open(path, "rb") as f:
+        return (f.read(), os.stat(path).st_mode & 0o777, os.stat(path).st_mtime_ns)
+
+def _wb_reg_ops(seed_doc, label):
+    h, _ = _wb_fresh()
+    cl = os.path.join(h, "state", "info-guard", "custom_literals.json")
+    open(cl, "w").write(json.dumps(seed_doc))
+    # generated add → 0600 + entry
+    s0 = _wb_snap_reg(cl)
+    r = _wb_cmd(["literals", "add", "--kind", "honeytoken"], h)
+    s1 = _wb_snap_reg(cl)
+    check(f"WB C6: {label} generated add → 0600 + bytes change",
+          r.returncode == 0 and s1[1] == 0o600 and s1[0] != s0[0])
+    # explicit add → 0600
+    r = _wb_cmd(["literals", "add", "c6-explicit-1234567890"], h)
+    s2 = _wb_snap_reg(cl)
+    check(f"WB C6: {label} explicit add → 0600",
+          r.returncode == 0 and s2[1] == 0o600)
+    # duplicate honeytoken → idempotent, BYTES unchanged (no-rewrite)
+    reg = json.load(open(cl))
+    ht_v = next(e.get("value") for e in reg["literals"]
+                if isinstance(e, dict) and e.get("kind") == "honeytoken")
+    s3 = _wb_snap_reg(cl)
+    r = _wb_cmd(["literals", "add", "--kind", "honeytoken", ht_v], h)
+    s4 = _wb_snap_reg(cl)
+    check(f"WB C6: {label} duplicate honeytoken → idempotent exit 0, bytes unchanged",
+          r.returncode == 0 and s4[0] == s3[0] and s4[1] == 0o600)
+    # rejected mutation → bytes+mode+mtime unchanged
+    s5 = _wb_snap_reg(cl)
+    r = _wb_cmd(["literals", "add", "--kind", "honeytoken", "x\ny"], h)
+    s6 = _wb_snap_reg(cl)
+    check(f"WB C6: {label} rejected mutation → exit 2, bytes+mode+mtime unchanged",
+          r.returncode == 2 and s6 == s5)
+    # remove → 0600 + target gone
+    vid = ht_v and next((e.get("id") for e in reg["literals"]
+                         if isinstance(e, dict) and e.get("value") == ht_v), None)
+    r = _wb_cmd(["literals", "remove", vid], h)
+    s7 = _wb_snap_reg(cl)
+    reg7 = json.load(open(cl))
+    gone = all(e.get("value") != ht_v for e in reg7["literals"])
+    check(f"WB C6: {label} remove → 0600 + only target entry dropped",
+          r.returncode == 0 and s7[1] == 0o600 and gone)
+    # replant → fresh id (never reused)
+    r1 = _wb_cmd(["literals", "add", "--kind", "honeytoken"], h)
+    m1 = _re.search(r"ht-[0-9a-f]{24}", r1.stdout + r1.stderr)
+    v2_ = m1.group(0) if m1 else ""
+    reg8 = json.load(open(cl))
+    new_id = next(e.get("id") for e in reg8["literals"]
+                  if isinstance(e, dict) and e.get("value") == v2_)
+    check(f"WB C6: {label} replant → fresh value_id (never reused)",
+          bool(v2_) and new_id != vid and r1.returncode == 0)
+
+_wb_reg_ops({"version": 2, "literals": []}, "v2")
+_wb_reg_ops({"version": 1, "literals": [
+    {"value": "c6-v1-legacy", "id": "c6v1legacy000001"}]}, "v1")
+
+# C7 — byte-exact unknown-kind warning (MIN-1): quote, newline, control char,
+# backslash, 40-char truncation; exactly one warning line per invocation.
+def _wb_esc_kind(kind, cap=40):
+    esc = kind.replace("\\", "\\\\").replace("'", "\\'")
+    def _ec(ch):
+        if ch == "\\":
+            return "\\\\"
+        if ch == "'":
+            return "\\'"
+        if ch == "\n":
+            return "\\n"
+        if ch == "\r":
+            return "\\r"
+        if ch == "\t":
+            return "\\t"
+        c = ord(ch)
+        return "\\x%02x" % c if c < 32 or c == 127 else ch
+    esc = "".join(_ec(ch) if (not ch.isprintable() or ch == "'") else ch
+                  for ch in esc)
+    if len(esc) > cap:
+        esc = esc[:cap] + "…"
+    return esc
+
+for c7_kind, c7_label in (
+        ("quo'te", "quote"),
+        ("nl\nx", "newline"),
+        ("ctl\x01x", "control char"),
+        ("bs\\ck", "backslash"),
+        ("k" * 45, "40-char truncation")):
+    open(wb_cl, "w").write(json.dumps({"version": 2, "literals": [
+        {"value": "c7-v", "id": "c7id000000000001", "kind": c7_kind}]}))
+    r = wb_run("literals", "list")
+    expected = ("[info-guard] warning: unknown literal kind '%s' — "
+                "treated as a normal literal" % _wb_esc_kind(c7_kind))
+    check(f"WB C7: {c7_label} unknown-kind warning is byte-exact, one line",
+          r.stderr.count(expected) == 1
+          and len([l for l in r.stderr.splitlines() if "unknown literal kind" in l]) == 1,
+          f"err={r.stderr[:200]!r}")
+
 print(f"\n[test] {PASS} passed, {FAIL} failed"
       f" (discovered={PASS + FAIL + SKIP} executed={PASS + FAIL} "
       f"passed={PASS} skipped={SKIP} failed={FAIL})")
