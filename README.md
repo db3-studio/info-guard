@@ -57,7 +57,7 @@ Takes about two minutes.
 | Setting | Default |
 |---|---|
 | Install location | `~/.info-guard` |
-| Hermes home (`$HERMES_HOME`) | `~/.hermes` |
+| Hermes home (`$HERMES_HOME`) | `$HERMES_HOME` (`~/.hermes` when unset) |
 | `build` source | `$HERMES_HOME/.env` |
 | State dir | `$HERMES_HOME/state/info-guard/` |
 | Pattern file | `<state>/redact_patterns.json` (`<state>` = the state dir above), chmod 600 |
