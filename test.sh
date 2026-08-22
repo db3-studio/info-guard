@@ -4179,7 +4179,7 @@ probe_u1 = os.path.join(os.getcwd(), "tests", "consumers",
 if os.path.exists(probe_u1):
     p3 = subprocess.run([sys.executable, probe_u1], input=r.stdout,
                         capture_output=True, text=True, timeout=60)
-    check("consumer: update-v1 probe validates the applied envelope",
+    check("WC CONSUMER-1: update-v1 probe validates the applied envelope",
           p3.returncode == 0 and "VALID" in p3.stdout,
           f"rc={p3.returncode} err={p3.stderr[-200:]!r}")
 
@@ -4455,7 +4455,7 @@ check("WC SMOKE-5: broken-pattern fail-safe",
       f"out={_out5!r} repaired={open(smoke_broken).read()!r}")
 # 6: missing pattern file -> no-op; built-in redaction still works
 os.environ.pop("HERMES_REDACT_PATTERNS", None)
-check("WC SMOKE-6: missing-pattern no-op",
+check("WC SMOKE-6: missing-pattern behavior",
       redact_sensitive_text("hello world") == "hello world",
       f"got {redact_sensitive_text('hello world')!r}")
 # 7: file_read sentinel — a masked value can never be written back

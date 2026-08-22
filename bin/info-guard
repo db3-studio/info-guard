@@ -4438,7 +4438,7 @@ def _smoke_failed() -> list:
         # 6: missing pattern file -> no-op; built-in redaction still works
         os.environ.pop("HERMES_REDACT_PATTERNS", None)
         if _redact("hello world") != "hello world":
-            failed.append("WC SMOKE-6 missing-pattern no-op")
+            failed.append("WC SMOKE-6 missing-pattern behavior")
         # 7: file_read sentinel — a masked value can never be written back
         sent = redact(f"value={default_lit}", file_read=True)
         if sent == f"value={default_lit}" or "ig-probe" in sent or "12345" in sent:
