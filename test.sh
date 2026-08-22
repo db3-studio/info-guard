@@ -48,6 +48,7 @@ import sys
 import tempfile
 import time
 import hashlib
+import types
 from pathlib import Path
 
 CHECKOUT = sys.argv[1]
@@ -5070,6 +5071,490 @@ check("WC S7: check battery no mutation",
       s7_ok1 and s7_ok2 and s7_ok3 and s7_ok4,
       f"check-nomut={s7_ok1} battery-nomut={s7_ok2} timeout={s7_ok3} "
       f"norecursion={s7_ok4}")
+
+# ── Phase B (W13 viewers): WC A12 / WC A17 / WC S4 / WC S5 ─────────────
+# One shared synthetic viewer corpus (concatenation-built, never
+# token-shaped literals), scratch HERMES_HOME state, executable source
+# shims, scratch PATH. No Phase A command is invoked (independence: the
+# Phase B battery never runs check/update/install.sh/cron). Every check
+# name maps to exactly one Phase B acceptance row (assertion-ledger
+# convention, D108 #2); the plan's mapping table is the fold register.
+V_LIT = "ig-view-lit-" + "abc123"          # 17 chars -> 2+2 visible
+V_FULL = "ig-view-full-" + "xyz789"        # mask: full -> ***
+V_SHORT = "ig-short-" + "42"               # 10 chars -> under floor 12
+V_KEY = "IG_VIEW_PIN"
+b_home = Path(WC_TMP, "b-home")
+b_state = b_home / "state" / "info-guard"
+b_state.mkdir(parents=True, exist_ok=True)
+b_matcher = b_state / "redact_patterns.json"
+write(b_matcher, {
+    "mask": {"head": 2, "tail": 2, "floor": 12},
+    "literals": [V_LIT, {"value": V_FULL, "mask": "full"}, V_SHORT],
+    "key_patterns": {V_KEY: True},
+})
+# separate homes for the empty-registry and missing-matcher cases
+b_home_empty = Path(WC_TMP, "b-home-empty")
+Path(b_home_empty, "state", "info-guard").mkdir(parents=True, exist_ok=True)
+write(Path(b_home_empty, "state", "info-guard", "redact_patterns.json"),
+      {"mask": {"head": 2, "tail": 2, "floor": 12},
+       "literals": [], "key_patterns": {}})
+b_home_nomatch = Path(WC_TMP, "b-home-nomatch")
+b_home_nomatch.mkdir(parents=True, exist_ok=True)
+
+
+def write_text(p, s):
+    with open(p, "w") as f:
+        f.write(s)
+    os.chmod(p, 0o755)
+
+
+def _b_state_snapshot(home):
+    parts = []
+    sd = Path(home, "state", "info-guard")
+    if sd.exists():
+        for f in sorted(sd.iterdir()):
+            if f.is_file():
+                parts.append(f.name + ":"
+                             + hashlib.sha256(f.read_bytes()).hexdigest())
+    r = subprocess.run(["git", "-C", os.getcwd(), "status", "--porcelain"],
+                       capture_output=True, text=True)
+    parts.append("cwd-git:" + r.stdout)
+    return "\n".join(parts)
+
+
+def _b_run(args, home=b_home, stdin=None, path=None, path_replace=None,
+           timeout=120):
+    """Run one viewer command against scratch state. stdin may be str
+    (text mode) or bytes (raw mode — invalid-UTF8 fixtures). path
+    prepends a shim dir to PATH; path_replace REPLACES PATH entirely
+    (tool-missing fixtures must not fall through to the host's tools)."""
+    env = _wc_env(home)
+    if path_replace is not None:
+        env["PATH"] = path_replace
+    elif path is not None:
+        env["PATH"] = path + ":" + env.get("PATH", "")
+    if isinstance(stdin, bytes):
+        p = subprocess.run(
+            [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard")]
+            + args, env=env, capture_output=True, input=stdin, timeout=timeout)
+        return types.SimpleNamespace(
+            returncode=p.returncode,
+            stdout=p.stdout.decode("utf-8", "replace"),
+            stderr=p.stderr.decode("utf-8", "replace"))
+    return subprocess.run(
+        [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard")]
+        + args, env=env, capture_output=True, text=True, input=stdin,
+        timeout=timeout)
+
+
+# executable source shims (record argv; controlled stdout/stderr/status)
+b_bin = Path(WC_TMP, "b-bin")
+b_bin.mkdir(parents=True, exist_ok=True)
+b_argvlog = Path(WC_TMP, "b-argv.log")
+b_argvlog.write_text("")
+write_text(b_bin / "systemctl", f"""#!/bin/bash
+echo "systemctl $*" >> {b_argvlog}
+if [ "$1" = "--user" ] && [ "$2" = "cat" ]; then
+  case "$3" in
+    userunit) echo "[Unit] Description=user unit"; echo "PASSWORD={V_LIT}"; exit 0;;
+    nope) echo "Unit nope could not be found" >&2; exit 4;;
+    *) echo "user manager failure" >&2; exit 1;;
+  esac
+fi
+if [ "$1" = "cat" ]; then
+  case "$2" in
+    okunit) echo "[Unit] Description=ok unit"; echo "Environment={V_KEY}=1234"; exit 0;;
+    userunit) echo "Unit userunit could not be found" >&2; exit 4;;
+    nope) echo "Unit nope could not be found" >&2; exit 4;;
+    badunit) echo "systemd failure {V_LIT}" >&2; exit 1;;
+    *) echo "systemd failure" >&2; exit 1;;
+  esac
+fi
+exit 1
+""")
+write_text(b_bin / "docker", f"""#!/bin/bash
+echo "docker $*" >> {b_argvlog}
+if [ "$1" = "inspect" ]; then
+  if [ "$4" = "ghost" ]; then echo "No such object: ghost" >&2; exit 1; fi
+  echo "{V_KEY}=5678"; echo "PLAIN=hello"; echo "docker-stderr {V_LIT}" >&2; exit 0
+fi
+if [ "$1" = "compose" ]; then
+  [ -f "$3" ] || {{ echo "no such file or directory: $3" >&2; exit 1; }}
+  echo "services: web"; echo "{V_KEY}=9999"; exit 0
+fi
+exit 1
+""")
+b_path = str(b_bin)
+
+# metachar + sensitive-arg fixtures
+b_metafile = Path(WC_TMP, "we ird$(id).txt")
+b_metafile.write_text("x=" + V_LIT + "\n")
+b_secfile = Path(WC_TMP, "secret.txt")
+b_secfile.write_text("db_password=" + V_LIT + "\n")
+b_compose = Path(WC_TMP, "compose.yml")
+b_compose.write_text("services: web\nenv: " + V_LIT + "\n")
+b_envfile = Path(WC_TMP, "sample.env")
+b_envfile.write_text(
+    "# comment with " + V_LIT + "\n"
+    "PLAIN=hello\n"
+    f"{V_KEY}=1234\n"
+    'SECRET="quoted value"\n'
+    "EMPTY=\n"
+    "\n"
+    "   \n"
+    "MALFORMED NO EQUALS\n")
+b_envdup = Path(WC_TMP, "dup.env")
+b_envdup.write_text("B=1\nA=2\nB=3\nA=4\n")
+b_unic = Path(WC_TMP, "uni.env")
+b_unic.write_text("K=café\nE=emoji-😀\n")
+
+# A17 hostile fixture: every supported malformed category present
+# (bad key form, unterminated quote, control characters) + shell-payload
+# constructs (command substitution, backticks, redirects, source
+# attempts) placed ONLY in malformed positions + a side-effect target.
+b_side = Path(WC_TMP, "ig-side-effect-1")
+b_hostile = Path(WC_TMP, "hostile.env")
+b_hostile.write_text(
+    "GOOD=value1\n"
+    f'KEY="$(touch {b_side})"\n'
+    f"KEY2=`touch {b_side}2`\n"
+    f"KEY3=val > {b_side}3\n"
+    "KEY4=source /etc/passwd\n"
+    f'KEY5="unterminated $(touch {b_side}5)\n'
+    "KEY6=. /etc/rc.local\n"
+    "BAD-KEY-NAME=value\n"
+    "CTRL=abc\x01def\n"
+    "# comment with " + V_LIT + "\n")
+b_clean = Path(WC_TMP, "clean.env")
+b_clean.write_text("A=1\nB=two\n")
+# A17 zero-invocation PATH: sh/basher/touch/source shims record calls
+b_a17path = Path(WC_TMP, "b-a17path")
+b_a17path.mkdir(parents=True, exist_ok=True)
+b_a17log = Path(WC_TMP, "a17-invocations.log")
+for _n in ("sh", "bash", "touch", "source"):
+    write_text(b_a17path / _n,
+               f"#!/bin/bash\necho \"{_n} $*\" >> {b_a17log}\nexit 0\n")
+b_a17path_s = str(b_a17path)
+
+# every viewer invocation is captured for the masked-only self-check
+b_captures = []   # (label, rc, stdout, stderr)
+b_nomut = True    # aggregated by WC A12: viewers leave state unchanged
+
+
+def b_cap(label, rc, out, err):
+    b_captures.append((label, rc, out, err))
+
+
+def b_run_cap(label, args, home=b_home, stdin=None, path=None,
+              path_replace=None):
+    before = _b_state_snapshot(home)
+    r = _b_run(args, home=home, stdin=stdin, path=path,
+               path_replace=path_replace)
+    after = _b_state_snapshot(home)
+    global b_nomut
+    b_nomut = b_nomut and before == after
+    b_cap(label, r.returncode, r.stdout, r.stderr)
+    return r
+
+
+# ── pipe ────────────────────────────────────────────────────────────────
+r = b_run_cap("pipe-literal", ["pipe"], stdin=f"hello {V_LIT} world")
+check("WC A12: pipe masks exact literals with configured style",
+      r.returncode == 0 and f"hello ig...23 world" == r.stdout,
+      f"rc={r.returncode} out={r.stdout!r}")
+r = b_run_cap("pipe-full-short", ["pipe"],
+              stdin=f"a {V_FULL} b {V_SHORT} c")
+check("WC A12: pipe applies full-mask and short-value floor",
+      r.returncode == 0 and r.stdout == "a *** b *** c",
+      f"rc={r.returncode} out={r.stdout!r}")
+r = b_run_cap("pipe-keyforms", ["pipe"],
+              stdin=f"{V_KEY}=1234\n{V_KEY}: abcd\n{{\"{V_KEY}\": \"efgh\"}}\n")
+check("WC A12: pipe masks registered key-pattern forms",
+      r.returncode == 0 and r.stdout
+      == f"{V_KEY}=***\n{V_KEY}: ***\n{{\"{V_KEY}\": \"***\"}}\n",
+      f"rc={r.returncode} out={r.stdout!r}")
+r = b_run_cap("pipe-nomatch", ["pipe"], home=b_home_nomatch,
+              stdin=f"secret {V_LIT}")
+check("WC A12: pipe fails closed when matcher is missing",
+      r.returncode == 2 and r.stdout == ""
+      and "masking: unavailable (no pattern file — run install.sh + "
+          "build)" in r.stderr,
+      f"rc={r.returncode} out={r.stdout!r} err={r.stderr!r}")
+r = b_run_cap("pipe-emptyreg", ["pipe"], home=b_home_empty,
+              stdin="plain non-sensitive text")
+check("WC A12: pipe accepts an established empty registry",
+      r.returncode == 0 and r.stdout == "plain non-sensitive text",
+      f"rc={r.returncode} out={r.stdout!r}")
+r = b_run_cap("pipe-invalid-utf8", ["pipe"],
+              stdin=b"x=\xff\xfe " + V_LIT.encode())
+check("WC A12: pipe replaces invalid UTF-8 without disclosure",
+      r.returncode == 0 and "\ufffd" in r.stdout
+      and V_LIT not in r.stdout,
+      f"rc={r.returncode} out={r.stdout!r}")
+r = b_run_cap("pipe-unknown-opt", ["pipe", "--bad=" + V_LIT], stdin="x")
+check("WC A12: unknown option warning is value-free",
+      r.returncode == 2 and r.stderr == "warning: unknown option\n"
+      and V_LIT not in r.stdout + r.stderr,
+      f"rc={r.returncode} err={r.stderr!r}")
+r = b_run_cap("pipe-help", ["pipe", "--help"], stdin="x")
+check("WC A12: pipe help exits 0 without reading stdin",
+      r.returncode == 0 and "info-guard pipe" in r.stdout,
+      f"rc={r.returncode} out={r.stdout!r}")
+
+# ── view: surfaces ──────────────────────────────────────────────────────
+r = b_run_cap("view-sysd-ok", ["view", "systemd-unit", "okunit"], path=b_path)
+check("WC A12: systemd viewer masks successful output and falls back safely",
+      r.returncode == 0 and f"Environment={V_KEY}=***" in r.stdout
+      and "[Unit]" in r.stdout,
+      f"rc={r.returncode} out={r.stdout!r}")
+r = b_run_cap("view-sysd-fallback",
+              ["view", "systemd-unit", "userunit"], path=b_path)
+check("WC A12: systemd viewer falls back to the user manager",
+      r.returncode == 0 and "Description=user unit" in r.stdout
+      and f"PASSWORD=ig...23" in r.stdout,
+      f"rc={r.returncode} out={r.stdout!r}")
+r = b_run_cap("view-docker", ["view", "docker-env", "mycontainer"],
+              path=b_path)
+check("WC A12: docker viewer masks environment output",
+      r.returncode == 0 and f"{V_KEY}=***" in r.stdout
+      and "PLAIN=hello" in r.stdout,
+      f"rc={r.returncode} out={r.stdout!r}")
+r = b_run_cap("view-compose", ["view", "compose-config", str(b_compose)],
+              path=b_path)
+check("WC A12: compose viewer masks rendered configuration",
+      r.returncode == 0 and f"{V_KEY}=***" in r.stdout
+      and "services: web" in r.stdout,
+      f"rc={r.returncode} out={r.stdout!r}")
+r = b_run_cap("view-file", ["view", "file", str(b_secfile)])
+check("WC A12: file viewer masks explicit file output",
+      r.returncode == 0 and r.stdout == "db_password=ig...23\n"
+      and V_LIT not in r.stdout,
+      f"rc={r.returncode} out={r.stdout!r}")
+
+# ── view: failure classification + non-disclosure ───────────────────────
+r = b_run_cap("view-sysd-nope", ["view", "systemd-unit", "nope"], path=b_path)
+check("WC A12: source errors never expose compose docker or systemd output",
+      r.returncode == 2 and r.stderr == "source: not found\n"
+      and "could not be found" not in r.stdout + r.stderr,
+      f"rc={r.returncode} err={r.stderr!r}")
+r = b_run_cap("view-sysd-fail", ["view", "systemd-unit", "badunit"],
+              path=b_path)
+check("WC A12: child stderr is suppressed on every surface",
+      r.returncode == 2 and r.stderr == "source: failed\n"
+      and V_LIT not in r.stdout + r.stderr
+      and "systemd failure" not in r.stdout + r.stderr,
+      f"rc={r.returncode} err={r.stderr!r}")
+r = b_run_cap("view-docker-ghost", ["view", "docker-env", "ghost"],
+              path=b_path)
+check("WC A12: docker absence classified as source not found",
+      r.returncode == 2 and r.stderr == "source: not found\n"
+      and "No such object" not in r.stdout + r.stderr,
+      f"rc={r.returncode} err={r.stderr!r}")
+r = b_run_cap("view-compose-missing",
+              ["view", "compose-config", str(Path(WC_TMP, "nope.yml"))],
+              path=b_path)
+check("WC A12: compose missing file classified as source not found",
+      r.returncode == 2 and r.stderr == "source: not found\n"
+      and "no such file" not in r.stdout + r.stderr,
+      f"rc={r.returncode} err={r.stderr!r}")
+r = b_run_cap("view-file-missing",
+              ["view", "file", str(Path(WC_TMP, "nope.txt"))])
+check("WC A12: file viewer missing path classified as source not found",
+      r.returncode == 2 and r.stderr == "source: not found\n",
+      f"rc={r.returncode} err={r.stderr!r}")
+r = b_run_cap("view-tool-missing", ["view", "systemd-unit", "okunit"],
+              path_replace=str(Path(WC_TMP, "empty-bin")))
+check("WC A12: missing tool classified as source not found",
+      r.returncode == 2 and r.stderr == "source: not found\n",
+      f"rc={r.returncode} err={r.stderr!r}")
+# masking unavailable AFTER a successful source read -> source discarded
+r = b_run_cap("view-mask-unavail", ["view", "file", str(b_secfile)],
+              home=b_home_nomatch)
+check("WC A12: masking failure discards the captured source",
+      r.returncode == 2 and r.stdout == ""
+      and r.stderr == "masking: unavailable\n",
+      f"rc={r.returncode} out={r.stdout!r} err={r.stderr!r}")
+
+# ── view: argv safety + metachar data ───────────────────────────────────
+b_argvlog.write_text("")
+r = b_run_cap("view-meta-args",
+              ["view", "systemd-unit", "un$(id)it"],
+              path=b_path)
+r2 = b_run_cap("view-meta-docker",
+               ["view", "docker-env", "ct$(id)n"], path=b_path)
+r3 = b_run_cap("view-meta-compose",
+               ["view", "compose-config", str(b_metafile)], path=b_path)
+r4 = b_run_cap("view-meta-file",
+               ["view", "file", str(b_metafile)])
+argv_log = b_argvlog.read_text()
+check("WC A12: metacharacter source arguments remain data",
+      "un$(id)it" in argv_log and "ct$(id)n" in argv_log
+      and str(b_metafile) in argv_log
+      and "$(id)" in argv_log          # literal, never expanded
+      and not Path(WC_TMP, "unit").exists()
+      and not Path(WC_TMP, "ctn").exists(),
+      f"argv={argv_log!r}")
+# operator-supplied args CARRYING a registry value: source failure and
+# usage failure paths must never echo the value or the argument text
+r = b_run_cap("view-arg-lit-unit",
+              ["view", "systemd-unit", "bad" + V_LIT], path=b_path)
+r2 = b_run_cap("view-arg-lit-path",
+               ["view", "file", str(Path(WC_TMP, V_LIT + ".txt"))])
+check("WC A12: operator arguments never enter diagnostics",
+      r.returncode == 2 and r.stderr == "source: failed\n"
+      and r2.returncode == 2 and r2.stderr == "source: not found\n"
+      and V_LIT not in r.stdout + r.stderr
+      and V_LIT not in r2.stdout + r2.stderr,
+      "registry-valued args leaked into a diagnostic stream")
+
+# ── env ─────────────────────────────────────────────────────────────────
+r = b_run_cap("env-default", ["env", str(b_envfile)])
+check("WC A12: env emits keys and lengths without values",
+      r.returncode == 0
+      and "PLAIN = <5 chars>" in r.stdout
+      and f"{V_KEY} = <4 chars>" in r.stdout
+      and 'SECRET = <12 chars>' in r.stdout
+      and "EMPTY = <0 chars>" in r.stdout
+      and r.stdout.count("\n\n") >= 1     # blank + whitespace-only lines
+      and V_LIT not in r.stdout and "hello" not in r.stdout
+      and "quoted value" not in r.stdout and "1234" not in r.stdout,
+      f"rc={r.returncode} out={r.stdout!r}")
+r = b_run_cap("env-clean-check", ["env", str(b_clean), "--check"])
+r2 = b_run_cap("env-dirty-check", ["env", str(b_hostile), "--check"],
+               path=b_a17path_s)
+check("WC A12: env check reports clean and dirty files",
+      r.returncode == 0 and r.stdout == ""
+      and r2.returncode == 1
+      and all(re.fullmatch(r"\d+: [A-Za-z_][A-Za-z0-9_]*|\d+:",
+                           ln) for ln in r2.stdout.splitlines()),
+      f"clean-rc={r.returncode} dirty-rc={r2.returncode} "
+      f"dirty-out={r2.stdout!r}")
+r = b_run_cap("env-keys", ["env", str(b_envdup), "--keys"])
+check("WC A12: env keys are bare sorted and unique",
+      r.returncode == 0 and r.stdout == "A\nB\n",
+      f"rc={r.returncode} out={r.stdout!r}")
+r = b_run_cap("env-drop", ["env", str(b_envfile)])
+check("WC A12: comments and malformed lines are dropped",
+      r.returncode == 0 and V_LIT not in r.stdout + r.stderr
+      and "MALFORMED NO EQUALS" not in r.stdout + r.stderr,
+      f"rc={r.returncode} out={r.stdout!r} err={r.stderr!r}")
+r = b_run_cap("env-unreadable", ["env", str(Path(WC_TMP, "nope.env"))])
+check("WC A12: env unreadable file exits 2 value-free",
+      r.returncode == 2 and r.stderr == "file: unreadable\n"
+      and "nope.env" not in r.stdout + r.stderr,
+      f"rc={r.returncode} err={r.stderr!r}")
+r = b_run_cap("env-unknown-opt",
+              ["env", str(b_envfile), "--bad=" + V_LIT])
+check("WC A12: env unknown option is fixed and value-free",
+      r.returncode == 2 and r.stderr == "warning: unknown option\n"
+      and V_LIT not in r.stdout + r.stderr,
+      f"rc={r.returncode} err={r.stderr!r}")
+r = b_run_cap("env-check-keys", ["env", str(b_envfile), "--check", "--keys"])
+check("WC A12: env check keys mutual exclusion exits 2",
+      r.returncode == 2 and "info-guard env" in r.stderr,
+      f"rc={r.returncode} err={r.stderr!r}")
+r = b_run_cap("env-arg-leak", ["env", str(Path(WC_TMP, V_LIT + ".env"))])
+check("WC A12: env path never enters diagnostics",
+      r.returncode == 2 and V_LIT not in r.stdout + r.stderr,
+      f"rc={r.returncode} err={r.stderr!r}")
+r = b_run_cap("env-unicode", ["env", str(b_unic)])
+check("WC A12: env lengths count code points not bytes",
+      r.returncode == 0 and "K = <4 chars>" in r.stdout
+      and "E = <7 chars>" in r.stdout,
+      f"rc={r.returncode} out={r.stdout!r}")
+
+# ── A17: hostile env --check non-execution ──────────────────────────────
+for _p in (b_side, Path(str(b_side) + "2"), Path(str(b_side) + "3"),
+           Path(str(b_side) + "5")):
+    if _p.exists():
+        _p.unlink()
+if b_a17log.exists():
+    b_a17log.unlink()
+r = b_run_cap("env-hostile", ["env", str(b_hostile), "--check"],
+              path=b_a17path_s)
+check("WC A17: hostile env check creates no side effect",
+      r.returncode == 1 and not b_side.exists()
+      and not Path(str(b_side) + "2").exists()
+      and not Path(str(b_side) + "3").exists()
+      and not Path(str(b_side) + "5").exists(),
+      f"rc={r.returncode} side={b_side.exists()}")
+check("WC A17: hostile env check reports only lines and safe keys",
+      r.returncode == 1
+      and all(re.fullmatch(r"\d+: [A-Za-z_][A-Za-z0-9_]*|\d+:",
+                           ln) for ln in r.stdout.splitlines())
+      and V_LIT not in r.stdout + r.stderr
+      and "touch" not in r.stdout + r.stderr
+      and "source" not in r.stdout + r.stderr,
+      f"rc={r.returncode} out={r.stdout!r} err={r.stderr!r}")
+check("WC A17: hostile env check exits one without sourcing",
+      r.returncode == 1 and not b_a17log.exists(),
+      f"rc={r.returncode} a17log={b_a17log.exists()}")
+# shared parser path: build's _load_env and env's check mode both call
+# the SAME _parse_env_lines helper (one grammar, one source of truth)
+ig_src_b = open(os.path.join(os.getcwd(), "bin", "info-guard")).read()
+check("WC A17: env check shares the build parser path",
+      "def _load_env" in ig_src_b
+      and "_parse_env_lines(lines, report=" in ig_src_b
+      and "_parse_env_lines(lines)[0]" in ig_src_b,
+      "load_env and cmd_env must both route through _parse_env_lines")
+
+# ── S4: security boundaries ─────────────────────────────────────────────
+check("WC S4: every viewer source uses argv execution",
+      "un$(id)it" in argv_log and "ct$(id)n" in argv_log
+      and "shell=True" not in ig_src_b
+      and "subprocess.run(" in ig_src_b,
+      "shims received intact argv; no shell string execution path")
+check("WC S4: every viewer suppresses child stderr",
+      all("docker-stderr" not in (o + e) for _l, _rc, o, e in b_captures)
+      and all("systemd failure" not in (o + e)
+              for _l, _rc, o, e in b_captures),
+      "child stderr text must never reach product streams")
+check("WC S4: every viewer masks before emission",
+      all(V_LIT not in o and V_FULL not in o and V_SHORT not in o
+          for _l, _rc, o, e in b_captures)
+      and any("ig...23" in o or "***" in o for _l, _rc, o, e in b_captures),
+      "no raw value on stdout for any captured viewer run")
+check("WC S4: unknown options are fixed and value-free",
+      all(r.returncode == 2 and r.stderr == "warning: unknown option\n"
+          for r in (b_run_cap("s4-unk-pipe", ["pipe", "--x=" + V_LIT],
+                              stdin=""),
+                    b_run_cap("s4-unk-view",
+                              ["view", "file", str(b_secfile), "--x"],
+                              path=b_path),
+                    b_run_cap("s4-unk-env",
+                              ["env", str(b_envfile), "--x"]))),
+      "all three commands: fixed warning, exit 2, no value echo")
+check("WC S4: viewer diagnostics never disclose operator arguments",
+      all(V_LIT not in (o + e)
+          and V_FULL not in (o + e) and V_SHORT not in (o + e)
+          for _l, _rc, o, e in b_captures),
+      "operator-supplied args must never appear in any diagnostic")
+
+# ── S5: env --check never sources ───────────────────────────────────────
+check("WC S5: env check never evaluates or sources input",
+      not b_a17log.exists()
+      and not b_side.exists()
+      and all(p not in (o + e) for _l, _rc, o, e in b_captures
+              for p in (str(b_side),)),
+      "zero shell/touch invocations; side-effect target absent")
+check("WC S5: env check disclosure boundary is line and safe-key only",
+      r.returncode == 1
+      and all(re.fullmatch(r"\d+: [A-Za-z_][A-Za-z0-9_]*|\d+:",
+                           ln) for ln in r.stdout.splitlines())
+      and V_LIT not in r.stdout + r.stderr,
+      "report contains only line numbers and safe key names")
+
+# ── A12: masked-only self-check + state no-mutation (aggregate) ─────────
+check("WC A12: masked-only self-check finds no raw value on either stream",
+      all(V_LIT not in (o + e) and V_FULL not in (o + e)
+          and V_SHORT not in (o + e)
+          for _l, _rc, o, e in b_captures)
+      and any("ig...23" in o or "***" in o for _l, _rc, o, e in b_captures
+              if _rc == 0),
+      f"captured={len(b_captures)} runs")
+check("WC A12: viewers leave registry and state unchanged",
+      b_nomut,
+      "byte-compared state dir + cwd git metadata across every viewer run")
 
 print(f"\n[test] {PASS} passed, {FAIL} failed"
       f" (discovered={PASS + FAIL + SKIP} executed={PASS + FAIL} "

@@ -989,6 +989,167 @@ restore the engine. `check`'s supported-range floor remains the
 enforcement guard.
 
 
+## Wave C Phase B — W13 masked viewers (v0.8.0)
+
+The three viewer commands (`pipe`, `view`, `env`) implement the
+sanctioned no-dump doctrine: **prefer masked viewers over raw dumps —
+`info-guard view`, `info-guard env`, and `info-guard pipe` are the
+sanctioned way to inspect configuration surfaces.** They are read-only
+display surfaces: they read only what the operator names explicitly on
+the command line, never a defaulted deployment path; their output feeds
+nothing in the product (no detection, no registration, no state).
+
+### Viewer output boundary (binding, all three commands)
+
+1. **Argument-vector execution.** Every child-process surface invokes
+   the child with a subprocess argument vector. No operator-supplied
+   unit name, container name, compose path, or file path is ever
+   interpolated into a shell string. (`view file` opens its explicit
+   path as a path value — never evaluated as shell syntax.)
+2. **Capture, mask, then emit.** Child stdout is captured in memory,
+   passed through the registry masking engine, and emitted only after
+   masking succeeds. **Child stderr is never forwarded raw** — it is
+   suppressed and replaced by the fixed value-free categories below.
+3. **Explicit child-status handling.** The viewer checks the child's
+   actual status; it never uses a pipeline whose status is determined by
+   the last command. A nonzero child status maps to the fixed source
+   category and product exit 2.
+4. **Separate source and masking failures** — see the diagnostics table.
+   Neither failure path emits the captured source bytes.
+5. **D55 rules:** `--help`/`-h` anywhere prints the command's usage and
+   exits 0 (no source is read on the help path); an unknown `--*` flag
+   prints only the fixed `warning: unknown option` and exits 2 (the
+   option text and its value are NEVER echoed — a `--bad=<registered
+   secret>` option must not appear in stderr); usage errors exit 2;
+   flag combinations are explicit (`env --check --keys` → usage exit 2).
+6. **Non-disclosure.** No raw registry value, source value, or
+   operator-supplied argument containing a registry value appears on
+   stdout or stderr on any path. Successful viewer output is masked
+   before emission; `env` never emits values at all.
+
+### `info-guard pipe` — mask stdin
+
+```
+info-guard pipe
+```
+
+- Reads stdin as UTF-8 with replacement (invalid byte sequences become
+  U+FFFD — never an exception, never a disclosure).
+- Masks exact literals (longest-first, honoring each entry's `mask`
+  style and the file's `mask` default head/tail/floor; full-mask
+  literals → `***`; values at or below the configured floor are fully
+  masked) and `key_patterns` values in `KEY=value`, `KEY: value`, and
+  JSON key/value forms (empty values pass through unchanged).
+- **Fail-closed:** masking availability is established BEFORE stdin is
+  read. A missing/unreadable pattern file → exit 2 with the fixed
+  diagnostic and NO stdout passthrough; a pattern file present but
+  unloadable → exit 2 with the fixed short masking diagnostic. A
+  present, readable pattern file with an empty registry is masking
+  established (nothing to mask) → exit 0 with input preserved.
+- Help path (`pipe --help`) exits 0 without reading stdin or the
+  matcher. Unknown options exit 2 with the fixed warning.
+
+| `pipe` exit | Meaning |
+|---|---|
+| 0 | input masked and emitted |
+| 2 | usage error, or masking unavailable (fail-closed, no passthrough) |
+
+### `info-guard view <surface> <arg>` — masked surface viewers
+
+```
+info-guard view systemd-unit <name>
+info-guard view docker-env <container>
+info-guard view compose-config <path>
+info-guard view file <path>
+```
+
+| Surface | Invocation (argv exec) | Successful output | Source-failure classification |
+|---|---|---|---|
+| `systemd-unit` | `systemctl cat <name>`; on failure `systemctl --user cat <name>` (system-then-user fallback) | the successful command's stdout, masked before emission | `systemctl` exit 4 or stderr matching `not be found|No such` → `source: not found`; tool missing from PATH → `source: not found`; any other nonzero → `source: failed` |
+| `docker-env` | `docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' <container>` (format string is one argv element, never shell-composed) | one environment record per line (`KEY=value`), masked before emission | stderr matching `No such object|not found` → `source: not found`; tool missing → `source: not found`; any other nonzero → `source: failed` |
+| `compose-config` | `docker compose -f <path> config` (`-f`, path, and `config` are separate argv elements) | rendered compose configuration, masked before emission | stderr matching `no such file|not found` → `source: not found`; tool missing → `source: not found`; any other nonzero → `source: failed` |
+| `file` | explicit path opened as a path value (no child process) | file content, masked before emission; no wrapper label is added | path does not exist → `source: not found`; unreadable → `source: failed` |
+
+The absence-pattern lists above are the single byte-level source (plan
+r1 MAJ-4 fold): the pattern is matched INTERNALLY to select the
+category and is never emitted. Child stdout from a failed attempt is
+discarded (a failed system attempt's stdout is never emitted when the
+user fallback succeeds). A source that was read successfully but cannot
+be masked (pattern file unavailable/unreadable) → `masking: unavailable`,
+exit 2, captured source discarded.
+
+| `view` exit | Meaning |
+|---|---|
+| 0 | source read, masked, and emitted |
+| 2 | usage error, source failure (fixed category), or masking failure |
+
+### `info-guard env [FILE] [--check|--keys]` — keys + lengths only
+
+FILE is explicit and positional — there is no default deployment path.
+The product never consults `$HERMES_HOME`, a deployment directory, or
+any hard-coded house path for `env`.
+
+- **`env FILE`** — one line per valid assignment:
+  `KEY = <N chars>` where N is the number of decoded Unicode **code
+  points** of the parsed value (not bytes — deliberately diverges from
+  the house wrapper's `wc -c` byte count). Blank lines (empty or
+  whitespace-only) pass through as blank output lines. Comments and
+  malformed lines are DROPPED, never echoed (they may contain literal
+  secrets). The value is never emitted.
+- **`env FILE --check`** — NON-EXECUTING grammar validation. It shares
+  the `.env` grammar parser that feeds `build`/`matcher build` (one
+  grammar, single-sourced; the shared parser gains a reporting channel,
+  never a second parser). Nothing is sourced, captured, or evaluated —
+  the parser reads lines as data, so no shell, child process, command
+  substitution, redirection, or capture mechanism exists to leak.
+  Report format: one line per violating line, `LINENO: KEY` when the
+  key is safe (matches the key grammar AND is not itself a registered
+  literal AND contains no registered value), otherwise `LINENO:`
+  (line number only). Line numbers are 1-based and correspond to the
+  file's lines as written. Supported malformed categories:
+  bad key form (no `=`, invalid key token) · unterminated quote
+  (value starts with a quote char that never closes) · control
+  characters (C0/C1) · shell payload (values carrying a shell-execution
+  construct: `$(`, backtick, `;`, `|`, `>`, `<`, `&`, or a
+  `source`/`. ` attempt — the A17 hostile class; classified as a
+  grammar violation, never executed). A file containing no violations
+  exits 0; any violation exits 1. An unreadable file exits 2 with
+  `file: unreadable`.
+- **`env FILE --keys`** — bare key names only: one per line, sorted
+  deterministically, unique; no `=`, length annotation, quotes,
+  comments, or values. Comments and malformed lines contribute no keys.
+- `--check` and `--keys` are mutually exclusive → usage exit 2.
+- `--help`/`-h` anywhere prints usage and exits 0 without reading FILE.
+
+| `env` exit | Meaning |
+|---|---|
+| 0 | file read/rendered successfully, or `--check` found no violations |
+| 1 | `--check` found malformed lines (completed verdict) |
+| 2 | usage error or file-read failure |
+
+### New-command exit-contract table (additive — the preflight/watch ladder 0–4 is untouched)
+
+| Command / mode | Exit | Meaning |
+|---|---|---|
+| `pipe` | 0 · 2 | masked · usage/masking-unavailable (fail-closed) |
+| `view` | 0 · 2 | masked · usage/source/masking failure (categorized) |
+| `env` | 0 · 1 · 2 | ok · `--check` found malformed lines · usage |
+
+### Authoritative diagnostics table (one byte-level source)
+
+Every diagnostic below is a FIXED string — none interpolates an
+operator-supplied argument, child output, or source path:
+
+| Fixed string | Used for | Exit |
+|---|---|---|
+| `masking: unavailable (no pattern file — run install.sh + build)` | `pipe` with missing/unreadable pattern file (fail-closed) | 2 |
+| `masking: unavailable` | unloadable pattern file (`pipe`) · masking failure after a successful source read (`view`) | 2 |
+| `source: not found` | missing tool, missing/unidentified unit/container/file (absence pattern matched internally) | 2 |
+| `source: failed` | source child exists but failed for any other reason | 2 |
+| `warning: unknown option` | any unknown `--*` flag on any viewer command (option text/value never echoed) | 2 |
+| `file: unreadable` | `env` file-read failure | 2 |
+
+
 ## Version notes
 
 - Requires Hermes Agent **v0.20.0+**. One version-tolerant patch: apply-checked

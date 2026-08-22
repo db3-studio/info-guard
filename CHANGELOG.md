@@ -49,6 +49,34 @@ ships in the same v0.8.0 release.
 - **Stale-cron probe in `check`** — read-only warning when a managed line
   points at a missing or version-stale binary (warning is exit 0 — not a
   health verdict; documented limitation).
+- **`info-guard pipe`** (Phase B, W13) — masks any stdin stream against
+  the registry. **Fail-closed:** a missing/unreadable pattern file exits
+  2 with `masking: unavailable (no pattern file — run install.sh +
+  build)` and emits nothing (no passthrough); an empty registry is
+  masking established (exit 0). Input is read as UTF-8 with replacement;
+  exact literals honor per-entry `mask` style and the file's default
+  head/tail/floor; `key_patterns` values are masked in `KEY=value`,
+  `KEY: value`, and JSON forms.
+- **`info-guard view <surface> <arg>`** (Phase B, W13) — masked viewers
+  for `systemd-unit <name>` (system then `--user` fallback),
+  `docker-env <container>`, `compose-config <path>`, and `file <path>`.
+  Child processes are invoked by argument vector only (never a shell
+  string); child stdout is masked before emission; child stderr is never
+  forwarded raw — fixed value-free diagnostics (`source: not found` /
+  `source: failed` / `masking: unavailable`) carry no child output and
+  never echo the operator's argument.
+- **`info-guard env [FILE] [--check|--keys]`** (Phase B, W13) — keys +
+  lengths only, never values (`KEY = <N chars>`, code-point counts;
+  blank lines preserved; comments and malformed lines dropped).
+  `--check` is a **non-executing** grammar validation sharing `build`'s
+  parser (nothing is sourced or evaluated; reports line numbers + safe
+  key names; exit 1 on malformed lines — including command
+  substitution/backtick/redirect/source constructs, classified as
+  violations). `--keys` emits bare sorted unique key names. `--check`
+  and `--keys` are mutually exclusive (usage exit 2).
+- **No-dump doctrine** — "prefer masked viewers over raw dumps" is now
+  product doctrine (README + format-spec); the house API-target wrappers
+  stay house-side.
 
 ### Changed
 - **`install.sh`** — lock-first target-safety sequence (snapshot →

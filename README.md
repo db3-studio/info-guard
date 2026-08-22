@@ -375,6 +375,54 @@ information loss).
 More examples — value types, mask styles, key patterns — in
 `examples/redact_patterns.json.example` and `examples/custom_literals.json.example`.
 
+## Masked viewers (the no-dump doctrine)
+
+**Prefer masked viewers over raw dumps — `info-guard view`, `info-guard
+env`, and `info-guard pipe` are the sanctioned way to look at config
+surfaces.** They are read-only display surfaces: they read only what
+you name explicitly on the command line, never a defaulted deployment
+path, and their output feeds nothing in the product (no detection, no
+registration, no state).
+
+```bash
+# mask any stdin stream against the registry (fail-closed)
+cat some-file | ~/.info-guard/bin/info-guard pipe
+
+# masked views of operator-named surfaces
+~/.info-guard/bin/info-guard view systemd-unit my-service
+~/.info-guard/bin/info-guard view docker-env my-container
+~/.info-guard/bin/info-guard view compose-config /path/to/compose.yml
+~/.info-guard/bin/info-guard view file /path/to/any/file
+
+# .env: keys + lengths only — never values
+~/.info-guard/bin/info-guard env /path/to/.env
+~/.info-guard/bin/info-guard env /path/to/.env --check   # non-executing grammar check
+~/.info-guard/bin/info-guard env /path/to/.env --keys    # bare sorted unique keys
+```
+
+Viewer guarantees:
+
+- **`pipe` fails closed** — if the pattern file is missing or unreadable
+  it exits 2 with `masking: unavailable (no pattern file — run
+  install.sh + build)` and emits NOTHING; it never passes input through
+  unmasked. (Pattern file present but empty registry = masking
+  established, exit 0.)
+- **`env --check` never executes** — it parses the file with the same
+  grammar `build` uses and reports only line numbers and safe key names
+  (exit 1 when malformed lines exist, 0 when clean). Nothing is sourced,
+  evaluated, or captured.
+- **Child output is masked before emission; child errors are never
+  shown raw** — source problems report one of two fixed messages
+  (`source: not found` / `source: failed`), masking problems report
+  `masking: unavailable`, and unknown options report exactly
+  `warning: unknown option` (the option text and its value are never
+  echoed). No diagnostic ever repeats an argument you typed.
+- Exit codes: `pipe` 0/2 · `view` 0/2 · `env` 0/1/2 (details in
+  `docs/format-spec.md`).
+
+The house's own API-target wrappers (`npm-meta`, `wlanconf`) remain
+house-side — they need live credentials and are not part of the product.
+
 ## Test
 
 ```bash
