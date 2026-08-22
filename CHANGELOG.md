@@ -14,7 +14,10 @@ S1–S3; the audit material itself stays private).
   5-marker check as `install.sh` and `check`: a partial install (e.g. a
   half-reverted `hermes update`) is refused loudly instead of reporting
   "nothing to reverse" and leaving 4 files patched behind. Regression
-  tests added.
+  tests added (battery at tag 294/294; expanded post-release to 304/304
+  on main: install→uninstall round-trip, drifted-5/5 fail-loud,
+  idempotent re-run, state-dir move/`--keep-state`, 3-way marker-list
+  consistency).
 - **`install.sh` manifest version extraction (S3)** — dropped the
   GNU-only `grep -oP`; BSD grep (macOS) previously recorded
   `"version": "unknown"` in `install.json`.
