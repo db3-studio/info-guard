@@ -222,6 +222,21 @@ if [ -n "$DIRTY" ]; then
     die2 "patched file differs from its expected product state: $DIRTY — refusing to overwrite an operator change. Resolve it manually, then re-run install.sh (no file was modified)."
 fi
 
+# test-only synchronization barrier (WC A16, plan §6.3): pause after the
+# inspection and before the final revalidation so a deterministic fixture
+# can introduce an external modification. Enabled ONLY by the scratch
+# battery (IG_TEST_HEAL_BARRIER env) — disabled by default, never read
+# from normal user configuration; a no-op outside the barrier window.
+if [ -n "${IG_TEST_HEAL_BARRIER:-}" ]; then
+    touch "${IG_TEST_HEAL_BARRIER}.reached"
+    _barrier_i=0
+    while [ "$_barrier_i" -lt 200 ]; do
+        [ -f "$IG_TEST_HEAL_BARRIER" ] && break
+        _barrier_i=$((_barrier_i + 1))
+        sleep 0.05
+    done
+fi
+
 # revalidate immediately before any restore
 SNAP_B="$(_snapshot)"
 if [ "$SNAP_A" != "$SNAP_B" ]; then

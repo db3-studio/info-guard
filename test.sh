@@ -3774,6 +3774,1164 @@ p9w = subprocess.run([sys.executable, probe11, "--surface", "watch"],
 check("WB C9: v1.1 consumer probe tolerates watch object w/ review_list fields",
       p9w.returncode == 0, f"rc={p9w.returncode} err={p9w.stderr[-250:]!r}")
 
+# ═══════════════════════════════════════════════════════════════════════
+# ── 20. Wave C Phase A battery (W10 update / W11 heal / W12 batteries /
+#        W6 cron; proposal self-sustain.md v1.6, plan self-sustain-phase-a
+#        v4; acceptance A1–A11/A13–A16/A18–A19/S1–S3/S6–S7) ───────────────
+# Fixture doctrine (N.1): every fixture is scratch — scratch HERMES_HOME,
+# scratch target checkouts, scratch package remotes with HTTPS-shaped
+# origins (git url.<base>.insteadOf rewrites the transport to a local bare
+# repo — the product still sees https:// and enforces the HTTPS policy),
+# synthetic values only, and the fake crontab fixture (never the real
+# operator crontab). The fixture PACKAGE ships a stub test.sh so the
+# update-apply battery stays finite (no battery-in-battery recursion); the
+# REAL engine masking is verified by this battery's own masking checks +
+# the in-process smoke.
+import pty as _pty
+import select as _select
+import stat as _stat
+
+WC_TMP = os.path.join(tmp, "wc")
+os.makedirs(WC_TMP, exist_ok=True)
+PATCH_PATH2 = os.path.join(os.getcwd(), "patch", "redactor-registry-patterns.patch")
+CRON_BIN = os.path.join(WC_TMP, "cronbin")
+os.makedirs(CRON_BIN, exist_ok=True)
+with open(os.path.join(CRON_BIN, "crontab"), "w") as f:
+    f.write("#!/usr/bin/env bash\n"
+            "# fake crontab (WC A13/S3/A9 fixtures) — CRONTAB_FILE must be set\n"
+            'set -u\nFILE="${CRONTAB_FILE:?CRONTAB_FILE must be set}"\n'
+            'case "${1:-}" in\n'
+            "    -l) if [ -f \"$FILE\" ]; then cat \"$FILE\"; else exit 1; fi ;;\n"
+            "    -) cat > \"$FILE\" ;;\n"
+            '    *) echo "fake crontab: unknown arg $1" >&2; exit 2 ;;\n'
+            "esac\n")
+os.chmod(os.path.join(CRON_BIN, "crontab"), 0o755)
+
+
+def _wc_env(home, crontab_file=None):
+    env = dict(os.environ)
+    env["HERMES_HOME"] = str(home)
+    if crontab_file is not None:
+        env["CRONTAB_FILE"] = str(crontab_file)
+        env["PATH"] = CRON_BIN + ":" + env.get("PATH", "")
+    return env
+
+
+def _wc_run(args, home, crontab_file=None, cwd=None, timeout=300):
+    return subprocess.run(
+        [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard")] + args,
+        env=_wc_env(home, crontab_file), cwd=cwd, capture_output=True,
+        text=True, timeout=timeout)
+
+
+def _wc_manifest(home):
+    try:
+        return json.loads(Path(home, "state", "info-guard",
+                               "install.json").read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _pkg_bytes(pkg):
+    """Byte-level snapshot of a package repo's git metadata + worktree
+    (A2/S2: refs, index, worktree, FETCH_HEAD)."""
+    parts = []
+    for name in ("HEAD", "index", "packed-refs"):
+        p = Path(pkg, ".git", name)
+        parts.append(name + ":" + (hashlib.sha256(p.read_bytes()).hexdigest()
+                                   if p.exists() else "ABSENT"))
+    refs = Path(pkg, ".git", "refs")
+    if refs.exists():
+        for ref in sorted(refs.rglob("*")):
+            if ref.is_file():
+                parts.append("ref:" + str(ref.relative_to(Path(pkg, ".git")))
+                             + ":" + hashlib.sha256(ref.read_bytes()).hexdigest())
+    r = subprocess.run(["git", "-C", pkg, "status", "--porcelain"],
+                       capture_output=True, text=True)
+    parts.append("status:" + r.stdout)
+    r = subprocess.run(["git", "-C", pkg, "rev-parse", "HEAD"],
+                       capture_output=True, text=True)
+    parts.append("head:" + r.stdout.strip())
+    fh = Path(pkg, ".git", "FETCH_HEAD")
+    parts.append("FETCH_HEAD:" + ("PRESENT" if fh.exists() else "ABSENT"))
+    return "\n".join(parts)
+
+
+def _wc_target(home, tag="v2026.8.18"):
+    """Scratch hermes-agent-shaped target: the 5 clean files from the
+    battery checkout's HEAD + the agent package import chain, committed
+    and tagged (the install.sh version gate needs a usable version source
+    when the real hermes CLI is not on the fixture PATH)."""
+    tgt = Path(home, "hermes-agent")
+    for rel in ("agent/redact.py", "cli.py", "gateway/run.py",
+                "hermes_cli/config.py", "hermes_cli/main.py"):
+        dst = tgt / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        clean = subprocess.run(["git", "-C", CHECKOUT, "show", f"HEAD:{rel}"],
+                               capture_output=True, text=True, check=True).stdout
+        dst.write_text(clean)
+    for f in ("file_safety.py", "__init__.py", "jiter_preload.py"):
+        src = Path(CHECKOUT, "agent", f)
+        if src.is_file():
+            d = tgt / "agent"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / f).write_text(src.read_text())
+    subprocess.run(["git", "-C", str(tgt), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(tgt), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(tgt), "-c", "user.email=ig@test",
+                    "-c", "user.name=ig-test", "commit", "-q", "-m", "base"],
+                   check=True)
+    subprocess.run(["git", "-C", str(tgt), "tag", tag], check=True)
+    return tgt
+
+
+def _wc_install(home, target, extra=()):
+    """The real install.sh against a scratch target (internal-invocation
+    flags: --no-config --no-cron; --no-test keeps the fixture battery out —
+    the engine behavior is this battery's own job)."""
+    env = _wc_env(home)
+    return subprocess.run(
+        ["bash", os.path.join(os.getcwd(), "install.sh"), "--checkout",
+         str(target), "--no-config", "--no-cron", "--no-test"] + list(extra),
+        env=env, capture_output=True, text=True, timeout=600)
+
+
+def _wc_pkg(battery_rc=0, version="0.7.0"):
+    """Scratch package repo: the REAL install.sh/uninstall.sh/bin/patch +
+    a STUB test.sh (fixture battery — exit 0 or 1; keeps the update-apply
+    battery finite and deterministic). Committed at <version>."""
+    pkg = Path(tempfile.mkdtemp(prefix="ig-wc-pkg-", dir=WC_TMP))
+    for rel in ("install.sh", "uninstall.sh", "bin/info-guard",
+                "patch/redactor-registry-patterns.patch"):
+        src = Path(os.getcwd()) / rel
+        dst = pkg / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(src.read_text())
+    stub = "#!/usr/bin/env bash\n" \
+           "# WC fixture battery stub (never the real test.sh — the real\n" \
+           "# battery runs OUTSIDE the fixture package; this keeps update's\n" \
+           "# install-verification finite and deterministic)\n" \
+           f"echo 'fixture battery OK (stub rc={battery_rc})'\n" \
+           f"exit {battery_rc}\n"
+    (pkg / "test.sh").write_text(stub)
+    subprocess.run(["git", "-C", str(pkg), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(pkg), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(pkg), "-c", "user.email=ig@test",
+                    "-c", "user.name=ig-test", "commit", "-q", "-m", version],
+                   check=True)
+    subprocess.run(["git", "-C", str(pkg), "tag", f"v{version}"], check=True)
+    return pkg
+
+
+def _wc_remote(pkg, new_version=None):
+    """Bare scratch remote: pushes v0.7.0 and, when new_version is given, a
+    v<new_version> commit (bumped _PACKAGE_VERSION); origin = https-shaped
+    URL + git insteadOf rewrite to the local bare repo (exercises the HTTPS
+    policy without weakening it)."""
+    remote = Path(tempfile.mkdtemp(prefix="ig-wc-remote-", dir=WC_TMP),
+                  "remote.git")
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    subprocess.run(["git", "-C", str(pkg), "push", "-q", str(remote),
+                    "HEAD:refs/heads/main", "v0.7.0"], check=True)
+    if new_version:
+        subprocess.run(["git", "-C", str(pkg), "checkout", "-q", "-b",
+                        "wc-bump"], check=True)
+        ig = pkg / "bin" / "info-guard"
+        ig.write_text(ig.read_text().replace(
+            '_PACKAGE_VERSION = "0.7.0"',
+            f'_PACKAGE_VERSION = "{new_version}"', 1))
+        subprocess.run(["git", "-C", str(pkg), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(pkg), "-c", "user.email=ig@test",
+                        "-c", "user.name=ig-test", "commit", "-q", "-m",
+                        f"v{new_version}"], check=True)
+        subprocess.run(["git", "-C", str(pkg), "tag", f"v{new_version}"],
+                       check=True)
+        subprocess.run(["git", "-C", str(pkg), "push", "-q", str(remote),
+                        f"v{new_version}"], check=True)
+        subprocess.run(["git", "-C", str(pkg), "checkout", "-q", "v0.7.0"],
+                       check=True)
+    subprocess.run(["git", "-C", str(pkg), "remote", "set-url", "origin",
+                    "https://ig-test.invalid/wc-remote.git"], check=True)
+    subprocess.run(["git", "-C", str(pkg), "config",
+                    f"url.{remote}.insteadOf",
+                    "https://ig-test.invalid/wc-remote.git"], check=True)
+    return remote
+
+
+def _wc_fake_engine(target, mask_ok):
+    """A11/SMOKE wrong-engine fixture: commit marker-bearing but
+    behaviorally-wrong files into the target HEAD (markers present in HEAD,
+    no working-tree patch — the ACTIVE-by-upstream shape). When mask_ok is
+    False the engine never masks (redact_sensitive_text returns input)."""
+    if mask_ok:
+        # commit the ACTUALLY patched worktree (markers + real engine in HEAD)
+        subprocess.run(["git", "-C", str(target), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(target), "-c", "user.email=ig@test",
+                        "-c", "user.name=ig-test", "commit", "-q", "-m",
+                        "upstream merge"], check=True)
+        return
+    fake = ("\"\"\"fake engine (WC fixture) — markers present, no masking.\"\"\"\n"
+            "_redact_registry_patterns = 'marker-only'\n"
+            "def redact_sensitive_text(text, file_read=False):\n"
+            "    return text\n")
+    (target / "agent" / "redact.py").write_text(fake)
+    (target / "hermes_cli" / "config.py").write_text(
+        "# redact_patterns marker-only\n")
+    for rel in ("hermes_cli/main.py", "cli.py", "gateway/run.py"):
+        (target / rel).write_text("# HERMES_REDACT_PATTERNS marker-only\n")
+    subprocess.run(["git", "-C", str(target), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(target), "-c", "user.email=ig@test",
+                    "-c", "user.name=ig-test", "commit", "-q", "-m",
+                    "wrong upstream merge"], check=True)
+
+
+def _wc_snapshot_state(home, target):
+    """Byte snapshot of the fixture state for S7/no-mutation assertions."""
+    parts = [_pkg_bytes(os.getcwd())]
+    for rel in ("agent/redact.py", "cli.py", "gateway/run.py",
+                "hermes_cli/config.py", "hermes_cli/main.py"):
+        p = Path(target, rel)
+        parts.append(f"t:{rel}:" + (hashlib.sha256(p.read_bytes()).hexdigest()
+                                    if p.is_file() else "ABSENT"))
+    sd = Path(home, "state", "info-guard")
+    if sd.exists():
+        for f in sorted(sd.iterdir()):
+            if f.is_file():
+                parts.append(f"s:{f.name}:"
+                             + hashlib.sha256(f.read_bytes()).hexdigest())
+    return "\n".join(parts)
+
+
+def _wc_pty(args, home, cwd, crontab_file=None, timeout=240):
+    """Run info-guard under a PTY (A14: an interactive TTY must still not
+    prompt for cron from internal install invocations)."""
+    m, s = _pty.openpty()
+    p = subprocess.Popen(
+        [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard")] + args,
+        stdin=s, stdout=s, stderr=s, env=_wc_env(home, crontab_file),
+        cwd=cwd, close_fds=True)
+    os.close(s)
+    out = b""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r, _, _ = _select.select([m], [], [], 5)
+        if not r:
+            if p.poll() is not None:
+                break
+            continue
+        try:
+            chunk = os.read(m, 8192)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+        if p.poll() is not None and len(out) > 0:
+            # drain any trailing output
+            try:
+                while True:
+                    more = os.read(m, 8192)
+                    if not more:
+                        break
+                    out += more
+            except OSError:
+                break
+            break
+    if p.poll() is None:
+        p.kill()
+    p.wait()
+    os.close(m)
+    return p.returncode, out.decode(errors="replace")
+
+
+# ── WC A1: fresh lifecycle ─────────────────────────────────────────────
+a1_home = Path(WC_TMP, "a1-home")
+a1_tgt = _wc_target(a1_home)
+r = _wc_install(a1_home, a1_tgt)
+a1_ok1 = r.returncode == 0
+r = _wc_run(["literals", "add", "wc-a1-literal-" + "42"], a1_home)
+a1_ok2 = r.returncode == 0
+# build needs an env source — seed one
+(a1_home / ".env").write_text("WC_A1_KEY=wc-a1-value-" + "123456\n")
+r = _wc_run(["build"], a1_home)
+a1_ok3 = r.returncode == 0 and Path(a1_home, "state", "info-guard",
+                                    "redact_patterns.json").exists()
+r = _wc_run(["check"], a1_home)
+a1_ok4 = r.returncode == 0
+# up-to-date update: a remote with ONLY v0.7.0
+a1_pkg = _wc_pkg()
+a1_remote = _wc_remote(a1_pkg)
+r = subprocess.run([sys.executable, str(a1_pkg / "bin" / "info-guard"),
+                    "update"], env=_wc_env(a1_home), cwd=str(a1_pkg),
+                   capture_output=True, text=True, timeout=300)
+a1_ok5 = r.returncode == 0 and "up to date" in r.stdout
+# uninstall round-trip: no markers, no state, no managed cron
+cron_file = Path(WC_TMP, "a1-crontab.txt")
+cron_file.write_text("0 3 * * * /usr/bin/backup.sh\n")
+r = subprocess.run(["bash", os.path.join(os.getcwd(), "uninstall.sh"),
+                    "--checkout", str(a1_tgt), "--no-config", "--yes"],
+                   env=_wc_env(a1_home, cron_file), capture_output=True,
+                   text=True, timeout=300)
+a1_ok6 = (r.returncode == 0
+          and not Path(a1_home, "state", "info-guard").exists()
+          and "info-guard-managed" not in cron_file.read_text())
+check("WC A1: fresh lifecycle",
+      a1_ok1 and a1_ok2 and a1_ok3 and a1_ok4 and a1_ok5 and a1_ok6,
+      f"install={a1_ok1} lit={a1_ok2} build={a1_ok3} check={a1_ok4} "
+      f"update={a1_ok5} uninstall={a1_ok6}")
+
+# ── WC A2 + WC S2: update --check is read-only (newer tag present) ──────
+a2_home = Path(WC_TMP, "a2-home")
+a2_tgt = _wc_target(a2_home)
+_wc_install(a2_home, a2_tgt)
+a2_pkg = _wc_pkg()
+_wc_remote(a2_pkg, "0.8.0")
+before = _pkg_bytes(a2_pkg)
+r = subprocess.run([sys.executable, str(a2_pkg / "bin" / "info-guard"),
+                    "update", "--check"], env=_wc_env(a2_home),
+                   cwd=str(a2_pkg), capture_output=True, text=True,
+                   timeout=120)
+after = _pkg_bytes(a2_pkg)
+a2_ok = (r.returncode == 1 and "newer version available" in r.stdout
+         and before == after)
+check("WC A2: update check is read-only",
+      a2_ok, f"rc={r.returncode} mutated={before != after}")
+r = subprocess.run([sys.executable, str(a2_pkg / "bin" / "info-guard"),
+                    "update", "--check", "--json"], env=_wc_env(a2_home),
+                   cwd=str(a2_pkg), capture_output=True, text=True,
+                   timeout=120)
+j2 = json.loads(r.stdout) if r.stdout.strip() else {}
+check("WC A2: update --check --json exit 1 + envelope update_available",
+      r.returncode == 1 and j2.get("status") == "update_available"
+      and j2.get("latest") == "0.8.0" and j2.get("selected_commit") is None
+      and j2.get("applied") is False,
+      f"rc={r.returncode} env={j2}")
+check("WC S2: update-check byte non-mutation",
+      before == after, "refs/index/worktree/FETCH_HEAD changed")
+
+# ── WC A3: newer-tag update transaction ────────────────────────────────
+a3_home = Path(WC_TMP, "a3-home")
+a3_tgt = _wc_target(a3_home)
+_wc_install(a3_home, a3_tgt)
+a3_pkg = _wc_pkg()
+_wc_remote(a3_pkg, "0.8.0")
+old_head = subprocess.run(["git", "-C", str(a3_pkg), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+r = subprocess.run([sys.executable, str(a3_pkg / "bin" / "info-guard"),
+                    "update", "--json"], env=_wc_env(a3_home),
+                   cwd=str(a3_pkg), capture_output=True, text=True,
+                   timeout=600)
+j3 = json.loads(r.stdout) if r.stdout.strip() else {}
+man3 = _wc_manifest(a3_home)
+ref3 = subprocess.run(["git", "-C", str(a3_pkg), "rev-parse",
+                       "refs/info-guard/previous"], capture_output=True,
+                      text=True).stdout.strip()
+head3 = subprocess.run(["git", "-C", str(a3_pkg), "rev-parse", "HEAD"],
+                       capture_output=True, text=True).stdout.strip()
+a3_ok = (r.returncode == 0 and j3.get("status") == "updated"
+         and j3.get("engine") == "ACTIVE" and j3.get("applied") is True
+         and man3 is not None
+         and man3.get("version") == "0.8.0"
+         and man3.get("previous_version") == "0.7.0"
+         and man3.get("previous_commit") == old_head
+         and man3.get("pending") is None
+         and ref3 == old_head and head3 == j3.get("selected_commit")
+         and j3.get("selected_commit") is not None)
+check("WC A3: newer-tag update transaction",
+      a3_ok, f"rc={r.returncode} env={j3} man={man3}")
+
+# ── WC A4: missing artifacts recovery ──────────────────────────────────
+a4_home = Path(WC_TMP, "a4-home")
+a4_tgt = _wc_target(a4_home)
+_wc_install(a4_home, a4_tgt)
+sd4 = Path(a4_home, "state", "info-guard")
+os.unlink(sd4 / "redact_patterns.json")
+os.unlink(sd4 / "install.json")
+r = _wc_run(["check"], a4_home)
+a4_ok1 = r.returncode == 1 and "pattern file: missing" in r.stdout \
+    and not (sd4 / "redact_patterns.json").exists()
+(a4_home / ".env").write_text("WC_A4_KEY=wc-a4-value-" + "123456\n")
+r = _wc_run(["build"], a4_home)
+a4_ok2 = r.returncode == 0 and (sd4 / "redact_patterns.json").exists()
+r = _wc_run(["check"], a4_home)
+a4_ok3 = r.returncode == 0
+check("WC A4: missing artifacts recovery",
+      a4_ok1 and a4_ok2 and a4_ok3, f"check1={a4_ok1} build={a4_ok2} "
+      f"check2={a4_ok3}")
+
+# ── WC A5: old registry lazy migration ─────────────────────────────────
+a5_home = Path(WC_TMP, "a5-home")
+os.makedirs(a5_home / "state" / "info-guard", exist_ok=True)
+reg5 = a5_home / "state" / "info-guard" / "custom_literals.json"
+reg5.write_text(json.dumps({"literals": ["wc-a5-value-" + "987654"]}))
+r = _wc_run(["check"], a5_home)
+note5 = "migrated to v2" in r.stderr
+doc5 = json.loads(reg5.read_text())
+r2 = _wc_run(["check"], a5_home)
+a5_ok = (r.returncode == 0 and note5 and doc5.get("version") == 2
+         and "migrated to v2" not in r2.stderr)
+check("WC A5: old registry lazy migration",
+      a5_ok, f"rc={r.returncode} note={note5} v={doc5.get('version')}")
+
+# ── WC A6: partial engine report-and-heal ──────────────────────────────
+a6_home = Path(WC_TMP, "a6-home")
+a6_tgt = _wc_target(a6_home)
+_wc_install(a6_home, a6_tgt)
+man6a = _wc_manifest(a6_home)
+subprocess.run(["git", "-C", str(a6_tgt), "checkout", "-q", "--",
+                "agent/redact.py", "hermes_cli/config.py"], check=True)
+r = _wc_run(["check"], a6_home)
+a6_ok1 = r.returncode == 1 and "PARTIAL" in r.stdout
+r = _wc_run(["check", "--heal"], a6_home)
+a6_ok2 = r.returncode == 0
+n6 = sum(1 for rel, marker in
+         [("agent/redact.py", "_redact_registry_patterns"),
+          ("hermes_cli/config.py", "redact_patterns"),
+          ("hermes_cli/main.py", "HERMES_REDACT_PATTERNS"),
+          ("cli.py", "HERMES_REDACT_PATTERNS"),
+          ("gateway/run.py", "HERMES_REDACT_PATTERNS")]
+         if marker in Path(a6_tgt, rel).read_text(errors="replace"))
+man6b = _wc_manifest(a6_home)
+a6_ok3 = n6 == 5 and man6b.get("version") == man6a.get("version") \
+    and man6b.get("previous_version") == man6a.get("previous_version")
+# forced patch-apply failure: target whose HEAD drifted so the patch cannot
+# apply (clean tree vs HEAD, but apply --check fails -> attempted-and-failed
+# -> exit 1, engine not ACTIVE, no false success)
+a6f_home = Path(WC_TMP, "a6f-home")
+a6f_tgt = _wc_target(a6f_home)
+src6f = Path(a6f_tgt, "agent", "redact.py")
+src6f.write_text("# drifted header\n" + src6f.read_text())
+subprocess.run(["git", "-C", str(a6f_tgt), "add", "-A"], check=True)
+subprocess.run(["git", "-C", str(a6f_tgt), "-c", "user.email=ig@test",
+                "-c", "user.name=ig-test", "commit", "-q", "-m", "drift"],
+               check=True)
+r = _wc_run(["check", "--heal"], a6f_home)
+a6_ok4 = r.returncode == 1
+check("WC A6: partial engine report-and-heal",
+      a6_ok1 and a6_ok2 and a6_ok3 and a6_ok4,
+      f"report={a6_ok1} heal={a6_ok2} man={a6_ok3} failed-heal={a6_ok4}")
+
+# ── WC A7: missing engine heal ─────────────────────────────────────────
+a7_home = Path(WC_TMP, "a7-home")
+a7_tgt = _wc_target(a7_home)
+r = _wc_run(["check"], a7_home)
+a7_ok1 = r.returncode == 1 and "MISSING" in r.stdout
+r = _wc_run(["check", "--heal"], a7_home)
+a7_ok2 = r.returncode == 0
+# current-tag update auto-heal (remote with only v0.7.0, engine broken)
+a7b_home = Path(WC_TMP, "a7b-home")
+a7b_tgt = _wc_target(a7b_home)
+a7b_pkg = _wc_pkg()
+_wc_remote(a7b_pkg)
+r = subprocess.run([sys.executable, str(a7b_pkg / "bin" / "info-guard"),
+                    "update", "--json"], env=_wc_env(a7b_home),
+                   cwd=str(a7b_pkg), capture_output=True, text=True,
+                   timeout=600)
+j7 = json.loads(r.stdout) if r.stdout.strip() else {}
+a7_ok3 = r.returncode == 0 and j7.get("status") == "up_to_date" \
+    and j7.get("healed") is True
+check("WC A7: missing engine heal",
+      a7_ok1 and a7_ok2 and a7_ok3,
+      f"report={a7_ok1} heal={a7_ok2} update-heal={a7_ok3}")
+
+# ── WC A8: artifact drift heal (registry/custom literals preserved) ─────
+a8_home = Path(WC_TMP, "a8-home")
+a8_tgt = _wc_target(a8_home)
+_wc_install(a8_home, a8_tgt)
+reg8a = hashlib.sha256(
+    Path(a8_home, "state", "info-guard", "redact_patterns.json").read_bytes()
+).hexdigest()
+lit8a = hashlib.sha256(
+    Path(a8_home, "state", "info-guard", "custom_literals.json").read_bytes()
+).hexdigest()
+tampered = Path(a8_tgt, "gateway", "run.py").read_text()
+Path(a8_tgt, "gateway", "run.py").write_text(
+    tampered.replace("HERMES_REDACT_PATTERNS", "HERMES_REDACT_PATTERNS ", 1))
+r = _wc_run(["check"], a8_home)
+a8_ok1 = r.returncode == 1 and "patch state" in r.stdout
+r = _wc_run(["check", "--heal"], a8_home)
+rev8 = subprocess.run(["git", "-C", str(a8_tgt), "apply", "--reverse",
+                       "--check", PATCH_PATH2], capture_output=True)
+reg8b = hashlib.sha256(
+    Path(a8_home, "state", "info-guard", "redact_patterns.json").read_bytes()
+).hexdigest()
+lit8b = hashlib.sha256(
+    Path(a8_home, "state", "info-guard", "custom_literals.json").read_bytes()
+).hexdigest()
+a8_ok2 = (r.returncode == 0 and rev8.returncode == 0
+          and reg8a == reg8b and lit8a == lit8b)
+check("WC A8: artifact drift heal",
+      a8_ok1 and a8_ok2,
+      f"probe={a8_ok1} heal={a8_ok2} reg={reg8a == reg8b} lit={lit8a == lit8b}")
+
+# ── WC A9: stale cron warning (exit 0, never mutated) ──────────────────
+a9_home = Path(WC_TMP, "a9-home")
+a9_tgt = _wc_target(a9_home)
+_wc_install(a9_home, a9_tgt)
+a9_cron = Path(WC_TMP, "a9-crontab.txt")
+a9_cron.write_text(
+    "0 6 * * * /nonexistent/wc-pkg/bin/info-guard check  "
+    "# info-guard-managed:'/nonexistent/wc-pkg'\n"
+    "0 3 * * * /usr/bin/backup.sh\n")
+r = _wc_run(["check"], a9_home, crontab_file=a9_cron)
+a9_ok = r.returncode == 0 and "missing binary" in r.stdout \
+    and a9_cron.read_text().count("info-guard-managed") == 1
+check("WC A9: stale cron warning",
+      a9_ok, f"rc={r.returncode} warn={'missing binary' in r.stdout}")
+
+# ── WC A10: state inaccessible during check/update verification ────────
+a10_home = Path(WC_TMP, "a10-home")
+a10_tgt = _wc_target(a10_home)
+_wc_install(a10_home, a10_tgt)
+os.chmod(Path(a10_home, "state", "info-guard", "redact_patterns.json"), 0)
+try:
+    r = _wc_run(["check"], a10_home)
+finally:
+    os.chmod(Path(a10_home, "state", "info-guard", "redact_patterns.json"),
+             0o600)
+a10_ok1 = r.returncode == 2
+# update post-apply verification with an unreadable install.json -> exit 2,
+# applied: true, healed: false, engine UNKNOWN, error_class state
+a10b_home = Path(WC_TMP, "a10b-home")
+a10b_tgt = _wc_target(a10b_home)
+_wc_install(a10b_home, a10b_tgt)
+a10b_pkg = _wc_pkg()
+_wc_remote(a10b_pkg, "0.8.0")
+os.chmod(Path(a10b_home, "state", "info-guard", "install.json"), 0)
+try:
+    r = subprocess.run([sys.executable, str(a10b_pkg / "bin" / "info-guard"),
+                        "update", "--json"], env=_wc_env(a10b_home),
+                       cwd=str(a10b_pkg), capture_output=True, text=True,
+                       timeout=600)
+finally:
+    os.chmod(Path(a10b_home, "state", "info-guard", "install.json"), 0o600)
+j10 = json.loads(r.stdout) if r.stdout.strip() else {}
+a10_ok2 = (r.returncode == 2 and j10.get("status") == "error"
+           and j10.get("applied") is True and j10.get("healed") is False
+           and j10.get("engine") == "UNKNOWN"
+           and j10.get("error_class") == "state"
+           and "verified" not in r.stdout)
+check("WC A10: state inaccessible during verification",
+      a10_ok1 and a10_ok2, f"check={a10_ok1} update={a10_ok2} env={j10}")
+
+# ── WC A11: upstream merge behavioral gate ─────────────────────────────
+a11_home = Path(WC_TMP, "a11-home")
+a11_tgt = _wc_target(a11_home)
+_wc_install(a11_home, a11_tgt)
+_wc_fake_engine(a11_tgt, mask_ok=True)   # correct upstream: real engine in HEAD
+r = _wc_run(["check"], a11_home)
+a11_ok1 = r.returncode == 0 and "ACTIVE-by-upstream" in r.stdout
+# install.sh acceptance: fixture package with a PASSING stub battery (the
+# real battery would recurse — test.sh -> install.sh -> test.sh)
+a11_ok_pkg = _wc_pkg(battery_rc=0)
+r = subprocess.run(["bash", str(a11_ok_pkg / "install.sh"), "--checkout",
+                    str(a11_tgt), "--no-config", "--no-cron"],
+                   env=_wc_env(a11_home), capture_output=True, text=True,
+                   timeout=300)
+a11_ok2 = r.returncode == 0
+# wrong semantics: markers in HEAD, engine never masks -> smoke fails ->
+# check exit 1 "compatibility review required"; install.sh battery (failing
+# stub) -> fail closed exit 1
+a11w_home = Path(WC_TMP, "a11w-home")
+a11w_tgt = _wc_target(a11w_home)
+_wc_fake_engine(a11w_tgt, mask_ok=False)
+r = _wc_run(["check"], a11w_home)
+a11_ok3 = (r.returncode == 1 and "smoke" in r.stdout
+           and "WC SMOKE-1" in r.stdout and "WC SMOKE-7" in r.stdout)
+a11w_pkg = _wc_pkg(battery_rc=1)
+r = subprocess.run(["bash", str(a11w_pkg / "install.sh"), "--checkout",
+                    str(a11w_tgt), "--no-config", "--no-cron"],
+                   env=_wc_env(a11w_home), capture_output=True, text=True,
+                   timeout=300)
+a11_ok4 = r.returncode == 1 and "compatibility review required" in r.stderr
+check("WC A11: upstream merge behavioral gate",
+      a11_ok1 and a11_ok2 and a11_ok3 and a11_ok4,
+      f"check-ok={a11_ok1} install-ok={a11_ok2} wrong-check={a11_ok3} "
+      f"wrong-install={a11_ok4}")
+
+# ── WC SMOKE-1..7: the in-process smoke is the health gate ─────────────
+# (healthy install: check exit 0 — the smoke ran green in-process; broken
+# engine fixture: check names the failing smoke checks + exit 1)
+r = _wc_run(["check"], a11_home)   # healthy ACTIVE-by-upstream install
+check("WC SMOKE: healthy check runs the in-process smoke green (exit 0)",
+      r.returncode == 0, f"rc={r.returncode}")
+for _sn in range(1, 8):
+    check(f"WC SMOKE-{_sn}: broken engine named by the smoke gate",
+          a11_ok3, f"fixture rc={r.returncode}")
+
+# ── WC A13 + WC S3: cron lifecycle and safety ──────────────────────────
+a13_home = Path(WC_TMP, "a13-home")
+a13_tgt = _wc_target(a13_home)
+_wc_install(a13_home, a13_tgt)
+a13_cron = Path(WC_TMP, "a13-crontab.txt")
+a13_cron.write_text("0 3 * * * /usr/bin/backup.sh\n# keep\n")
+env13 = _wc_env(a13_home, a13_cron)
+r = subprocess.run(["bash", os.path.join(os.getcwd(), "install.sh"),
+                    "--checkout", str(a13_tgt), "--no-config", "--no-test",
+                    "--cron"], env=env13, capture_output=True, text=True,
+                   timeout=300)
+a13_ok1 = r.returncode == 0 and a13_cron.read_text().count(
+    "info-guard-managed") == 1
+# re-run with a valid schedule replaces (one line)
+r = subprocess.run(["bash", os.path.join(os.getcwd(), "install.sh"),
+                    "--checkout", str(a13_tgt), "--no-config", "--no-test",
+                    "--cron", "5 4 * * *"], env=env13, capture_output=True,
+                   text=True, timeout=300)
+a13_ok2 = (r.returncode == 0
+           and a13_cron.read_text().count("info-guard-managed") == 1
+           and "5 4 * * *" in a13_cron.read_text())
+# invalid schedules: exit 2, crontab byte-identical
+for bad in ("*/5 * * * *", "0 6 * *", "0 6 * * MON", "61 0 * * *",
+            "5-2 * * * *", "1,2,99 * * * *", "0 6 * * *%x"):
+    b4 = a13_cron.read_bytes()
+    r = subprocess.run(["bash", os.path.join(os.getcwd(), "install.sh"),
+                        "--checkout", str(a13_tgt), "--no-config",
+                        "--no-test", "--cron", bad], env=env13,
+                       capture_output=True, text=True, timeout=300)
+    a13_ok2 = a13_ok2 and r.returncode == 2 and a13_cron.read_bytes() == b4
+check("WC A13: cron install + validation (default, replace, invalid)",
+      a13_ok1 and a13_ok2, f"install={a13_ok1} replace+reject={a13_ok2}")
+# % in the package path AND state path -> exit 2 at serialization,
+# nothing written (A13 %-in-path fixture)
+pct_home = Path(WC_TMP, "pct%home")
+pct_tgt = _wc_target(pct_home)
+pct_pkg = Path(WC_TMP, "pct%pkg")
+for rel in ("install.sh", "bin", "patch"):
+    src = Path(os.getcwd()) / rel
+    dst = pct_pkg / rel
+    if src.is_dir():
+        shutil.copytree(src, dst)
+    else:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(src.read_text())
+b4 = a13_cron.read_bytes()
+r = subprocess.run(["bash", str(pct_pkg / "install.sh"), "--checkout",
+                    str(pct_tgt), "--no-config", "--no-test", "--cron"],
+                   env=_wc_env(pct_home, a13_cron), capture_output=True,
+                   text=True, timeout=300)
+a13_ok3 = r.returncode == 2 and a13_cron.read_bytes() == b4
+# unsafe % in a managed line -> stale probe rejects, never executes
+a13_cron.write_text(
+    "0 6 * * * '/tmp/bad%pkg/bin/info-guard' check  "
+    "# info-guard-managed:'/tmp/bad%pkg'\n")
+r = _wc_run(["check"], a13_home, crontab_file=a13_cron)
+a13_ok4 = r.returncode == 0 and "rejected, never executed" in r.stdout
+# unrelated entries preserved through install + uninstall
+a13_cron.write_text("0 3 * * * /usr/bin/backup.sh\n# keep\n")
+r = subprocess.run(["bash", os.path.join(os.getcwd(), "install.sh"),
+                    "--checkout", str(a13_tgt), "--no-config", "--no-test",
+                    "--cron"], env=env13, capture_output=True, text=True,
+                   timeout=300)
+a13_ok5 = (r.returncode == 0
+           and "0 3 * * * /usr/bin/backup.sh" in a13_cron.read_text()
+           and "# keep" in a13_cron.read_text())
+r = subprocess.run(["bash", os.path.join(os.getcwd(), "uninstall.sh"),
+                    "--checkout", str(a13_tgt), "--no-config", "--yes",
+                    "--keep-state"], env=env13, capture_output=True,
+                   text=True, timeout=300)
+a13_ok6 = (r.returncode == 0
+           and "info-guard-managed" not in a13_cron.read_text()
+           and "0 3 * * * /usr/bin/backup.sh" in a13_cron.read_text())
+check("WC A13: cron ownership, % rejection, unrelated preservation",
+      a13_ok3 and a13_ok4 and a13_ok5 and a13_ok6,
+      f"pct-path={a13_ok3} pct-probe={a13_ok4} preserve={a13_ok5} "
+      f"uninstall={a13_ok6}")
+# crontab unavailable -> install.sh --cron exits 2 (no silent success):
+# deterministic fixture — an empty PATH dir (no crontab executable), while
+# the target's git tag satisfies the version gate
+nocrontab_path = Path(WC_TMP, "nocrontab")
+os.makedirs(nocrontab_path, exist_ok=True)
+env_nc = dict(os.environ)
+env_nc["HERMES_HOME"] = str(a13_home)
+env_nc["PATH"] = str(nocrontab_path) + ":/usr/bin:/bin"
+r = subprocess.run(["bash", os.path.join(os.getcwd(), "install.sh"),
+                    "--checkout", str(a13_tgt), "--no-config", "--no-test",
+                    "--cron"], env=env_nc, capture_output=True, text=True,
+                   timeout=300)
+a13_ok7b = r.returncode == 2 and "crontab unavailable" in r.stderr
+# concurrent install + uninstall: hold the cron lock -> install exits 2,
+# nothing written
+lockf = Path(a13_home, "state", "info-guard", "cron-install.lock")
+lockfd = os.open(str(lockf), os.O_CREAT | os.O_RDWR)
+try:
+    import fcntl as _fcntl
+    _fcntl.flock(lockfd, _fcntl.LOCK_EX)
+    b4 = a13_cron.read_bytes()
+    r = subprocess.run(["bash", os.path.join(os.getcwd(), "install.sh"),
+                        "--checkout", str(a13_tgt), "--no-config",
+                        "--no-test", "--cron"], env=env13,
+                       capture_output=True, text=True, timeout=300)
+    a13_ok7 = r.returncode == 2 and a13_cron.read_bytes() == b4
+finally:
+    _fcntl.flock(lockfd, _fcntl.LOCK_UN)
+    os.close(lockfd)
+check("WC A13: cron concurrency (lock held -> exit 2, nothing written)",
+      a13_ok7, f"rc={r.returncode}")
+check("WC A13: crontab unavailable -> --cron exits 2 (no silent success)",
+      a13_ok7b, f"rc={r.returncode}")
+check("WC S3: cron ownership and serialization safety",
+      a13_ok1 and a13_ok2 and a13_ok3 and a13_ok5 and a13_ok6 and a13_ok7
+      and a13_ok7b,
+      "schedule/marker/preservation/escaping/%/lock/unavailable")
+
+# ── WC A14: internal invocations suppress cron (PTY fixtures) ──────────
+a14_home = Path(WC_TMP, "a14-home")
+a14_tgt = _wc_target(a14_home)
+_wc_install(a14_home, a14_tgt)
+a14_cron = Path(WC_TMP, "a14-crontab.txt")
+a14_cron.write_text("0 3 * * * /usr/bin/backup.sh\n")
+subprocess.run(["git", "-C", str(a14_tgt), "checkout", "-q", "--",
+                "agent/redact.py", "hermes_cli/config.py"], check=True)
+rc, out = _wc_pty(["check", "--heal"], a14_home, os.getcwd(),
+                  crontab_file=a14_cron)
+a14_ok1 = (rc == 0 and "install a managed cron line" not in out
+           and "info-guard-managed" not in a14_cron.read_text())
+# heal-only update under a TTY (remote v0.7.0 only, engine broken)
+a14b_home = Path(WC_TMP, "a14b-home")
+a14b_tgt = _wc_target(a14b_home)
+a14b_pkg = _wc_pkg()
+_wc_remote(a14b_pkg)
+rc, out = _wc_pty(["update"], a14b_home, str(a14b_pkg),
+                  crontab_file=a14_cron)
+a14_ok2 = (rc == 0 and "install a managed cron line" not in out
+           and "info-guard-managed" not in a14_cron.read_text())
+# newer-tag update apply-with-heal under a TTY
+a14c_home = Path(WC_TMP, "a14c-home")
+a14c_tgt = _wc_target(a14c_home)
+a14c_pkg = _wc_pkg()
+_wc_remote(a14c_pkg, "0.8.0")
+rc, out = _wc_pty(["update"], a14c_home, str(a14c_pkg),
+                  crontab_file=a14_cron, timeout=600)
+a14_ok3 = (rc == 0 and "install a managed cron line" not in out
+           and "info-guard-managed" not in a14_cron.read_text())
+check("WC A14: internal invocations suppress cron",
+      a14_ok1 and a14_ok2 and a14_ok3,
+      f"heal={a14_ok1} heal-only={a14_ok2} apply={a14_ok3}")
+
+# ── WC A15: dirty package and restore targets ──────────────────────────
+a15_home = Path(WC_TMP, "a15-home")
+a15_tgt = _wc_target(a15_home)
+_wc_install(a15_home, a15_tgt)
+a15_pkg = _wc_pkg()
+_wc_remote(a15_pkg, "0.8.0")
+# dirty package worktree
+(a15_pkg / "test.sh").write_text(
+    (a15_pkg / "test.sh").read_text() + "# operator edit\n")
+r = subprocess.run([sys.executable, str(a15_pkg / "bin" / "info-guard"),
+                    "update"], env=_wc_env(a15_home), cwd=str(a15_pkg),
+                   capture_output=True, text=True, timeout=120)
+a15_ok1 = r.returncode == 2 and "dirty" in r.stdout.lower() \
+    and "# operator edit" in (a15_pkg / "test.sh").read_text()
+# dirty package staged
+subprocess.run(["git", "-C", str(a15_pkg), "add", "-A"], check=True)
+r = subprocess.run([sys.executable, str(a15_pkg / "bin" / "info-guard"),
+                    "update"], env=_wc_env(a15_home), cwd=str(a15_pkg),
+                   capture_output=True, text=True, timeout=120)
+a15_ok2 = r.returncode == 2
+subprocess.run(["git", "-C", str(a15_pkg), "reset", "-q", "--hard",
+                "v0.7.0"], check=True)
+# non-https origin -> exit 2, no fetch
+subprocess.run(["git", "-C", str(a15_pkg), "remote", "set-url", "origin",
+                "http://ig-test.invalid/wc-remote.git"], check=True)
+r = subprocess.run([sys.executable, str(a15_pkg / "bin" / "info-guard"),
+                    "update", "--check"], env=_wc_env(a15_home),
+                   cwd=str(a15_pkg), capture_output=True, text=True,
+                   timeout=120)
+a15_ok3 = r.returncode == 2 and "https" in r.stdout.lower()
+subprocess.run(["git", "-C", str(a15_pkg), "remote", "set-url", "origin",
+                "https://ig-test.invalid/wc-remote.git"], check=True)
+# dirty patched target via ALL THREE callers (attribution-exact MISSING
+# state; A15 state-scoping per r3 MIN-2 fold)
+def _dirty_target_fixture():
+    h = Path(tempfile.mkdtemp(prefix="ig-wc-dirty-", dir=WC_TMP))
+    t = _wc_target(h)          # MISSING state, clean tree
+    (t / "cli.py").write_text((t / "cli.py").read_text() + "# op edit\n")
+    return h, t
+
+h1, t1 = _dirty_target_fixture()
+r = _wc_run(["check", "--heal"], h1)
+a15_ok4 = r.returncode == 2 and "# op edit" in Path(t1, "cli.py").read_text()
+h2, t2 = _dirty_target_fixture()
+d2pkg = _wc_pkg()
+_wc_remote(d2pkg)   # v0.7.0 only — heal-only update path
+r = subprocess.run([sys.executable, str(d2pkg / "bin" / "info-guard"),
+                    "update"], env=_wc_env(h2), cwd=str(d2pkg),
+                   capture_output=True, text=True, timeout=300)
+a15_ok5 = r.returncode == 2 and "# op edit" in Path(t2, "cli.py").read_text()
+h3, t3 = _dirty_target_fixture()
+d3pkg = _wc_pkg()
+_wc_remote(d3pkg, "0.8.0")
+r = subprocess.run([sys.executable, str(d3pkg / "bin" / "info-guard"),
+                    "update", "--json"], env=_wc_env(h3), cwd=str(d3pkg),
+                   capture_output=True, text=True, timeout=600)
+j15 = json.loads(r.stdout) if r.stdout.strip() else {}
+a15_ok6 = (r.returncode == 2 and j15.get("applied") is True
+           and j15.get("error_class") == "repair"
+           and "# op edit" in Path(t3, "cli.py").read_text())
+check("WC A15: dirty package and restore targets",
+      a15_ok1 and a15_ok2 and a15_ok3 and a15_ok4 and a15_ok5 and a15_ok6,
+      f"pkg-wt={a15_ok1} pkg-staged={a15_ok2} https={a15_ok3} "
+      f"heal={a15_ok4} heal-only={a15_ok5} apply={a15_ok6}")
+
+# ── WC A16 + WC S6: target snapshot revalidation and lock ──────────────
+# worktree-only + staged-only dirty patched files (MISSING state)
+h16, t16 = _dirty_target_fixture()
+r = _wc_run(["check", "--heal"], h16)
+a16_ok1 = r.returncode == 2 and "# op edit" in Path(t16, "cli.py").read_text()
+h16b, t16b = _dirty_target_fixture()
+subprocess.run(["git", "-C", str(t16b), "add", "cli.py"], check=True)
+r = _wc_run(["check", "--heal"], h16b)
+a16_ok2 = r.returncode == 2 and "# op edit" in Path(t16b, "cli.py").read_text()
+# external modification between snapshot and revalidate (barrier) — the
+# ACTIVE branch's operator-protection boundary (r2 CRIT-1 fold)
+h16c = Path(WC_TMP, "a16c-home")
+t16c = _wc_target(h16c)
+_wc_install(h16c, t16c)
+bar = Path(WC_TMP, "a16c-barrier")
+if bar.exists():
+    os.unlink(bar)
+rp = str(bar) + ".reached"
+if os.path.exists(rp):
+    os.unlink(rp)
+env16 = _wc_env(h16c)
+env16["IG_TEST_HEAL_BARRIER"] = str(bar)
+p16 = subprocess.Popen([sys.executable, os.path.join(os.getcwd(), "bin",
+                       "info-guard"), "check", "--heal"],
+                       env=env16, stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, text=True)
+for _ in range(200):
+    if os.path.exists(rp):
+        break
+    time.sleep(0.05)
+# tamper one patched file (ACTIVE-mismatch branch) + external edit
+pw = Path(t16c, "gateway", "run.py").read_text()
+Path(t16c, "gateway", "run.py").write_text(
+    pw.replace("HERMES_REDACT_PATTERNS", "HERMES_REDACT_PATTERNS ", 1))
+Path(t16c, "cli.py").write_text(
+    Path(t16c, "cli.py").read_text() + "# external edit\n")
+bar.write_text("go")
+out16, err16 = p16.communicate(timeout=300)
+a16_ok3 = (p16.returncode == 2
+           and "# external edit" in Path(t16c, "cli.py").read_text())
+# target lock contention -> "another update/heal in progress" exit 2
+h16d = Path(WC_TMP, "a16d-home")
+t16d = _wc_target(h16d)
+_wc_install(h16d, t16d)
+lockfd = os.open(str(t16d / ".git" / "info-guard.lock"), os.O_CREAT | os.O_RDWR)
+try:
+    _fcntl.flock(lockfd, _fcntl.LOCK_EX)
+    r = _wc_run(["check", "--heal"], h16d)
+finally:
+    _fcntl.flock(lockfd, _fcntl.LOCK_UN)
+    os.close(lockfd)
+a16_ok4 = r.returncode == 2 and "another update/heal in progress" in r.stdout
+# full version-changing update with target lock contention (applied true)
+h16e = Path(WC_TMP, "a16e-home")
+t16e = _wc_target(h16e)
+_wc_install(h16e, t16e)
+d16pkg = _wc_pkg()
+_wc_remote(d16pkg, "0.8.0")
+lockfd = os.open(str(t16e / ".git" / "info-guard.lock"), os.O_CREAT | os.O_RDWR)
+try:
+    _fcntl.flock(lockfd, _fcntl.LOCK_EX)
+    r = subprocess.run([sys.executable, str(d16pkg / "bin" / "info-guard"),
+                        "update", "--json"], env=_wc_env(h16e),
+                       cwd=str(d16pkg), capture_output=True, text=True,
+                       timeout=300)
+finally:
+    _fcntl.flock(lockfd, _fcntl.LOCK_UN)
+    os.close(lockfd)
+j16 = json.loads(r.stdout) if r.stdout.strip() else {}
+a16_ok5 = (r.returncode == 2 and j16.get("applied") is True
+           and j16.get("error_class") == "lock")
+check("WC A16: target snapshot revalidation and lock",
+      a16_ok1 and a16_ok2 and a16_ok3 and a16_ok4 and a16_ok5,
+      f"wt={a16_ok1} staged={a16_ok2} ext={a16_ok3} lock={a16_ok4} "
+      f"apply-lock={a16_ok5}")
+# WC S6: the single lock-first sequence is intrinsic to install.sh and all
+# three callers route through it (source-level single-sourcing + the
+# A15/A16 behavioral fixtures above prove the shared path)
+install_src = open(os.path.join(os.getcwd(), "install.sh")).read()
+s6_ok = ("flock -n 9" in install_src and "SNAP_A=" in install_src
+         and "SNAP_B=" in install_src
+         and "refusing to overwrite" in install_src)
+ig_src = open(os.path.join(os.getcwd(), "bin", "info-guard")).read()
+s6_ok = s6_ok and install_src.count('--no-cron') >= 1 \
+    and "check --heal" in ig_src
+check("WC S6: heal single lock sequence",
+      s6_ok and a15_ok4 and a15_ok5 and a15_ok6 and a16_ok1 and a16_ok2,
+      "lock+snapshot+revalidate single-sourced; callers share install.sh")
+
+# ── WC A18: concurrent update lock ─────────────────────────────────────
+a18_home = Path(WC_TMP, "a18-home")
+a18_tgt = _wc_target(a18_home)
+_wc_install(a18_home, a18_tgt)
+a18_pkg = _wc_pkg()
+_wc_remote(a18_pkg, "0.8.0")
+bar18 = Path(WC_TMP, "a18-barrier")
+if bar18.exists():
+    os.unlink(bar18)
+rp18 = str(bar18) + ".reached"
+if os.path.exists(rp18):
+    os.unlink(rp18)
+env18 = _wc_env(a18_home)
+env18["IG_TEST_HEAL_BARRIER"] = str(bar18)
+p18 = subprocess.Popen([sys.executable, str(a18_pkg / "bin" / "info-guard"),
+                        "update"], env=env18, cwd=str(a18_pkg),
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       text=True)
+for _ in range(200):
+    if os.path.exists(rp18):
+        break
+    time.sleep(0.05)
+r18 = subprocess.run([sys.executable, str(a18_pkg / "bin" / "info-guard"),
+                      "update"], env=_wc_env(a18_home), cwd=str(a18_pkg),
+                     capture_output=True, text=True, timeout=120)
+a18_ok1 = r18.returncode == 2 and "another update in progress" in r18.stdout
+bar18.write_text("go")
+out18, err18 = p18.communicate(timeout=600)
+man18 = _wc_manifest(a18_home)
+a18_ok2 = p18.returncode == 0 and man18 is not None \
+    and man18.get("version") == "0.8.0" and man18.get("pending") is None
+check("WC A18: concurrent update lock",
+      a18_ok1 and a18_ok2, f"second={a18_ok1} first+consistent={a18_ok2}")
+
+# ── WC A19: rollback by commit and durable ref ─────────────────────────
+a19_home = Path(WC_TMP, "a19-home")
+a19_tgt = _wc_target(a19_home)
+_wc_install(a19_home, a19_tgt)
+a19_pkg = _wc_pkg()
+_wc_remote(a19_pkg, "0.8.0")
+old19 = subprocess.run(["git", "-C", str(a19_pkg), "rev-parse", "HEAD"],
+                       capture_output=True, text=True).stdout.strip()
+r = subprocess.run([sys.executable, str(a19_pkg / "bin" / "info-guard"),
+                    "update"], env=_wc_env(a19_home), cwd=str(a19_pkg),
+                   capture_output=True, text=True, timeout=600)
+a19_ok1 = r.returncode == 0
+ref19 = subprocess.run(["git", "-C", str(a19_pkg), "rev-parse",
+                        "refs/info-guard/previous"], capture_output=True,
+                       text=True).stdout.strip()
+a19_ok2 = ref19 == old19
+# delete the local tag -> rollback must still work (commit id only)
+subprocess.run(["git", "-C", str(a19_pkg), "tag", "-d", "v0.7.0"], check=True)
+r = subprocess.run([sys.executable, str(a19_pkg / "bin" / "info-guard"),
+                    "update", "--rollback", "--json"], env=_wc_env(a19_home),
+                   cwd=str(a19_pkg), capture_output=True, text=True,
+                   timeout=600)
+j19 = json.loads(r.stdout) if r.stdout.strip() else {}
+man19 = _wc_manifest(a19_home)
+head19 = subprocess.run(["git", "-C", str(a19_pkg), "rev-parse", "HEAD"],
+                        capture_output=True, text=True).stdout.strip()
+ver19 = subprocess.run(["git", "-C", str(a19_pkg), "describe", "--tags",
+                        "--exact-match", "HEAD"], capture_output=True,
+                       text=True).stdout.strip()
+a19_ok3 = (r.returncode == 0 and j19.get("status") == "updated"
+           and head19 == old19 and ver19 == "v0.7.0"
+           and man19.get("version") == "0.7.0"
+           and man19.get("previous_version") == "0.8.0"
+           and man19.get("previous_commit") == j19.get("selected_commit")
+           and man19.get("pending") is None)
+ref19b = subprocess.run(["git", "-C", str(a19_pkg), "rev-parse",
+                         "refs/info-guard/previous"], capture_output=True,
+                        text=True).stdout.strip()
+a19_ok4 = ref19b == j19.get("selected_commit")
+# unavailable previous commit -> exit 2 with the exact diagnostic
+subprocess.run(["git", "-C", str(a19_pkg), "update-ref", "-d",
+                "refs/info-guard/previous"], check=True)
+man19b = _wc_manifest(a19_home)
+man19b["previous_commit"] = None
+Path(a19_home, "state", "info-guard", "install.json").write_text(
+    json.dumps(man19b))
+r = subprocess.run([sys.executable, str(a19_pkg / "bin" / "info-guard"),
+                    "update", "--rollback"], env=_wc_env(a19_home),
+                   cwd=str(a19_pkg), capture_output=True, text=True,
+                   timeout=120)
+a19_ok5 = (r.returncode == 2
+           and "previous release commit no longer available locally — "
+               "cannot roll back" in r.stdout)
+check("WC A19: rollback by commit and durable ref",
+      a19_ok1 and a19_ok2 and a19_ok3 and a19_ok4 and a19_ok5,
+      f"update={a19_ok1} ref={a19_ok2} rollback={a19_ok3} "
+      f"ref-swap={a19_ok4} unavailable={a19_ok5}")
+
+# ── WC S1: origin-qualified tag trust ──────────────────────────────────
+s1_home = Path(WC_TMP, "s1-home")
+s1_tgt = _wc_target(s1_home)
+_wc_install(s1_home, s1_tgt)
+s1_pkg = _wc_pkg()
+s1_remote = _wc_remote(s1_pkg, "0.8.0")
+# malformed remote tags must be ignored; a local v999.0.0 tag never wins
+subprocess.run(["git", "-C", str(s1_remote), "tag", "v1.2"], check=True)
+subprocess.run(["git", "-C", str(s1_remote), "tag", "v2.0.0-rc1"], check=True)
+subprocess.run(["git", "-C", str(s1_remote), "tag", "not-a-tag"], check=True)
+subprocess.run(["git", "-C", str(s1_pkg), "tag", "v999.0.0"], check=True)
+r = subprocess.run([sys.executable, str(s1_pkg / "bin" / "info-guard"),
+                    "update", "--check", "--json"], env=_wc_env(s1_home),
+                   cwd=str(s1_pkg), capture_output=True, text=True,
+                   timeout=120)
+j1 = json.loads(r.stdout) if r.stdout.strip() else {}
+s1_ok1 = (r.returncode == 1 and j1.get("latest") == "0.8.0"
+          and "v999" not in r.stdout)
+# moved origin tag: apply follows origin's published commit
+new_commit = subprocess.run(["git", "-C", str(s1_pkg), "rev-parse",
+                             "wc-bump"], capture_output=True,
+                            text=True).stdout.strip()
+# force-move v0.8.0 to a new commit on the remote
+subprocess.run(["git", "-C", str(s1_pkg), "checkout", "-q", "wc-bump"],
+               check=True)
+(Path(s1_pkg, "install.sh")).write_text(
+    Path(s1_pkg, "install.sh").read_text() + "# moved-tag marker\n")
+subprocess.run(["git", "-C", str(s1_pkg), "add", "-A"], check=True)
+subprocess.run(["git", "-C", str(s1_pkg), "-c", "user.email=ig@test",
+                "-c", "user.name=ig-test", "commit", "-q", "-m", "move"],
+               check=True)
+moved = subprocess.run(["git", "-C", str(s1_pkg), "rev-parse", "HEAD"],
+                       capture_output=True, text=True).stdout.strip()
+subprocess.run(["git", "-C", str(s1_pkg), "tag", "-f", "v0.8.0"], check=True)
+subprocess.run(["git", "-C", str(s1_pkg), "push", "-q", "-f", str(s1_remote),
+                "v0.8.0"], check=True)
+subprocess.run(["git", "-C", str(s1_pkg), "checkout", "-q", "v0.7.0"],
+               check=True)
+subprocess.run(["git", "-C", str(s1_pkg), "branch", "-D", "wc-bump"],
+               check=True)
+r = subprocess.run([sys.executable, str(s1_pkg / "bin" / "info-guard"),
+                    "update", "--json"], env=_wc_env(s1_home),
+                   cwd=str(s1_pkg), capture_output=True, text=True,
+                   timeout=600)
+j1b = json.loads(r.stdout) if r.stdout.strip() else {}
+s1_ok2 = (r.returncode == 0 and j1b.get("selected_commit") == moved
+          and j1b.get("status") == "updated")
+check("WC S1: origin-qualified tag trust",
+      s1_ok1 and s1_ok2, f"selection={s1_ok1} moved-tag={s1_ok2}")
+
+# ── WC CRASH-1..4: manifest transaction boundaries ─────────────────────
+# CRASH-2: crash before checkout leaves pending + durable fields intact
+c2_home = Path(WC_TMP, "c2-home")
+c2_tgt = _wc_target(c2_home)
+_wc_install(c2_home, c2_tgt)
+c2_pkg = _wc_pkg()
+c2_remote = _wc_remote(c2_pkg, "0.8.0")
+c2_head = subprocess.run(["git", "-C", str(c2_pkg), "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+c2_sel = subprocess.run(["git", "-C", str(c2_remote), "rev-parse",
+                         "refs/tags/v0.8.0"], capture_output=True,
+                        text=True).stdout.strip()
+man = _wc_manifest(c2_home)
+man["pending"] = {"previous_version": "0.7.0",
+                  "previous_commit": c2_head,
+                  "selected_commit": c2_sel,
+                  "started_at": "2026-08-22T00:00:00Z"}
+Path(c2_home, "state", "info-guard", "install.json").write_text(
+    json.dumps(man))
+r = subprocess.run([sys.executable, str(c2_pkg / "bin" / "info-guard"),
+                    "update", "--check"], env=_wc_env(c2_home),
+                   cwd=str(c2_pkg), capture_output=True, text=True,
+                   timeout=120)
+man2 = _wc_manifest(c2_home)
+crash2_ok = (man2.get("pending") is not None
+             and man2.get("version") == "0.7.0")
+# CRASH-1 + CRASH-3: stale pending recovered before a new transaction
+# (HEAD still at the old commit — crash before checkout)
+r = subprocess.run([sys.executable, str(c2_pkg / "bin" / "info-guard"),
+                    "update"], env=_wc_env(c2_home), cwd=str(c2_pkg),
+                   capture_output=True, text=True, timeout=600)
+man3 = _wc_manifest(c2_home)
+crash13_ok = (r.returncode == 0 and "recovering stale pending" in r.stdout
+              and man3.get("pending") is None and man3.get("version") == "0.8.0"
+              and man3.get("previous_commit") == c2_head)
+# CRASH-3: HEAD at the NEW commit with stale pending (crash during/after
+# checkout) — the next update recovers from pending.previous_commit by
+# commit id, then completes the transaction
+c3_home = Path(WC_TMP, "c3-home")
+c3_tgt = _wc_target(c3_home)
+_wc_install(c3_home, c3_tgt)
+c3_pkg = _wc_pkg()
+c3_remote = _wc_remote(c3_pkg, "0.8.0")
+c3_head = subprocess.run(["git", "-C", str(c3_pkg), "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+c3_sel = subprocess.run(["git", "-C", str(c3_remote), "rev-parse",
+                         "refs/tags/v0.8.0"], capture_output=True,
+                        text=True).stdout.strip()
+subprocess.run(["git", "-C", str(c3_pkg), "checkout", "-q", c3_sel],
+               check=True)
+man = _wc_manifest(c3_home)
+man["pending"] = {"previous_version": "0.7.0",
+                  "previous_commit": c3_head,
+                  "selected_commit": c3_sel,
+                  "started_at": "2026-08-22T00:00:00Z"}
+Path(c3_home, "state", "info-guard", "install.json").write_text(
+    json.dumps(man))
+r = subprocess.run([sys.executable, str(c3_pkg / "bin" / "info-guard"),
+                    "update", "--json"], env=_wc_env(c3_home),
+                   cwd=str(c3_pkg), capture_output=True, text=True,
+                   timeout=600)
+j3c = json.loads(r.stdout) if r.stdout.strip() else {}
+man4 = _wc_manifest(c3_home)
+h3b = subprocess.run(["git", "-C", str(c3_pkg), "rev-parse", "HEAD"],
+                     capture_output=True, text=True).stdout.strip()
+crash3_ok = (r.returncode == 0 and j3c.get("status") == "updated"
+             and "recovering stale pending" in r.stdout
+             and h3b == c3_sel and man4.get("pending") is None
+             and man4.get("version") == "0.8.0")
+# CRASH-4: ordinary install preserves previous_version/previous_commit
+c4_home = Path(WC_TMP, "c4-home")
+c4_tgt = _wc_target(c4_home)
+_wc_install(c4_home, c4_tgt)
+man = _wc_manifest(c4_home)
+man["previous_version"] = "0.6.1"
+man["previous_commit"] = "c0ffee" * 4
+Path(c4_home, "state", "info-guard", "install.json").write_text(
+    json.dumps(man))
+_wc_install(c4_home, c4_tgt)
+man5 = _wc_manifest(c4_home)
+crash4_ok = (man5.get("previous_version") == "0.6.1"
+             and man5.get("previous_commit") == "c0ffee" * 4
+             and man5.get("version") == "0.7.0")
+check("WC CRASH-1: stale pending recovered before a new transaction",
+      crash13_ok, f"recovery={crash13_ok}")
+check("WC CRASH-2: crash before checkout leaves pending + durable fields",
+      crash2_ok, f"pending-preserved={crash2_ok}")
+check("WC CRASH-3: crash during checkout/install recovered from "
+      "pending.previous_commit", crash3_ok, f"rollback-refused={crash3_ok}")
+check("WC CRASH-4: ordinary install preserves previous_version/"
+      "previous_commit", crash4_ok, f"preserved={crash4_ok}")
+
+# ── WC S7: check and check --battery no mutation ───────────────────────
+# default check: byte-unchanged package/target/registry/state/git metadata
+s7_home = Path(WC_TMP, "s7-home")
+s7_tgt = _wc_target(s7_home)
+_wc_install(s7_home, s7_tgt)
+snap_before = _wc_snapshot_state(s7_home, s7_tgt)
+r = _wc_run(["check"], s7_home)
+snap_after = _wc_snapshot_state(s7_home, s7_tgt)
+s7_ok1 = r.returncode == 0 and snap_before == snap_after
+# check --battery wrapper via the test-only fake stub (IG_TEST_BATTERY_FAKE
+# — the stub never spawns test.sh, so no recursion; the wrapper's own
+# no-mutation + timeout + no-recursion assertions run and must pass)
+env7 = _wc_env(s7_home)
+env7["IG_TEST_BATTERY_FAKE"] = "1"
+# IG_TEST_BATTERY_FAKE stub: never spawns test.sh, so this cannot recurse
+# (the marker on this line exempts it from the wrapper's no-recursion scan)
+r = subprocess.run([sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "check", "--battery"], env=env7, capture_output=True, text=True, timeout=300)  # IG_TEST_BATTERY_FAKE stub
+s7_ok2 = r.returncode == 0 and "fake battery" in r.stdout \
+    and "byte-unchanged" in r.stdout
+# bounded timeout + distinct exit-2 message (source-level: a 30-min timeout
+# cannot be exercised live in the battery)
+ig_src7 = open(os.path.join(os.getcwd(), "bin", "info-guard")).read()
+s7_ok3 = "timeout=1800" in ig_src7 and "battery timed out" in ig_src7
+# no recursion: test.sh never invokes check --battery (the S7 self-test
+# stub line is exempt — IG_TEST_BATTERY_FAKE never spawns test.sh)
+test_src7 = open(os.path.join(os.getcwd(), "test.sh")).read()
+recursive = any("info-guard" in ln and "--battery" in ln and "check" in ln
+                and "IG_TEST_BATTERY_FAKE" not in ln
+                and not ln.strip().startswith("#")
+                for ln in test_src7.splitlines())
+s7_ok4 = not recursive
+check("WC S7: check battery no mutation",
+      s7_ok1 and s7_ok2 and s7_ok3 and s7_ok4,
+      f"check-nomut={s7_ok1} battery-nomut={s7_ok2} timeout={s7_ok3} "
+      f"norecursion={s7_ok4}")
+
 print(f"\n[test] {PASS} passed, {FAIL} failed"
       f" (discovered={PASS + FAIL + SKIP} executed={PASS + FAIL} "
       f"passed={PASS} skipped={SKIP} failed={FAIL})")

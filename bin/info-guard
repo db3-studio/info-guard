@@ -3879,11 +3879,19 @@ def _read_package_version(pkg) -> str | None:
     return m.group(1) if m else None
 
 
-def _read_install_manifest() -> dict:
+_MANIFEST_UNREADABLE = object()
+
+
+def _read_install_manifest():
+    """install.json as a dict, or _MANIFEST_UNREADABLE when the state is
+    inaccessible (A10: post-apply verification must report error_class
+    'state', never a mis-claimed version mismatch)."""
     try:
         data = json.loads(INSTALL_MANIFEST.read_text())
         return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+    except OSError:
+        return _MANIFEST_UNREADABLE
+    except ValueError:
         return {}
 
 
@@ -4028,6 +4036,8 @@ def _recover_pending(u: _UpdateRun, pkg, man: dict):
     if inst.returncode != 0:
         return False, _classify_install_failure(inst.stderr, during_apply=False)
     man2 = _read_install_manifest()
+    if man2 is _MANIFEST_UNREADABLE:
+        return False, "state"
     if man2.get("version") != prev_version:
         return False, "version_mismatch"
     _write_install_manifest({"version": prev_version,
@@ -4097,6 +4107,10 @@ def _update_apply(u: _UpdateRun, pkg) -> int:
     # stale-pending recovery FIRST (r1 MAJ-1 fold): never overwritten by a
     # new transaction
     man = _read_install_manifest()
+    if man is _MANIFEST_UNREADABLE:
+        u.say("[info-guard] update: install.json unreadable — cannot assess "
+              "the transaction state (state inaccessible)")
+        return u.finish("error", error_class="state", exit_code=2)
     if man.get("pending"):
         ok, err = _recover_pending(u, pkg, man)
         if not ok:
@@ -4201,6 +4215,13 @@ def _update_apply(u: _UpdateRun, pkg) -> int:
     new_ver = _read_package_version(pkg)
     man2 = _read_install_manifest()
     head_now = _git(["rev-parse", "HEAD"], pkg)[1].strip()
+    if man2 is _MANIFEST_UNREADABLE:
+        u.say("[info-guard] update: install.json unreadable during "
+              "post-apply verification — no 'verified' claim is made "
+              "(partial outcome: the package may still be updated)")
+        return u.finish("error", engine="UNKNOWN", latest=latest,
+                        selected=commit, applied=True,
+                        error_class="state", exit_code=2)
     if (head_now != commit or new_ver != latest
             or man2.get("version") != latest
             or man2.get("previous_version") != prev_version
@@ -4237,6 +4258,10 @@ def _update_rollback(u: _UpdateRun, pkg) -> int:
     tag name; no local tag is required. Resolves the previous commit from
     refs/info-guard/previous (fallback: install.json.previous_commit)."""
     man = _read_install_manifest()
+    if man is _MANIFEST_UNREADABLE:
+        u.say("[info-guard] update: install.json unreadable — cannot assess "
+              "the transaction state (state inaccessible)")
+        return u.finish("error", error_class="state", exit_code=2)
     if man.get("pending"):
         ok, err = _recover_pending(u, pkg, man)
         if not ok:
@@ -4657,7 +4682,9 @@ def _check_battery() -> int:
         # `check --battery` (S7)
         src = (pkg / "test.sh").read_text(errors="replace")
         recursive = any(("info-guard" in ln and "--battery" in ln
-                         and "check" in ln and not ln.strip().startswith("#"))
+                         and "check" in ln
+                         and "IG_TEST_BATTERY_FAKE" not in ln
+                         and not ln.strip().startswith("#"))
                         for ln in src.splitlines())
         if recursive:
             print("[info-guard] ✗ check --battery: test.sh recursively "
