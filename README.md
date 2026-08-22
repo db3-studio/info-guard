@@ -61,7 +61,7 @@ Takes about two minutes.
 | `build` source | `$HERMES_HOME/.env` |
 | State dir | `$HERMES_HOME/state/info-guard/` |
 | Pattern file | `<state>/redact_patterns.json` (`<state>` = the state dir above), chmod 600 |
-| Literals registry | `<state>/custom_literals.json` (0600) — your hand-edited exact values |
+| Literals registry | `<state>/custom_literals.json`, chmod 600 |
 | Preflight scan dirs | `<home>/sessions`, `<home>/logs`, `<home>/cron/output` (`<home>` = `$HERMES_HOME`) |
 | Exit codes | 0 clean · 1 findings-or-delta alarm · 2 usage or operational error · 3 KNOWN present (preflight only) · 4 canary at rest (honeytoken) — preflight + watch |
 
