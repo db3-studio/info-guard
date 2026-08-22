@@ -677,7 +677,14 @@ def _gitleaks_scan(root: Path, redact=True):
     try:
         cmd = [binpath, "dir", str(root), "--no-banner",
                "--report-format=json", f"--report-path={report}"]
-        subprocess.run(cmd, capture_output=True, timeout=600)
+        res = subprocess.run(cmd, capture_output=True, timeout=600)
+        # D94 doctrine, degraded-engine case (evidence-gate r3, WB C8): gitleaks
+        # exit codes are 0 = clean, 1 = leaks found, >1 = ERROR (bad flags, scan
+        # failure, exec error). A failing engine must NEVER masquerade as a clean
+        # scan — rc > 1 degrades to available=False (exit 2 upstream), the same
+        # path the missing-engine case takes.
+        if res.returncode > 1:
+            return [], False
         try:
             findings = json.loads(Path(report).read_text())
         except (OSError, json.JSONDecodeError):

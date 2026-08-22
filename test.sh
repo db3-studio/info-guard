@@ -3686,6 +3686,89 @@ for c7_kind, c7_label in (
           and len([l for l in r.stderr.splitlines() if "unknown literal kind" in l]) == 1,
           f"err={r.stderr[:200]!r}")
 
+# ── 28. Wave B evidence-gate battery (r3 fold, IG D105 + arbiter) — HONEYTOKEN
+# decreased-delta normative (CRIT-3), degraded-engine (gitleaks present but
+# failing) matrix cells (MAJ-2), old-consumer HONEYTOKEN-row tolerance (MAJ-6).
+
+# C8a — baselined canary count decrease → delta:"decreased" + count_before,
+# exit 0 (IG D105: the r3 CRIT-3 contract amendment, now normative).
+c8_h, c8_v = _wb_fresh(plant=True)
+r = _wb_cmd(["watch", "--reset"], c8_h)
+with open(os.path.join(c8_h, "sessions", "decoy.txt"), "a") as f:
+    f.write("OTHER = %s\n" % (c8_v or ""))
+r = _wb_cmd(["watch"], c8_h)          # increase → 4; baseline refreshes to 2
+with open(os.path.join(c8_h, "sessions", "decoy.txt"), "w") as f:
+    f.write("api_key = %s\n" % (c8_v or ""))   # 1 occurrence vs baseline 2
+r = _wb_cmd(["watch", "--json"], c8_h)
+j = _wb_json(r)
+c8a = r.returncode == 0 and bool(j)
+if c8a:
+    ht_rows = [x for x in j.get("exposure", {}).get("protected_values", [])
+               if x.get("type") == "HONEYTOKEN"]
+    c8a = len(ht_rows) == 1 and ht_rows[0].get("delta") == "decreased" \
+        and ht_rows[0].get("count_before") == 2 and ht_rows[0].get("count") == 1
+check("WB C8: baselined canary decrease → delta:decreased + count_before, exit 0 (IG D105)",
+      c8a, f"rc={r.returncode}")
+
+# C8b — degraded engine: gitleaks PRESENT but failing (exit-1 shim on PATH),
+# distinct from engine-missing (scrubbed PATH) — exit 2, rows serialized,
+# review_list incomplete (MAJ-2).
+c8d_h, c8d_v = _wb_fresh(plant=True)
+c8d_n_h, _ = _wb_fresh()
+gshim = os.path.join(tmp, "wb-gitleaks-shim")
+os.makedirs(gshim, exist_ok=True)
+with open(os.path.join(gshim, "gitleaks"), "w") as f:
+    f.write("#!/bin/sh\necho 'shim: scan failed' >&2\nexit 2\n")
+os.chmod(os.path.join(gshim, "gitleaks"), 0o755)
+
+def _wb_degraded(args, home):
+    env = dict(os.environ)
+    env["PATH"] = gshim + ":" + env.get("PATH", "")
+    env["HERMES_HOME"] = home
+    return subprocess.run(
+        [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard")] + args,
+        env=env, capture_output=True, text=True, timeout=300)
+
+r = _wb_degraded(["preflight", "--json"], c8d_n_h)
+j = _wb_json(r)
+c8b1 = r.returncode == 2 and bool(j) and j.get("scan", {}).get("gitleaks_ok") is False
+check("WB C8: preflight --json degraded (shim) no-canary → exit 2, gitleaks_ok false",
+      c8b1, f"rc={r.returncode}")
+r = _wb_degraded(["preflight", "--json"], c8d_h)
+j = _wb_json(r)
+c8b2 = r.returncode == 2 and bool(j) and any(
+    v.get("type") == "HONEYTOKEN" for v in j.get("top_values", []))
+check("WB C8: preflight --json degraded (shim) canary → exit 2 + rows serialized",
+      c8b2, f"rc={r.returncode}")
+r = _wb_degraded(["watch", "--json"], c8d_h)
+j = _wb_json(r)
+c8b3 = r.returncode == 2 and bool(j) and \
+    j.get("exposure", {}).get("review_list_complete") is False
+check("WB C8: watch --json degraded (shim) canary → exit 2 + review_list incomplete",
+      c8b3, f"rc={r.returncode}")
+r = _wb_degraded(["watch"], c8d_n_h)
+check("WB C8: watch degraded (shim) no-canary text → exit 2, never 0",
+      r.returncode == 2, f"rc={r.returncode}")
+
+# C9 — old-consumer HONEYTOKEN-row tolerance (MAJ-6): the v1.1 same-major
+# consumer probe receives (a) an assessment carrying an unknown HONEYTOKEN
+# top_values row and (b) a watch/v1 object carrying review_list +
+# review_list_complete — must tolerate + preserve/report, never fail.
+p9a = subprocess.run([sys.executable, probe11], input=r10.stdout.replace(
+    '"top_values": [',
+    '"top_values": [{"value_masked": "ht...0e", "type": "HONEYTOKEN", '
+    '"family": null, "count": 1, "known": false}, '),
+    capture_output=True, text=True, timeout=120)
+check("WB C9: v1.1 consumer probe tolerates unknown HONEYTOKEN assessment row (preserve/report)",
+      p9a.returncode == 0, f"rc={p9a.returncode} err={p9a.stderr[-250:]!r}")
+p9w = subprocess.run([sys.executable, probe11, "--surface", "watch"],
+                     input=r11w.stdout.replace(
+                         '"exposure": {',
+                         '"exposure": {"review_list": [], "review_list_complete": true, '),
+                     capture_output=True, text=True, timeout=120)
+check("WB C9: v1.1 consumer probe tolerates watch object w/ review_list fields",
+      p9w.returncode == 0, f"rc={p9w.returncode} err={p9w.stderr[-250:]!r}")
+
 print(f"\n[test] {PASS} passed, {FAIL} failed"
       f" (discovered={PASS + FAIL + SKIP} executed={PASS + FAIL} "
       f"passed={PASS} skipped={SKIP} failed={FAIL})")
