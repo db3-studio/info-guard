@@ -80,8 +80,16 @@ in-memory delta object — never a second implementation.
       {"value_masked": "pa...x2", "type": "KNOWN", "family": "AGH_PIN",
        "count": 5, "count_before": 2, "delta": "increased",
        "source": "literal", "source_key": "AGH_PIN",
-       "value_id": "3f2a91c4e8b6d705"}
-    ]
+       "value_id": "3f2a91c4e8b6d705"},
+      {"value_masked": "ht...0e", "type": "HONEYTOKEN", "family": null,
+       "count": 1, "delta": "new", "source": "literal",
+       "value_id": "7c1d9e2f3a4b5c6d"}
+    ],
+    "review_list": [
+      {"value_masked": "6f...8c", "type": "SUSPICIOUS",
+       "family": "generic-api-key", "count": 1}
+    ],
+    "review_list_complete": true
   },
   "protection": {
     "status": "unchanged",
@@ -167,21 +175,53 @@ family name, or `null` for bare tokens (the terminal renders
   registry). Row shape `{value_masked (2+2), type, family, count,
   count_before? (increased/decreased only), delta ∈ {new, increased,
   decreased, unchanged}, value_id (v0.4.2)}` — **never sha256** (same
-  surface rule as every exposure row). `new`/`increased` → **exit 1**;
-  `decreased`/`unchanged` → informational (exit 0). A value absent from
-  the scan never appears here — it surfaces via `resolved_values`
-  (which **never carries a `value_id`** — a resolved row is not
-  registry-joinable; a consumer cannot build a "protected value stopped
-  appearing" join). Present on every run (empty array when the registry
-  is empty or nothing matches; first-run and migration emits are empty —
-  the next run reports). **Overlay rule:** a protected value also
-  appears in `new_values`/`changed_values` — that is ONE event; the
-  terminal renders it once (PROTECTED block only).
-  Vocabulary: **protected value** = user-declared via the registry ·
-  **detection** = appeared in scan · **increased** = more occurrences
-  than baseline · **confirmed leak** = never claimed by watch. Matching
-  is exact-value and limited to the credential-shaped scan domain (a
-  PII-only literal never matches, by design).
+  surface rule as every exposure row). `new`/`increased` → **exit 1** (or **exit 4** for a `HONEYTOKEN` row —
+ canary-touch, IG D103);
+ `decreased`/`unchanged` → informational (exit 0). A value absent from
+ the scan never appears here — it surfaces via `resolved_values`
+ (which **never carries a `value_id`** — a resolved row is not
+ registry-joinable; a consumer cannot build a "protected value stopped
+ appearing" join). Present on every run (empty array when the registry
+ is empty or nothing matches; first-run and migration emits are empty —
+ the next run reports). **Overlay rule:** a protected value also
+ appears in `new_values`/`changed_values` — that is ONE event; the
+ terminal renders it once (PROTECTED block only).
+ Vocabulary: **protected value** = user-declared via the registry ·
+ **detection** = appeared in scan · **increased** = more occurrences
+ than baseline · **confirmed leak** = never claimed by watch. Matching
+ is exact-value and limited to the credential-shaped scan domain (a
+ PII-only literal never matches, by design).
+
+ **HONEYTOKEN rows (v0.7.0, IG D103):** a canary (`kind: honeytoken`)
+ in the scan serializes ONLY here in `protected_values[]` — never in
+ `new_values[]`/`changed_values[]`/`resolved_values[]` (one event, IG
+ D54). Row shape as above with `type: "HONEYTOKEN"` + `value_id` (the
+ canary's registry id — always present, canaries are registered by
+ construction). `delta: "new"|"increased"` → **exit 4** (dominates 1);
+ baselined-present `delta: "unchanged"` → exit 0; absent → no row
+ (absent canaries are absent, never resolved). A canary that is also a
+ live `.env` value is still `HONEYTOKEN` and carries `source_key`.
+
+ ### `review_list` (v0.7.0, additive — IG D103, W2)
+
+ Report-only SUSPICIOUS surface: ALL current-scan gitleaks
+ `generic-api-key` rows (the SUSPICIOUS tier), deduped by value with
+ `count` = current-scan occurrences. Row shape mirrors `new_values[]`
+ (`value_masked` 2+2, `type: "SUSPICIOUS"`, `family`, `count`) — never
+ sha256. **Never raises the exit** (D8 discipline: findings listed,
+ never alerted; the deployment may review/alert at its discretion).
+ Values represented by a HONEYTOKEN row are EXCLUDED (one event). Not
+ delta-filtered, not baseline-filtered — unchanged rows remain present
+ run-to-run.
+
+ ### `review_list_complete` (v0.7.0, additive)
+
+ `true` when the gitleaks engine produced a full SUSPICIOUS result;
+ `false` when the engine is unavailable or degraded, so an empty
+ `review_list` can never be misread as "no suspicious rows" while the
+ engine produced nothing. Consumers MUST gate review-list interpretation
+ on this flag + the engine state. Present on every watch run; never
+ emitted by preflight.
 
 ### `value_id` (v0.4.2, additive — IG D64–D69)
 

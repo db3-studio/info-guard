@@ -44,7 +44,7 @@ unreadable by the agent, that is the daemon architecture (a separate
 process exposing only a register/unregister/sanitize API) — on the
 roadmap as v2.
 
-## Install (any of these)
+## Install
 
 Requires Hermes Agent **v0.20.0+** — the patch is apply-checked and the
 upstream test suite passes 15/15 against v0.20.0, v0.20.1, v0.20.2,
@@ -53,7 +53,30 @@ patch; `test.sh` is the package's own 35-check battery, separate from the
 upstream suite.
 Takes about two minutes.
 
-**Step 0 — preflight (optional but recommended):** before deciding, check
+**Defaults at a glance** (all overridable — see `./bin/info-guard --help`):
+
+| Setting | Default |
+|---|---|
+| Install location | `~/.info-guard` |
+| Hermes home (`$HERMES_HOME`) | `~/.hermes` |
+| `build` source | `$HERMES_HOME/.env` |
+| State dir | `$HERMES_HOME/state/info-guard/` |
+| Pattern file | `<state>/redact_patterns.json` (`<state>` = the state dir above), chmod 600 |
+| Preflight scan dirs | `<home>/sessions`, `<home>/logs`, `<home>/cron/output` (`<home>` = `$HERMES_HOME`) |
+| Exit codes | 0 clean · 1 findings-or-delta alarm · 2 usage or operational error · 3 KNOWN present (preflight only) · 4 reserved |
+
+**Step 1 — download.** Get the checkout — nothing is installed or
+modified yet:
+
+```bash
+git clone https://github.com/db3-studio/info-guard ~/.info-guard
+cd ~/.info-guard
+```
+
+The canonical install location is **`~/.info-guard`**; if you already have
+a checkout elsewhere, use that path in the steps below.
+
+**Step 2 — preflight (optional but recommended):** before deciding, check
 whether you're *already* leaking without knowing it — Hermes' own transcripts
 and logs may hold secrets that predate redaction:
 
@@ -118,11 +141,21 @@ against a sha256-only baseline (`<state>/info-guard/watch-baseline.json`,
 0600) — cron-friendly, exit 1 on new values or a delta alarm, `--reset`
 to clear, union-kept across tool/gitleaks upgrades. Every public JSON
 surface carries a `schema` + `tool` envelope (`assessment/v1`, `watch/v1`,
-`literals/v1`). Exit ladder (v0.6.0): 0 clean / 1 findings-or-delta alarm /
+`literals/v1`). Exit ladder (v0.7.0): 0 clean / 1 findings-or-delta alarm /
 2 usage **or operational** error / 3 KNOWN present (preflight only —
-dominates) / 4 reserved. KNOWN `.env` values now exit 3 on preflight
-instead of 1; the first watch run after upgrading to v0.6.0 requires a
-re-baseline (see CHANGELOG). Contract: `docs/format-spec.md`.
+dominates) / **4 honeytoken-grade escalation (v0.7.0 — a registered
+canary value found at rest, preflight + watch)**. KNOWN `.env` values
+exit 3 on preflight instead of 1; the first watch run after upgrading to
+v0.6.0 requires a re-baseline (see CHANGELOG). Contract:
+`docs/format-spec.md`.
+
+**Honeytokens (v0.7.0):** plant a canary with `literals add --kind
+honeytoken` (generates `ht-` + 24 CSPRNG hex; the full value prints once
+to stderr — plant it somewhere a scanner would find it, never in the
+scan dirs). Any exact match in a scan is a **canary-touch** — a
+HONEYTOKEN finding, exit 4, sticky until you `literals remove <id>` and
+replant (fresh id). Watch also surfaces a report-only `review_list` of
+SUSPICIOUS gitleaks rows (never an alert).
 
 **Privacy & credential handling:** preflight is safe-by-construction —
 values are masked before they leave the machine, never echoed, and the scan
@@ -139,7 +172,50 @@ Findings → each candidate is a value at rest that *looks* like a secret:
 review the list, rotate or delete anything you confirm. Installing never
 cleans history — it prevents the next occurrence.
 
-**Step 0b — build your config interactively (`info-guard setup`):**
+**Step 3 — install.** Three ways, same result — pick the one that fits
+how you work:
+
+**You (terminal):**
+
+```bash
+cd ~/.info-guard
+./install.sh          # patches the Hermes Agent checkout (agent/redact.py + 3 entry points), seeds the pattern file, runs the test battery
+```
+
+That is the whole mechanism: `install.sh` patches your Hermes Agent checkout
+(`agent/redact.py` + 3 entry points) so the pattern file is read at every
+message boundary — and `./uninstall.sh` reverses it cleanly.
+
+**Your Hermes agent:**
+
+> Follow the README at ~/.info-guard: run ./install.sh, then ./bin/info-guard
+> build, then verify with ./test.sh.
+
+The agent will read `docs/format-spec.md` for the file format and
+`docs/full-stack.md` for the optional full stack.
+
+**Everything manual** (no shell skills needed):
+
+1. Apply `patch/redactor-registry-patterns.patch` to your Hermes Agent
+   checkout (`git -C <checkout> apply --check` first — it must apply cleanly).
+2. Create `<hermes-home>/state/info-guard/redact_patterns.json` (see
+   `examples/redact_patterns.json.example`), chmod 600.
+3. Set `security.redact_patterns` to that path, or just rely on the default
+   path — the default already matches.
+4. Restart Hermes processes.
+
+**Step 4 — build your pattern file:**
+
+```bash
+./bin/info-guard build   # pulls every secret-shaped KEY=value from your .env sources
+```
+
+Masking is live immediately; a restart of running Hermes processes (gateway,
+web UI) picks it up on next start.
+
+**Step 4b (optional) — the guided build wizard (`info-guard setup`):**
+the interactive version of Step 4's `build` — run it instead of
+`./bin/info-guard build` if you want the wizard:
 
 ```bash
 ./bin/info-guard setup
@@ -156,36 +232,6 @@ each listed masked with its `.env` key and proposed mask style; accepting
 writes a plaintext copy into `custom_literals.json` (0600) — the prompt
 says so. `info-guard setup --all` accepts every
 candidate non-interactively (agent-assisted installs).
-
-**You (terminal):**
-
-```bash
-git clone https://github.com/db3-studio/info-guard
-cd info-guard
-./install.sh          # applies the patch, seeds the pattern file, runs the test battery
-./bin/info-guard build   # populate the pattern file from your .env files
-```
-
-That's it. Masking is live immediately; a restart of running Hermes
-processes (gateway, web UI) picks it up on next start.
-
-**Your Hermes agent:**
-
-> Follow the README at ~/info-guard: run ./install.sh, then ./bin/info-guard
-> build, then verify with ./test.sh.
-
-The agent will read `docs/format-spec.md` for the file format and
-`docs/full-stack.md` for the optional full stack.
-
-**Everything manual** (no shell skills needed):
-
-1. Apply `patch/redactor-registry-patterns.patch` to your Hermes Agent
-   checkout (`git -C <checkout> apply --check` first — it must apply cleanly).
-2. Create `<hermes-home>/state/info-guard/redact_patterns.json` (see
-   `examples/redact_patterns.json.example`), chmod 600.
-3. Set `security.redact_patterns` to that path, or just rely on the default
-   path — the default already matches.
-4. Restart Hermes processes.
 
 ## Upgrades (`hermes update`)
 
@@ -225,7 +271,8 @@ after. Schedulable — no alert channel is assumed; wire the non-zero exit
 to whatever your scheduler supports (cron mail, ntfy, a log line):
 
 ```cron
-0 * * * * /path/to/info-guard/bin/info-guard check || echo "info-guard: BROKEN — run install.sh"
+# adjust the path if you didn't install to ~/.info-guard
+0 * * * * ~/.info-guard/bin/info-guard check || echo "info-guard: BROKEN — run install.sh"
 ```
 
 Cron's five fields are **minute, hour, day-of-month, month, day-of-week** —

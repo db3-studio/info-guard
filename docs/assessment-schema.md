@@ -152,13 +152,16 @@ means every raw hit is classified into exactly one of:
 | `distinct_values` | the rotate list: distinct credential-shaped values across the scan | value-dedup |
 | `known` | distinct KNOWN `.env` values (v0.5.0 — identity-verified, the new tier) | value-dedup |
 | `known_rows` | distinct KNOWN rows (v0.5.0 — `file:line:value` level; `known ≤ known_rows`, the partition reconciliation) | deduped |
+| `honeytoken` | distinct canary values matched (v0.7.0, IG D103 — a registered `kind: honeytoken` value found at rest = canary-touch; the TOP tier, wins over every class below) | value-dedup |
+| `honeytoken_rows` | distinct HONEYTOKEN rows (v0.7.0 — `file:line:value` level; `honeytoken ≤ honeytoken_rows`) | deduped |
 | `key_name_mentions` | everything else that isn't masked — lines that mention a secret-sounding key, including reference/noise rows (code refs `${…}`, paths, markup; future v2 may split a 4th `reference_noise` tier) | `n_key` |
 | `already_masked` | values already `***` in the source (prevention layer working) | `n_mask` |
 
-`findings = known + raw_detections + key_name_mentions + already_masked`, exactly
+`findings = honeytoken + known + raw_detections + key_name_mentions + already_masked`, exactly
 (the partition holds over raw hits at ROW level — each `file:line:value`
 row is exactly one tier; `known` is the distinct-value rollup of the KNOWN
-rows, so `known ≤ known_rows`). `credential_shaped = family_attributed
+rows, so `known ≤ known_rows`; same for `honeytoken ≤ honeytoken_rows`).
+`credential_shaped = family_attributed
 + unattributed` in the common case — `family_attributed` = credential-shaped
 values tied to a known secret family (key name on the hit line, or a
 gitleaks RuleID); `unattributed` = generic token-shaped values with no key
@@ -240,6 +243,26 @@ a KNOWN row is identity-verified — the value matches a current eligible
 - The KNOWN tier wins a `file:line:value` row over shape detectors
   (identity beats shape-guess; the dropped shape row is never counted as
   credential-shaped).
+
+**HONEYTOKEN rows (v0.7.0, IG D103 — the top tier):** a canary row is
+identity-verified by construction — the value is a registered
+`kind: honeytoken` entry matched exactly in the scan (canary-touch
+detection fact, never "leak"/"confirmed"). Row rules:
+- HONEYTOKEN rows carry `type: "HONEYTOKEN"`, `known: false` (the
+  derived flag is false for every future tier — the shipped contract),
+  and `value_id` (the canary's registry id — always present, canaries
+  are registered by construction); `count` = occurrences; `family` is
+  `null` (unattributed, the existing nullable contract).
+- `source_key` is present ONLY when the canary is also a live `.env`
+  value (§4.3 O5 — both facts reported; the tier still wins).
+- The HONEYTOKEN tier wins a `file:line:value` row over KNOWN,
+  credential-shaped, key-name-mention, and already-masked classes — one
+  row per `file:line:value`, never a second tier row. `totals`
+  adds `honeytoken` (distinct values) and `honeytoken_rows` (rows);
+  `status.severity` is `high`; exit 4 (see format-spec §Exit contract).
+- `families.items[].known`, `locations[].known`, `affected_files[].known`
+  include canary rows (registered values share the "known" path column —
+  the type field disambiguates); `types` lists `HONEYTOKEN`.
 
 **Masking discipline:** every value in the assessment is masked
 (`value_masked`) — raw values never enter the JSON. The watch baseline

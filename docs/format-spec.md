@@ -146,7 +146,9 @@ unacceptable in your threat model, keep the registry under your own
 ```json
 {"version": 2, "literals": [
   "someone@example.com",
-  {"value": "anything-you-want", "mask": "full", "id": "3f2a91c4e8b6d705"}
+  {"value": "anything-you-want", "mask": "full", "id": "3f2a91c4e8b6d705"},
+  {"value": "ht-3f9c2a1b8e4d5c6a7b8c9d0e", "mask": "full",
+   "id": "7c1d9e2f3a4b5c6d", "kind": "honeytoken"}
 ]}
 ```
 
@@ -157,21 +159,37 @@ note). This is the `value_id` that watch/v1 JSON carries on protected
 rows — the consumer's join key into this file (see
 `docs/watch-schema.md`).
 
+**`kind`** (v0.7.0, IG D103 — honeytoken wave): optional per-entry
+metadata. Absent = a normal literal (never serialized as
+`"kind": "literal"`); `"kind": "honeytoken"` marks a **canary** — a
+value that must never legitimately appear at rest; any exact scan match
+is a canary-touch (tier `HONEYTOKEN`, exit 4; see §Canary-touch
+contract). Unknown `kind` values are treated as normal literals with
+one stderr warning per load/invocation (never a crash, never an
+escalation). `kind` does NOT participate in deduplication (dedup stays
+by value, IG D64) and does not affect matching. literal ↔ honeytoken
+transitions are hand-edits (per-entry metadata; next run reclassifies);
+removal + re-add = fresh `value_id` (IG D65).
+
 **File contract (add-only):** the app may normalize the file to add
 ids, but it NEVER strips anything — unknown entry fields (e.g. `mask`,
-`note`), non-string entries, and unknown top-level keys are preserved
-verbatim; duplicate values collapse to the first entry (one
+`note`, `kind`), non-string entries, and unknown top-level keys are
+preserved verbatim; duplicate values collapse to the first entry (one
 registration per unique value, so one value = one id in practice);
 duplicate ids are repaired deterministically with a stderr warning.
-Unreadable files are never overwritten. Old (v0.4.1 and earlier)
-binaries still read a v2 file (dict entries + `version` key tolerated).
+Unreadable files are never overwritten. Old (v0.4.1–v0.6.1) binaries
+still read a v2 file with `kind` present: the unknown field is
+preserved verbatim and the value matches as a normal literal (never a
+crash, never a canary-touch).
 
 **The sanctioned add path is the CLI** (v0.4.2, IG D69 — every mutation
 goes through the same canonical loader/writer):
 
 ```
 info-guard literals add VALUE... [--mask STYLE] [--file FILE] [--json]
+info-guard literals add --kind honeytoken [VALUE] [--json]
 info-guard literals list [--json]
+info-guard literals remove <id> [--json]
 ```
 
 `literals add` prints the assigned id per value; duplicate values return
@@ -179,7 +197,22 @@ the existing id (no new entry); `--mask` applies to every value in the
 invocation (last flag wins); `--file` reads line-delimited values
 (blank lines and `#` comments skipped); explicit registration accepts
 any non-empty string (no 8-char floor — short/PIN-class values are
-legal; `setup`'s floor is unchanged). `literals list` may perform the
+legal; `setup`'s floor is unchanged). **`--kind honeytoken`** (v0.7.0,
+IG D103): plants a canary — with no VALUE, generates `ht-` + 24 CSPRNG
+hex chars; with a VALUE, registers that exact value (no prefix
+enforced; explicit values are never echoed in full). Rejects `--file`,
+`--mask` (mask is forced `full`), control characters, line terminators,
+empty/whitespace-only values, and any `--kind` value other than
+`honeytoken` — all with usage exit 2 and no registry mutation. A
+duplicate normal literal supplied with `--kind honeytoken` fails loudly
+(exit 2 — never a silent no-op plant); a duplicate honeytoken is
+idempotent success (existing id, no rewrite). The generated full value
+is printed once to stderr at plant time (never stdout; escaped
+representation). **`literals remove <id>`** (v0.7.0): removes exactly
+one entry by id via the canonical atomic 0600-preserving writer;
+unknown id → exit 0 with `no entry with id <id>` on stderr and
+`{"removed": false}` in JSON (idempotent — the replant prerequisite).
+`literals list` may perform the
 one-time migration write when the registry is stale — a read command
 that normalizes once; `--json` output stays pure (all chatter on
 stderr). Exit codes: 0 success, 1 unreadable registry (no write), 2
@@ -589,35 +622,40 @@ Any field not listed is non-nullable by contract. `status.confirmed_active`:
 
 ### Exit contract (0/1/2/3/4)
 
-| Code | Meaning | Wave A emission |
+| Code | Meaning | Emission |
 |---:|---|---|
 | 0 | clean — no findings or delta | all applicable commands |
 | 1 | credential-shaped findings or watch delta alarm | preflight and watch |
 | 2 | usage or operational error | all commands |
 | 3 | identity-verified KNOWN value present; dominates | preflight only |
-| 4 | reserved for honeytoken-grade escalation; not emitted by P2; not consumer-stable until P3 | never emitted |
+| 4 | **honeytoken-grade escalation (NORMATIVE since v0.7.0, IG D103)** — a registered canary value was found at rest (canary-touch detection fact) | preflight and watch |
 
-**Preflight reduction:**
+**Preflight reduction (v0.7.0 — 4 normative, IG D103):**
 
-1. Usage or operational failure → `2`.
-2. Otherwise, `known > 0` → `3` (dominates 1).
-3. Otherwise, credential-shaped findings → `1`.
+1. Usage or operational failure → `2` (never overridden — an incomplete
+   scan asserts no complete verdict; independently detected facts MAY
+   still be serialized as partial rows, §Canary-touch below).
+2. Otherwise, `honeytoken > 0` → `4` (dominates 3 and 1).
+3. Otherwise, `known > 0` → `3` (dominates 1).
+4. Otherwise, credential-shaped findings → `1`.
+5. Otherwise → `0`.
+
+**Watch reduction (v0.7.0 — watch-side 4 normative, IG D103):**
+
+1. Usage or operational failure → `2` (same partial-row doctrine).
+2. Otherwise, honeytoken new/increased (canary-touch) → `4` (dominates 1).
+3. Otherwise, ANY of `new_values`, increased exposure count, engine
+   degradation, new/increased protected alarm → `1`.
 4. Otherwise → `0`.
 
-**Watch reduction:**
-
-1. Usage or operational failure → `2`.
-2. Otherwise, ANY of `new_values`, increased exposure count, engine
-   degradation, new/increased protected alarm → `1`.
-3. Otherwise → `0`.
-
 Non-alarming transitions (resolved, decreased, unchanged, config-only (T8),
-T3/T3b reclassification) never raise the exit.
+T3/T3b reclassification, baselined-canary-present (`delta: "unchanged"`))
+never raise the exit.
 
 **JSON emission:**
 
-- Exit `0`, `1`, and `3`: emit parseable JSON where the command has a JSON
-  surface.
+- Exit `0`, `1`, `3`, and `4`: emit parseable JSON where the command has a
+  JSON surface.
 - Exit `2` (usage): print the error to stderr and emit no JSON (usage errors
   happen before any scan output exists).
 - **Exit `2` (operational failure): the assessment IS still emitted in
@@ -625,18 +663,43 @@ T3/T3b reclassification) never raise the exit.
   (`tool.installed` / `tool.engine_state` / `scan.gitleaks_ok`), advisory to
   stderr; v0.5.1 (IG D94) behavior retained unchanged.** The exit code, not
   the absence of JSON, is the operational signal.
-- Exit `4` and unknown nonzero codes: consumers MUST treat them as
-  unexpected failures, capture diagnostics, and assign no fixed semantics
-  until P3.
+- Exit codes `> 4` and unknown nonzero codes: consumers MUST treat them as
+  unexpected failures, capture diagnostics, and assign no fixed semantics.
+
+### Canary-touch contract (v0.7.0, IG D103)
+
+A **honeytoken** is a registry entry with `"kind": "honeytoken"` planted via
+the sanctioned `literals add --kind honeytoken` path (a canary value is
+`ht-` + 24 CSPRNG hex chars when generated; explicit values allowed). The
+value must never legitimately appear at rest — any exact match in the scan
+is a **canary-touch detection fact** (never "leak"/"confirmed", D52/D60).
+
+- **Detection:** registry-exact value pass (independent of gitleaks) on
+  preflight AND watch. Tier `HONEYTOKEN` wins over every existing class
+  (KNOWN, credential-shaped, key-name mention, already-masked) — one row per
+  `file:line:value`; a canary that is also a live `.env` value is still
+  `HONEYTOKEN` and carries `source_key` + `value_id`.
+- **Escalation:** exit `4` on preflight presence; exit `4` on watch
+  new/increased. A baselined canary (`delta: "unchanged"`) never raises the
+  exit (value-level appearance semantics, D30/D53).
+- **Partial-result doctrine:** when the engine is unavailable/degraded, exit
+  `2` is authoritative; independently detected HONEYTOKEN rows MAY still be
+  serialized in the JSON (partial rows are never a complete assessment).
+- **Lifecycle:** sticky — a touched canary keeps matching until removed
+  (`literals remove <id>`) or replanted (fresh `value_id`, D65). No
+  auto-deactivation (silent mutation, invariant 5).
+- **Scan boundary:** default scan dirs never include the product state dir;
+  explicitly-specified dirs are operator-chosen targets (a canary match
+  there is a genuine finding).
 
 ### P3 seams (S1–S4)
 
 | Seam | Contract |
 |---|---|
-| S1 `value_id` identity monomorphism | `value_id` is the ONLY cross-surface identity mechanism. Same persisted registry entry retains the same ID across runs, rebuilds, reorders, and self-fill merges; an ID is assigned exactly once and persisted; delete + re-add produces a fresh ID, never reused; IDs are locally scoped to one installation (Wave A emits no installation identifier); IDs are CSPRNG-generated and independent of the value — no hash, truncation, or keyed derivation |
-| S2 tier-enum growth | unknown tiers are not fatal to Wave A code; consumers preserve/report unknown security-significant tiers; Wave A must not implement honeytoken behavior merely to preserve this seam |
-| S3 exit-4 reservation | exit 4 is documented as reserved; no Wave A path emits it; no Wave A consumer assigns stable semantics to it |
-| S4 additive-only schema evolution | all Wave A output additions are optional and additive; no field is removed, retyped, made required, or semantically redefined; P3 must be able to add honeytoken fields and tier values without reinterpreting Wave A fields |
+| S1 `value_id` identity monomorphism | `value_id` is the ONLY cross-surface identity mechanism. Same persisted registry entry retains the same ID across runs, rebuilds, reorders, and self-fill merges; an ID is assigned exactly once and persisted; delete + re-add produces a fresh ID, never reused; IDs are locally scoped to one installation (Wave A emits no installation identifier); IDs are CSPRNG-generated and independent of the value — no hash, truncation, or keyed derivation. Wave B (v0.7.0): canary identity = the registry entry id; replant = fresh id (D65) |
+| S2 tier-enum growth | unknown tiers are not fatal to Wave A code; consumers preserve/report unknown security-significant tiers. **Wave B (v0.7.0): `HONEYTOKEN` tier ADDED (additive, IG D85); old consumers preserve/report the row, never drop it** |
+| S3 exit-4 reservation | **FULFILLED by Wave B (v0.7.0, IG D103):** exit 4 is now normative and emitted on canary-touch (preflight + watch); the reservation wording is superseded |
+| S4 additive-only schema evolution | all Wave A output additions are optional and additive; no field is removed, retyped, made required, or semantically redefined. Wave B additions are additive: registry `kind`, tier `HONEYTOKEN`, watch `review_list` + `review_list_complete`; honeytoken rows carry `known: false` per the shipped derived-flag contract |
 
 ### Watch source and transition contracts (T1–T8)
 

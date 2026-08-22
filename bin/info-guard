@@ -55,8 +55,10 @@ Usage:
                                     non-zero exit to your scheduler.
   info-guard literals add VALUE...  Register custom literals (ids assigned;
                                     --mask STYLE, --file FILE for bulk,
-                                    --json for script capture).
-  info-guard literals list [--json] List registered literals (id + masked).
+                                    --json for script capture;
+                                    --kind honeytoken plants a canary).
+  info-guard literals list         List registered literals (masked only).
+  info-guard literals remove ID    Remove one literal by id (Wave B).
 
 Sources merged by `build`:
   1. Every KEY=value pair from the env files, except:
@@ -98,7 +100,7 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.6.1"
+_PACKAGE_VERSION = "0.7.0"
 
 # Per-subcommand usage lines (v0.4.1, IG D55): printed by
 # `info-guard <cmd> --help` (exit 0). Mirror the __doc__ usage block —
@@ -756,7 +758,8 @@ def cmd_preflight(args):
         _print_install_status()
         print(f"[info-guard] preflight — scanning {len(dirs)} dirs / ~{total} "
               f"files under {_HERMES_HOME} (read-only, nothing written)")
-    all_hits, gitleaks_ok, env_meta = _collect_hits(dirs, env_pass=True)
+    all_hits, gitleaks_ok, env_meta = _collect_hits(dirs, env_pass=True,
+                                                    canary_pass=True)
     if not gitleaks_ok and not as_json:
         print("[info-guard] preflight: ⚠ gitleaks not found on PATH — ran "
               "key-shape pass only (install gitleaks for the tuned-ruleset pass)")
@@ -764,20 +767,36 @@ def cmd_preflight(args):
     now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
         "+00:00", "Z")
     try:
+        ht_map = _honeytoken_id_map()
         assessment = _build_assessment(
             all_hits, [str(d.relative_to(_HERMES_HOME)) for d in dirs], total,
-            gitleaks_ok, now, env_meta, _value_id_map())
+            gitleaks_ok, now, env_meta, _value_id_map(), ht_map)
         if as_json:
             if json_out:
                 _atomic_write_json(Path(json_out), assessment)
                 print(f"[info-guard] preflight: assessment written to {json_out}")
             else:
                 print(json.dumps(assessment, indent=2))
-            return 2 if not gitleaks_ok else (3 if assessment["totals"].get("known", 0)
-                         else (1 if assessment["totals"]["credential_shaped"] else 0))
+            # Wave B exit ladder (proposal §3): 2 > 4 > 3 > 1 > 0.
+            return (2 if not gitleaks_ok else
+                    (4 if assessment["totals"].get("honeytoken", 0)
+                     else (3 if assessment["totals"].get("known", 0)
+                           else (1 if assessment["totals"]["credential_shaped"]
+                                 else 0))))
         print()
         rc = _render_assessment(assessment, all_hits, full, env_meta)
-        return 2 if not gitleaks_ok else rc
+        # Text mode: the renderer returns its own exit (it knows the
+        # tier mix); ensure the Wave B ladder applies there too.
+        if rc == 0 or rc == 1 or rc == 3:
+            if not gitleaks_ok:
+                rc = 2
+            elif assessment["totals"].get("honeytoken", 0):
+                rc = 4
+            elif assessment["totals"].get("known", 0) and rc != 4:
+                rc = 3
+            elif assessment["totals"]["credential_shaped"] and rc not in (3, 4):
+                rc = 1
+        return rc
     except BaseException:
         # Sanitized CLI boundary (plan A1.7/CRIT-2 r3): any failure below
         # this line (assessment construction, JSON serialization, text
@@ -825,7 +844,8 @@ def cmd_watch(args):
             _ensure_gitleaks()
     else:
         _ensure_gitleaks()
-    all_hits, gitleaks_ok, env_meta = _collect_hits(dirs, env_pass=True)
+    all_hits, gitleaks_ok, env_meta = _collect_hits(dirs, env_pass=True,
+                                                    canary_pass=True)
     if not gitleaks_ok:
         say("[info-guard] watch: ⚠ gitleaks not found on PATH — key-shape "
             "pass only")
@@ -839,7 +859,30 @@ def cmd_watch(args):
         for _d in env_meta["diagnostics"]:
             say(_d)
     all_hits.sort(key=lambda h: (h[2], h[3]))
-    current = _watch_values(all_hits, env_meta)
+    ht_map = _honeytoken_id_map()
+    # Wave B W2 (IG D103, §5): review_list = ALL current-scan SUSPICIOUS
+    # rows (gitleaks generic-api-key), deduped by value, count =
+    # current-scan occurrences; report-only, never an alert; canary
+    # values EXCLUDED (they serialize as HONEYTOKEN rows — one event).
+    # review_list_complete = engine produced a full SUSPICIOUS result.
+    review_rows = {}
+    for h in all_hits:
+        cls, rule, rel, line, value, masked, ctx = h
+        if cls != "SUSPICIOUS":
+            continue
+        if _sha(value) in ht_map:
+            continue  # canary exclusion (r2 MAJ-3)
+        e = review_rows.setdefault(value, {"value_masked": _mask_value(value),
+                                           "type": "SUSPICIOUS",
+                                           "family": None, "count": 0})
+        e["count"] += 1
+        if e["family"] is None:
+            f = _family_of(rule)
+            e["family"] = f if f != "bare-token" else None
+    review_list = sorted(review_rows.values(),
+                         key=lambda r: (-r["count"], r["value_masked"]))
+    review_list_complete = bool(gitleaks_ok)
+    current = _watch_values(all_hits, env_meta, ht_map)
     # One assessment per run (A2): totals + per-file map for the
     # baseline snapshot, later rendered by watch/v1 JSON.
     total_files = sum(1 for d in dirs for _ in d.rglob("*") if _.is_file())
@@ -849,7 +892,7 @@ def cmd_watch(args):
         all_hits,
         [str(d.relative_to(_HERMES_HOME)) if _HERMES_HOME in d.parents
          else str(d) for d in dirs],
-        total_files, gitleaks_ok, now, env_meta, _value_id_map())
+        total_files, gitleaks_ok, now, env_meta, _value_id_map(), ht_map)
     protection = _snapshot_protection()
     # Live protected-value registry (v0.4.1, IG D52/D53): custom_literals
     # fingerprints from the CURRENT snapshot — declaring a literal takes
@@ -876,7 +919,8 @@ def cmd_watch(args):
 
     def emit_json(prev_obj, d_obj, pd_obj, et_obj, pm_obj=None):
         obj = _watch_json_object(prev_obj, now, assessment_snap, d_obj,
-                                 pd_obj, et_obj, pm_obj)
+                                 pd_obj, et_obj, pm_obj, review_list,
+                                 review_list_complete)
         if opts["json_out"]:
             _atomic_write_json(Path(opts["json_out"]), obj)
             say(f"[info-guard] watch: JSON written to {opts['json_out']}")
@@ -925,6 +969,12 @@ def cmd_watch(args):
     et = _engine_transition(prev.get("protection"), protection)
     pm = _protected_value_matches(current, prev, known_fps, sha_id)
     pm_alarm = [m for m in pm if m["delta"] in ("new", "increased")]
+    # Wave B (IG D103): canary-touch = a HONEYTOKEN protected row with
+    # delta new/increased → exit 4 (proposal §3: watch-side 4 exists,
+    # dominates 1). Already-baselined canaries (delta unchanged) never
+    # alarm (D30/D53 value-level semantics).
+    ht_alarm = [m for m in pm_alarm if m.get("type") == "HONEYTOKEN"]
+    non_ht_alarm = [m for m in pm_alarm if m.get("type") != "HONEYTOKEN"]
     # Overlay rule (IG D54): JSON keeps protected rows in new_values /
     # changed_values AND protected_values (one event); the TERMINAL
     # renders them only in the PROTECTED block — the NEW VALUES / CHANGED
@@ -948,22 +998,45 @@ def cmd_watch(args):
                 display_changed.append(row)
     any_delta = bool(d["new_values"] or d["resolved_values"]
                      or d["changed_values"] or d["changed_files"]
+                     or ht_alarm  # Wave B: a canary-touch alone is a delta
+                                  # (it never appears in new_values — the
+                                  # one-event rule) and MUST refresh the
+                                  # baseline so the next run reads
+                                  # delta: unchanged
                      or pd["status"] == "changed"
                      or et["state_before"] != et["state_after"])
-    # Watch exit reduction (Wave A §2.5, A20): operational failure → 2
-    # (engine unavailable / scan failure — never 0, never 1; v0.5.1 D94
-    # doctrine extended to watch); else new_values / engine degradation /
-    # new-or-increased protected alarm → 1; else 0.
+    # Watch exit reduction (Wave A §2.5, A20; Wave B §3 — 2 > 4 > 1 > 0):
+    # operational failure → 2 (engine unavailable / scan failure — never
+    # 0, never 1; v0.5.1 D94 doctrine extended to watch); else a
+    # canary-touch (HONEYTOKEN new/increased) → 4, dominates 1; else
+    # new_values / engine degradation / new-or-increased protected alarm
+    # → 1; else 0.
     exit_code = (2 if not gitleaks_ok else
-                 (1 if (d["new_values"] or et["degraded"] or pm_alarm) else 0))
+                 (4 if ht_alarm else
+                  (1 if (d["new_values"] or et["degraded"] or non_ht_alarm)
+                   else 0)))
     if any_delta:
         # Changed run: header + per-track summaries + blocks (proposal
         # §2.3 guidance UX). All values masked 2+2 or counts only.
         say("Info Guard Watch")
         say("────────────────────────────────────────────")
-        if pm_alarm:
+        if ht_alarm:
+            say("🚨 CANARY TOUCHED (HONEYTOKEN)")
+            for m in ht_alarm:
+                fam = _family_label(m["family"]) if m["family"] \
+                    else "(no key context)"
+                if m["delta"] == "increased":
+                    occ = (f"+{_n(m['count'] - m['count_before'])} "
+                           f"occurrence{'s' if m['count'] - m['count_before'] != 1 else ''} "
+                           "since baseline")
+                else:
+                    occ = (f"{_n(m['count'])} occurrence"
+                           f"{'s' if m['count'] != 1 else ''} (first detected)")
+                say(f"    {m['value_masked']:<18} {m['type'][:22]:<24} "
+                    f"{occ:<36} {fam} — investigate, then replant")
+        if non_ht_alarm:
             say("🔴 PROTECTED VALUE RE-DETECTED")
-            for m in pm_alarm:
+            for m in non_ht_alarm:
                 fam = _family_label(m["family"]) if m["family"] \
                     else "(no key context)"
                 if m["delta"] == "increased":
@@ -1110,7 +1183,7 @@ def cmd_watch(args):
     return exit_code
 
 
-def _watch_values(all_hits, env_meta=None):
+def _watch_values(all_hits, env_meta=None, ht_map=None):
     """Distinct credential-shaped values -> metadata for the watch
     baseline. sha256 of the raw value only — raw values never touch
     the baseline file.
@@ -1120,11 +1193,29 @@ def _watch_values(all_hits, env_meta=None):
     partition is applied HERE too (same rule as _build_assessment):
     a shape/token/gitleaks hit whose (rel, line, value) is an env-known
     signature is dropped — the env match owns the row, so counts never
-    double. env_meta carries known_sigs when the env pass ran."""
+    double. env_meta carries known_sigs when the env pass ran.
+
+    Wave B (IG D103): canary values (sha in ht_map) join the population
+    REGARDLESS of shape class, typed HONEYTOKEN (registry-exact pass —
+    a canary-touch is detected by value identity, never by shape)."""
     known_sigs = (env_meta or {}).get("known_sigs") or {}
+    ht_map = ht_map or {}
     out = {}
     for h in all_hits:
         cls, rule, rel, line, value, masked, ctx = h
+        sha = _sha(value)
+        if sha in ht_map:
+            # Wave B: canary values always join, typed HONEYTOKEN.
+            # The canary pass OWNS the signature (KNOWN-precedence
+            # pattern): only HONEYTOKEN-class hits count — the key-scan
+            # and gitleaks hits for the same line/value are the same
+            # occurrence (one line = one count), never double-counted.
+            if cls != "HONEYTOKEN":
+                continue
+            e = out.setdefault(value, {"type": "HONEYTOKEN", "family": None,
+                                       "count": 0, "value_sha256": sha})
+            e["count"] += 1
+            continue
         if cls != "KNOWN" and (rel, line, value) in known_sigs:
             # KNOWN precedence: the env pass owns this signature; the
             # shape hit is dropped (never double-counted). The KNOWN
@@ -1185,6 +1276,13 @@ def _watch_deltas(current, prev, assessment, sha_id=None):
         sha = e["value_sha256"]
         fam = e["family"]
         vid = sha_id.get(sha)
+        # Wave B (IG D103, §4.5): HONEYTOKEN rows are EXCLUDED from
+        # new_values/changed_values/resolved_values — a canary-touch
+        # serializes ONLY in protected_values[] (one event, D54; absent
+        # canaries are absent rows, never resolved). The canary's
+        # protected row carries its delta.
+        if e.get("type") == "HONEYTOKEN":
+            continue
         # Wave A annotations (proposal §3.4/P-C): source = precedence
         # winner (literal wins on collision); source_key present iff an
         # env match exists REGARDLESS of the winner (both-match rows
@@ -1221,6 +1319,8 @@ def _watch_deltas(current, prev, assessment, sha_id=None):
                 d["changed_values"].append(row)
     cur_shas = {e["value_sha256"] for e in current.values()}
     for sha, row in baseline_rows.items():
+        if row.get("type") == "HONEYTOKEN":
+            continue  # Wave B: absent canaries are absent, never resolved
         if sha not in cur_shas:
             d["resolved_values"].append(
                 {"value_masked": None, "type": row.get("type"),
@@ -1386,11 +1486,15 @@ def _parse_watch_args(args):
     return opts, dirs
 
 
-def _watch_json_object(prev, now, assessment_snap, d, pd, et, pm=None):
-    """watch/v1 object (proposal §2.4, IG D49): the PUBLIC delta
-    result. Exposure rows carry value_masked 2+2 (resolved rows:
+def _watch_json_object(prev, now, assessment_snap, d, pd, et, pm=None,
+                       review_list=None, review_list_complete=True):
+    """watch/v1 object (proposal §2.4, IG D49; Wave B W2 §5): the PUBLIC
+    delta result. Exposure rows carry value_masked 2+2 (resolved rows:
     null — value gone, sha256 forbidden); protection = counts +
-    fingerprints-derived deltas only; engine = transition facts."""
+    fingerprints-derived deltas only; engine = transition facts.
+    Wave B: review_list (report-only SUSPICIOUS rows, additive) +
+    review_list_complete (false when the engine produced no full
+    SUSPICIOUS result) — never raise the exit (D8 discipline)."""
     def totals(snap):
         if not snap:
             return None
@@ -1417,7 +1521,9 @@ def _watch_json_object(prev, now, assessment_snap, d, pd, et, pm=None):
                      "new_families": d["new_families"],
                      "resolved_families": d["resolved_families"],
                      "changed_files": d["changed_files"],
-                     "protected_values": pm or []},
+                     "protected_values": pm or [],
+                     "review_list": review_list or [],
+                     "review_list_complete": bool(review_list_complete)},
         "protection": {"status": pd["status"],
                        "custom_literals": pd["custom_literals"],
                        "key_patterns": pd["key_patterns"],
@@ -1625,25 +1731,30 @@ def _area_status(value: int, masked: int):
 
 
 def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated,
-                      env_meta=None, value_id_map=None):
+                      env_meta=None, value_id_map=None, ht_map=None):
     """Reduce the raw hit list into the assessment object. Classification
-    is a PARTITION: every hit lands in exactly one tier (KNOWN,
-    credential-shaped, key-name mention, or already-masked) — totals
-    always reconcile. v0.5.0 (IG D57–D62/D70–D75): env_meta carries the
-    KNOWN pass results (known_sigs = {(rel, line, value)}, diagnostics,
-    disabled) — KNOWN rows classify by signature (proposal §2.2/D28),
-    counted per OCCURRENCE, value-deduped into totals.known.
+    is a PARTITION: every hit lands in exactly one tier (HONEYTOKEN,
+    KNOWN, credential-shaped, key-name mention, or already-masked) —
+    totals always reconcile. v0.5.0 (IG D57–D62/D70–D75): env_meta
+    carries the KNOWN pass results (known_sigs = {(rel, line, value)},
+    diagnostics, disabled) — KNOWN rows classify by signature (proposal
+    §2.2/D28), counted per OCCURRENCE, value-deduped into totals.known.
     Wave A (Phase 2/6): value_id_map = per-run {sha256(value): id} from
     the shared registry lookup — registered KNOWN rows carry value_id
     (annotation-only, never affects matching/counts; absent, never
-    null)."""
+    null). Wave B (IG D103): ht_map = {sha256(value): id} for canary
+    entries — HONEYTOKEN is the top tier (wins over KNOWN, shape,
+    key-name, already-masked — proposal §4.3), classified FIRST."""
     from collections import Counter
 
     known_sigs = (env_meta or {}).get("known_sigs") or {}
     vid_map = value_id_map or {}
+    ht_map = ht_map or {}
     n_tok = n_gl = n_key = n_mask = 0
     for h in all_hits:
         cls, _rule, rel, line, value, _masked, _ctx = h
+        if _sha(value) in ht_map:
+            continue  # HONEYTOKEN rows never feed shape/mention/mask buckets
         if (rel, line, value) in known_sigs:
             continue  # KNOWN rows never feed shape/mention/mask buckets
         if cls == "HIGH-CONFIDENCE":
@@ -1664,8 +1775,10 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated,
     n_action = n_tok + n_gl
     n_rows = 0  # unique (file, line, value) candidate rows — the canonical count
     n_known_rows = 0  # unique (file, line, value) KNOWN rows (v0.5.0)
+    n_ht_rows = 0  # unique (file, line, value) HONEYTOKEN rows (Wave B)
     known_occ = Counter()  # value -> occurrence count (per-occurrence, D28+)
     known_vals = {}  # value -> {type, count, fams} — distinct KNOWN values
+    ht_vals = {}  # value -> {type, count, fams} — distinct canary values
 
     # Per-family / per-area / per-file tallies + the distinct-value proof
     # list. Real-value rows are deduped by (file, line, value) signature;
@@ -1686,6 +1799,44 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated,
                                     "masked": 0, "known": 0})
         fl["total"] += 1
         sig = (rel, line, value)
+        if _sha(value) in ht_map:
+            # Wave B HONEYTOKEN tier — the top tier (proposal §4.3):
+            # wins over KNOWN (a canary that is also a live .env value
+            # IS the exposure), shape, key-name, and already-masked.
+            # One row per file:line:value (D28 partition).
+            if sig in sig_seen:
+                continue
+            sig_seen.add(sig)
+            n_ht_rows += 1
+            fl["known"] += 1  # honeytokens are registered values; kept in
+                              # the "known" file column for the ledger view
+            fe["known"] += 1
+            le["known"] += 1
+            le["files"].add(rel)
+            t = "HONEYTOKEN"
+            if t not in fe["types"]:
+                fe["types"].append(t)
+            fe["areas"][area] += 1
+            d = _session_date(rel)
+            if d:
+                fe["dates"].add(d)
+                le["dates"].add(d)
+            ve = ht_vals.setdefault(value, {"type": "HONEYTOKEN", "count": 0,
+                                            "fams": Counter()})
+            ve["count"] += 1
+            # HONEYTOKEN rows are UNATTRIBUTED (family: null per the
+            # binding contract §4.2) — never derive a family from the
+            # canary-pass rule; the fams counter stays empty.
+            # §4.3 (O5): a canary that is also a live .env value — the
+            # env index already tagged this signature with the source
+            # key; carry it (both facts reported). HONEYTOKEN still wins.
+            if sig in known_sigs and "source_key" not in ve:
+                ve["source_key"] = known_sigs[sig]
+            if fe["first"] is None:
+                fe["first"] = h
+            if fe["display"] is None and _displayable_value(value):
+                fe["display"] = h
+            continue
         if sig in known_sigs:
             # KNOWN tier (v0.5.0): env hits carry cls="KNOWN"; shape hits
             # with the same signature are DROPPED (never credential-shaped).
@@ -1882,7 +2033,9 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated,
     # the proof list: distinct credential-shaped values, 2+2 masked,
     # family-attributed when determinable (reviewer: never forced);
     # KNOWN rows (v0.5.0) join with known:true + source_key (D73: no
-    # value_id) — same sort, count = occurrences
+    # value_id) — same sort, count = occurrences; Wave B HONEYTOKEN
+    # rows join with known:false + value_id (proposal §4.2 — the
+    # canary signal is the tier, never the known flag)
     top_values = []
     for v, e in vals.items():
         fam_c = e["fams"]
@@ -1902,6 +2055,23 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated,
         if vid:
             row["value_id"] = vid  # absent, never null (D54); D73 lifted
         top_values.append(row)
+    for v, e in ht_vals.items():
+        # Wave B (proposal §4.2): HONEYTOKEN rows carry value_id (the
+        # canary's registry identity — always present, canaries are
+        # registered by construction) + known:false. family null
+        # (unattributed, per the shipped nullable contract); source_key
+        # only when the canary is ALSO a live .env value (§4.3 O5 —
+        # both facts reported).
+        row = {"value_masked": _mask_value(v), "type": "HONEYTOKEN",
+               "family": None, "count": e["count"],
+               "families": sorted(e["fams"]),
+               "known": False}
+        if e.get("source_key"):
+            row["source_key"] = e["source_key"]
+        vid = ht_map.get(_sha(v))
+        if vid:
+            row["value_id"] = vid
+        top_values.append(row)
     top_values.sort(key=lambda x: -x["count"])
 
     affected_files = [
@@ -1913,6 +2083,7 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated,
     telemetry = Counter(_family_of(h[1]) for h in all_hits)
 
     n_known = len(known_vals)
+    n_ht = len(ht_vals)
     inst = _installation_status()
     manifest = _install_manifest()
     return {
@@ -1928,16 +2099,19 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated,
                  "files_scanned": files_scanned, "read_only": True,
                  "gitleaks_ok": gitleaks_ok},
         "status": {
-            "severity": "high" if (n_rows or n_known_rows) else "none",
-            "action_required": n_rows > 0 or n_known_rows > 0,
+            "severity": "high" if (n_rows or n_known_rows or n_ht_rows) else "none",
+            "action_required": n_rows > 0 or n_known_rows > 0 or n_ht_rows > 0,
             "summary": (
-                "Credential-shaped values were found at rest. They are "
-                "candidates, not confirmed leaks."
-                if n_rows else
-                ("Your .env values were found at rest. They are identity "
-                 "matches — review whether they are still live."
-                 if n_known_rows else
-                 "No credential-shaped values found at rest.")),
+                "A registered canary value was found at rest. This is a "
+                "canary-touch detection fact — investigate immediately."
+                if n_ht_rows else
+                ("Credential-shaped values were found at rest. They are "
+                 "candidates, not confirmed leaks."
+                 if n_rows else
+                 ("Your .env values were found at rest. They are identity "
+                  "matches — review whether they are still live."
+                  if n_known_rows else
+                  "No credential-shaped values found at rest."))),
             "credential_shaped": n_rows,
             # v0.5.0: True when >=1 KNOWN row; null otherwise (null = pass
             # disabled OR pass active with no match — documented; never
@@ -1949,6 +2123,7 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated,
                    "family_attributed": fam_attr, "unattributed": unattr,
                    "key_name_mentions": n_key, "already_masked": n_mask,
                    "known": n_known, "known_rows": n_known_rows,
+                   "honeytoken": n_ht, "honeytoken_rows": n_ht_rows,
                    "partition": True},
         "families": {"total_with_values": sum(1 for f in families if f["value"] > 0),
                      "complete": True, "items": families},
@@ -2492,7 +2667,7 @@ def _env_scan_file(path, index, src_ids):
     return hits, sigs
 
 
-def _collect_hits(dirs, redact=True, env_pass=False):
+def _collect_hits(dirs, redact=True, env_pass=False, canary_pass=False):
     """Shared scan used by preflight, watch and setup. Returns
     (all_hits, gitleaks_ok, env_meta) with 7-tuples
     (cls, rule, rel, line, value, masked, ctx).
@@ -2508,9 +2683,17 @@ def _collect_hits(dirs, redact=True, env_pass=False):
     _build_assessment (env_meta); watch additionally expands its
     population to env-matched values (Phase 4, CRIT-1 fold). env_meta =
     {"known_sigs": {(rel,line,value): source_key}, "diagnostics": [...],
-    "disabled": bool, "known_files": set} or None when env_pass=False."""
+    "disabled": bool, "known_files": set} or None when env_pass=False.
+
+    canary_pass=True (Wave B, IG D103): the registry-exact CANARY pass
+    runs per file after _key_scan — any line containing a registered
+    canary value emits a cls="HONEYTOKEN" hit. Independent of gitleaks
+    (registry-exact value match, same plumbing as protected values);
+    used by preflight + watch ONLY (setup never offers canaries as
+    registration candidates)."""
     all_hits, gitleaks_ok = [], True
     env_meta = None
+    ht_map = _honeytoken_id_map() if canary_pass else {}
     if env_pass:
         try:
             index, src_ids, diagnostics = _env_sources()
@@ -2531,6 +2714,24 @@ def _collect_hits(dirs, redact=True, env_pass=False):
                 all_hits.append((hit[0], hit[1],
                                  os.path.relpath(str(p), str(_HERMES_HOME)),
                                  *hit[2:]))
+            if canary_pass and ht_map:
+                # Wave B canary pass: exact-value scan of the file's
+                # lines against the registered canary set. The canary
+                # VALUE is kept in memory only (masked downstream, never
+                # printed); the raw registry value is the match key.
+                try:
+                    text = p.read_text(errors="replace")
+                except OSError:
+                    text = ""
+                for ln, line in enumerate(text.splitlines(), 1):
+                    for cval in _canary_values(ht_map):
+                        if cval in line:
+                            all_hits.append((
+                                "HONEYTOKEN", "honeytoken",
+                                os.path.relpath(str(p), str(_HERMES_HOME)),
+                                ln, cval, _HARD_MASK_RE.sub("***", line)[:140],
+                                _HARD_MASK_RE.sub("***", line)[:140]))
+                            break  # one hit per line (per-file:line:value row)
             if env_pass:
                 try:
                     ehits, esigs = _env_scan_file(p, index, src_ids)
@@ -2553,6 +2754,21 @@ def _collect_hits(dirs, redact=True, env_pass=False):
             rel = os.path.relpath(fname, str(_HERMES_HOME)) if fname else str(d)
             all_hits.append((cls, rule, rel, line, value, masked, ctx))
     return all_hits, gitleaks_ok, env_meta
+
+
+def _canary_values(ht_map):
+    """Reverse the {sha256: id} canary map to the raw canary values —
+    in-memory only (the map's keys are sha256, so the values must come
+    from the registry load; cached per call). Returns a list of raw
+    canary strings for exact line matching."""
+    out = []
+    entries, _ok, _doc = _load_registry()
+    for item in entries:
+        if isinstance(item, dict) and _entry_kind(item) == _HONEYTOKEN_KIND:
+            v = item.get("value")
+            if isinstance(v, str) and v and _sha(v) in ht_map:
+                out.append(v)
+    return out
 
 
 # The 5 files the patch touches, with a marker per file. All present =
@@ -2701,6 +2917,60 @@ def _new_id() -> str:
     return secrets.token_hex(8)
 
 
+# ── Wave B (P3, IG D103): honeytoken kind model ────────────────────
+_HONEYTOKEN_KIND = "honeytoken"
+_HONEYTOKEN_PREFIX = "ht-"
+_HONEYTOKEN_LEN = 24  # hex chars after the prefix (CSPRNG, D65 pattern)
+
+
+def _generate_honeytoken() -> str:
+    """Canary value: `ht-` + 24 CSPRNG hex chars (O1 — recognizable
+    prefix; token_hex approach per D65 precedent, sized independently)."""
+    return _HONEYTOKEN_PREFIX + secrets.token_hex(_HONEYTOKEN_LEN // 2)
+
+
+def _entry_kind(item) -> str | None:
+    """Kind classification for a registry entry (Wave B): absent →
+    None (normal literal); `honeytoken` → the kind; ANY other value →
+    None (treated as a normal literal — fail toward LESS escalation).
+    Never raises; the loader's unknown-kind warning is emitted once per
+    invocation by _load_registry, not here."""
+    if isinstance(item, dict):
+        k = item.get("kind")
+        if isinstance(k, str) and k == _HONEYTOKEN_KIND:
+            return _HONEYTOKEN_KIND
+    return None
+
+
+def _escaped_kind(kind: str, cap: int = 40) -> str:
+    """Backslash-escape a kind value for the warning line (r2 NIT-1 /
+    r3 MIN-2): backslash first, then quotes and control characters;
+    truncated at `cap` characters (chars, not bytes) with `…` appended
+    when the escaped form exceeds the cap. The literal value is never
+    echoed — only this escaped metadata string."""
+    esc = kind.replace("\\", "\\\\").replace("'", "\\'")
+    esc = "".join(ch if ch.isprintable() and ch not in ("'",) else
+                  esc_control(ch) for ch in esc)
+    if len(esc) > cap:
+        esc = esc[:cap] + "…"
+    return esc
+
+
+def esc_control(ch: str) -> str:
+    """Escape a single control character for the warning line."""
+    if ch == "\\":
+        return "\\\\"
+    if ch == "'":
+        return "\\'"
+    if ch == "\n":
+        return "\\n"
+    if ch == "\r":
+        return "\\r"
+    if ch == "\t":
+        return "\\t"
+    return f"\\x{ord(ch):02x}"
+
+
 def _normalize_entries(raw):
     """Add-only normalization for registry literals (v0.4.2, IG D64/D65):
     plain strings -> {"value", "id"} · dicts without id -> +id · unknown
@@ -2817,6 +3087,18 @@ def _load_registry():
             note = (f"{CUSTOM_LITERALS.name} migrated to v{_REGISTRY_VERSION} "
                     f"— {_n(n_new)} entr{'y' if n_new == 1 else 'ies'} got ids")
         print(f"[info-guard] {note}", file=sys.stderr)
+    # Wave B (IG D103, A1): unknown `kind` values → ONE warning per
+    # load/invocation (never persisted), exact wording, escaped + capped
+    # (r1 NIT-10 / r2 NIT-1 / r3 MIN-2); the entry is treated as a normal
+    # literal. A `honeytoken` kind is valid; absent kind is the default.
+    warned = False
+    for item in entries:
+        if isinstance(item, dict) and isinstance(item.get("kind"), str) \
+                and item["kind"] != _HONEYTOKEN_KIND and not warned:
+            print(f"[info-guard] warning: unknown literal kind "
+                  f"'{_escaped_kind(item['kind'])}' — treated as a normal "
+                  f"literal", file=sys.stderr)
+            warned = True
     return entries, True, doc
 
 
@@ -2841,6 +3123,23 @@ def _value_id_map():
     return out
 
 
+def _honeytoken_id_map():
+    """Wave B (IG D103, A1/A4): {sha256(value): id} for CANARY entries
+    only (`kind: honeytoken`) — the registry-exact canary-touch lookup.
+    Same discipline as _value_id_map: in-memory, read-only,
+    annotation-only, first-wins, never writes. A value registered as a
+    canary is BOTH in _value_id_map (value_id join for all surfaces)
+    and here (canary classification)."""
+    out = {}
+    entries, _ok, _doc = _load_registry()
+    for item in entries:
+        if isinstance(item, dict) and _entry_kind(item) == _HONEYTOKEN_KIND:
+            v, i = item.get("value"), item.get("id")
+            if isinstance(v, str) and v and isinstance(i, str) and i:
+                out.setdefault(_sha(v), i)  # first-wins
+    return out
+
+
 def cmd_literals(args):
     """literals subcommand group (v0.4.2, IG D69): add/list registry
     entries. Every mutation goes through the canonical _load_registry()
@@ -2857,18 +3156,31 @@ def cmd_literals(args):
         return _literals_add(rest)
     if sub == "list":
         return _literals_list(rest)
+    if sub == "remove":
+        return _literals_remove(rest)
     print(f"[info-guard] unknown literals subcommand: {sub} "
           f"(try `info-guard literals --help`)", file=sys.stderr)
     return 2
 
 
 def _literals_add(args):
-    json_mode, mask, file_path, values = False, None, None, []
+    json_mode, mask, file_path, kind, values = False, None, None, None, []
     i = 0
     while i < len(args):
         a = args[i]
         if a == "--json":
             json_mode = True
+        elif a == "--kind":
+            if i + 1 >= len(args):
+                print("[info-guard] usage: --kind KIND required "
+                      "(only 'honeytoken' is supported)", file=sys.stderr)
+                return 2
+            if kind is not None:
+                print("[info-guard] usage: --kind may only be given once",
+                      file=sys.stderr)
+                return 2
+            kind = args[i + 1]  # validated below (r1 MAJ-1: exact domain)
+            i += 1
         elif a == "--mask":
             if i + 1 >= len(args):
                 print("[info-guard] usage: --mask STYLE required",
@@ -2889,7 +3201,20 @@ def _literals_add(args):
         else:
             values.append(a)
         i += 1
+    if kind is not None and kind != "honeytoken":
+        # r1 MAJ-1: `--kind` accepts exactly `honeytoken`; any other
+        # value, missing value, or repeated flag is usage exit 2 with no
+        # registry mutation. The registry file's tolerance for unknown
+        # kind values does NOT extend to the CLI.
+        print(f"[info-guard] usage: --kind accepts only 'honeytoken' "
+              f"(got '{kind}')", file=sys.stderr)
+        return 2
     if file_path:
+        if kind is not None:
+            print("[info-guard] usage: --file cannot be combined with "
+                  "--kind honeytoken — a canary is planted one at a time",
+                  file=sys.stderr)
+            return 2
         try:
             with open(file_path) as f:
                 for line in f:
@@ -2899,6 +3224,91 @@ def _literals_add(args):
         except OSError:
             print(f"[info-guard] ✗ cannot read {file_path}", file=sys.stderr)
             return 2
+    if kind is not None:
+        # Wave B (IG D103, A2): honeytoken plant path.
+        if mask is not None:
+            print("[info-guard] usage: --mask cannot be combined with "
+                  "--kind honeytoken — canaries are always mask: full",
+                  file=sys.stderr)
+            return 2
+        if len(values) > 1:
+            print("[info-guard] usage: --kind honeytoken takes at most one "
+                  "VALUE (omit it to generate one)", file=sys.stderr)
+            return 2
+        explicit = values[0] if values else None
+        if explicit is not None:
+            # Value validation (r1 MAJ-7 / r2 MAJ-4): no control chars,
+            # no line terminators, no empty/whitespace-only values.
+            if not explicit.strip() or any(ord(c) < 32 or ord(c) == 127
+                                           for c in explicit):
+                print("[info-guard] usage: honeytoken values must be "
+                      "non-empty and contain no control characters or "
+                      "line terminators", file=sys.stderr)
+                return 2
+            value = explicit
+        else:
+            value = _generate_honeytoken()
+        # Duplicate rules (r1 CRIT-2 both reviewers / proposal §2.3):
+        existing, ok, doc = _load_registry()
+        if not ok:
+            print(f"[info-guard] ⚠ existing {CUSTOM_LITERALS.name} unreadable "
+                  f"— will not overwrite", file=sys.stderr)
+            return 1
+        for item in existing:
+            sig = item if isinstance(item, str) else item.get("value")
+            if sig == value:
+                if _entry_kind(item) == _HONEYTOKEN_KIND:
+                    # Duplicate honeytoken → idempotent success, existing
+                    # id, no rewrite (existing dup-add precedent).
+                    vid = item.get("id") if isinstance(item, dict) else None
+                    if json_mode:
+                        print(json.dumps({
+                            "added": [],
+                            "duplicates": [{"value_masked":
+                                            _mask_value(value), "id": vid}]},
+                            indent=2))
+                    else:
+                        print(f"value {vid}")
+                    return 0
+                # Duplicate NORMAL literal → FAIL LOUD (no-silent-mutation,
+                # D101): an operator must never believe a canary is planted
+                # when it is not.
+                print("[info-guard] value already registered with a "
+                      "different kind — use hand-edit to change kind",
+                      file=sys.stderr)
+                return 2
+        # Fresh canary: store mask full + kind honeytoken via the
+        # canonical writer (r1 MAJ-3: atomic 0600-preserving write).
+        entries, _n, _w = _normalize_entries(
+            existing + [{"value": value, "mask": "full", "kind": "honeytoken"}])
+        out = dict(doc) if isinstance(doc, dict) else {}
+        out["version"] = 2
+        out["literals"] = entries
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            _atomic_write_json(CUSTOM_LITERALS, out)
+        except OSError:
+            print(f"[info-guard] ✗ cannot write {CUSTOM_LITERALS} — "
+                  f"registry unchanged (permissions? disk?)", file=sys.stderr)
+            return 2
+        vid = None
+        for item in entries:
+            if isinstance(item, dict) and item.get("value") == value:
+                vid = item.get("id")
+                break
+        if explicit is None:
+            # Generated value: full value to stderr ONCE (the operator
+            # needs it to physically plant the decoy); stdout stays
+            # machine-clean (MAJ-2). r3 MAJ-3: explicit values are NEVER
+            # echoed in full — only generated values appear here.
+            print(f"[info-guard] honeytoken planted: {value} (id {vid})",
+                  file=sys.stderr)
+        if json_mode:
+            print(json.dumps({"added": [{"value_masked": _mask_value(value),
+                                         "id": vid}]}, indent=2))
+        else:
+            print(f"planted {_mask_value(value)} (id {vid})")
+        return 0
     if any(not v.strip() for v in values):
         print("[info-guard] usage: empty values rejected — literal values "
               "must be non-empty strings", file=sys.stderr)
@@ -2992,15 +3402,31 @@ def _literals_list(args):
             v = item.get("value")
             if isinstance(v, str) and v:
                 rows.append((v, item.get("id") or "",
-                             "full" if item.get("mask") == "full" else None))
+                             "full" if item.get("mask") == "full" else None,
+                             _entry_kind(item)))
         elif isinstance(item, str) and item:
-            rows.append((item, "", None))
+            rows.append((item, "", None, None))
     rows.sort(key=lambda r: r[0])
-    def _disp(v, m):
-        return "***" if m == "full" else _mask_value(v)
+    def _disp(v, m, k):
+        # §2.4 two-surface doctrine: `mask: full` governs the REDACTION
+        # surface only and never renders as `***` in CLI output —
+        # machine surfaces (list, JSON) use the standard 2+2 finding-row
+        # mask for honeytokens. Normal full-mask literals keep the
+        # pre-existing `***` display (unchanged, §2.4 "normal" row).
+        if k is None and m == "full":
+            return "***"
+        return _mask_value(v)
     if json_mode:
         inst = _installation_status()
         manifest = _install_manifest()
+        out_rows = []
+        for v, i, m, k in rows:
+            rec = {"value_masked": _disp(v, m, k), "id": i}
+            if k is not None:
+                # Wave B (IG D103): `kind` on machine surfaces only when
+                # explicitly set (absent-never-null for normal literals).
+                rec["kind"] = k
+            out_rows.append(rec)
         print(json.dumps({
             "schema": "info-guard/literals/v1",
             "tool": {"name": "info-guard", "version": _PACKAGE_VERSION,
@@ -3010,11 +3436,69 @@ def _literals_list(args):
                                       ("partial" if inst["partial"] else "none")),
                      "engine_version": (manifest.get("version")
                                         if manifest and inst["engine"] else None)},
-            "literals": [{"value_masked": _disp(v, m), "id": i}
-                         for v, i, m in rows]}, indent=2))
+            "literals": out_rows}, indent=2))
     else:
-        for v, i, m in rows:
-            print(f"{i or '-':<16} {_disp(v, m)}")
+        for v, i, m, k in rows:
+            # Wave B: honeytoken rows gain a `honeytoken` column; normal
+            # literals show nothing (absent-never-null).
+            suffix = f"  {k}" if k is not None else ""
+            print(f"{i or '-':<16} {_disp(v, m, k)}{suffix}")
+    return 0
+
+
+def _literals_remove(args):
+    """literals remove <id> (Wave B, IG D103, A3): removes exactly one
+    registry entry by id through the canonical writer path — atomic
+    0600-preserving write (r1 MAJ-3). Unknown id → idempotent exit 0
+    with `no entry with id <id>` on stderr (r1 MIN-1: JSON carries
+    `removed: false`; `removed: true` only when actually removed)."""
+    json_mode = False
+    ids = []
+    for a in args:
+        if a == "--json":
+            json_mode = True
+        elif a.startswith("--"):
+            print(f"[info-guard] Warning: unknown option '{a}'",
+                  file=sys.stderr)
+        else:
+            ids.append(a)
+    if len(ids) != 1:
+        print("[info-guard] usage: literals remove <id> (exactly one id)",
+              file=sys.stderr)
+        return 2
+    target = ids[0]
+    entries, ok, doc = _load_registry()
+    if not ok:
+        print(f"[info-guard] ⚠ existing {CUSTOM_LITERALS.name} unreadable "
+              f"— will not overwrite", file=sys.stderr)
+        return 1
+    kept, found = [], False
+    for item in entries:
+        sig = item if isinstance(item, str) else item.get("value")
+        ident = item.get("id") if isinstance(item, dict) else None
+        if ident == target:
+            found = True
+            continue  # drop exactly this entry
+        kept.append(item)
+    if not found:
+        print(f"[info-guard] no entry with id {target}", file=sys.stderr)
+        if json_mode:
+            print(json.dumps({"removed": False, "id": target}, indent=2))
+        return 0
+    out = dict(doc) if isinstance(doc, dict) else {}
+    out["version"] = 2
+    out["literals"] = kept
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(CUSTOM_LITERALS, out)
+    except OSError:
+        print(f"[info-guard] ✗ cannot write {CUSTOM_LITERALS} — "
+              f"registry unchanged (permissions? disk?)", file=sys.stderr)
+        return 2
+    if json_mode:
+        print(json.dumps({"removed": True, "id": target}, indent=2))
+    else:
+        print(f"removed {target}")
     return 0
 
 

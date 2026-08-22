@@ -4,6 +4,48 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 
 > Convention: micro-version fixes within the same workstream are consolidated into the latest entry of that wave, not captured per tag.
 
+## [v0.7.0] - 2026-08-22
+
+Wave B (P3, IG D103) — honeytokens + exit 4 normative + `review_list`
+(W2). Binding contract: `proposals/honeytokens.md` (workspace, v1.3).
+
+### Added
+- **Honeytoken plant** — `literals add --kind honeytoken [VALUE]`:
+  generates `ht-` + 24 CSPRNG hex chars when no VALUE is given (explicit
+  values allowed, never echoed in full); `mask: full` forced; rejects
+  `--file`/`--mask`/control-char/empty/whitespace-only values and any
+  `--kind` other than `honeytoken` (usage exit 2, no mutation).
+- **Canary-touch detection** — registry-exact pass (independent of
+  gitleaks) on preflight + watch; new `HONEYTOKEN` finding tier (the top
+  tier — wins over KNOWN/shape/key-name/already-masked); `known: false`
+  per the shipped derived-flag contract; `value_id` join always present.
+- **Exit 4 normative** — a canary at rest → exit 4 on preflight;
+  canary new/increased → exit 4 on watch (dominates 1); a baselined
+  canary (`delta: "unchanged"`) never alarms; operational failure (2)
+  is never overridden (partial rows may still serialize).
+- **`literals remove <id>`** — the replant prerequisite; idempotent
+  (unknown id → exit 0 + `removed: false`); canonical atomic
+  0600-preserving writer.
+- **`review_list` + `review_list_complete` (watch/v1)** — report-only
+  SUSPICIOUS (gitleaks generic-api-key) rows, never an alert;
+  completeness flag gates interpretation under engine degradation;
+  canary-represented values excluded (one event).
+- **Registry `kind`** — per-entry metadata (`honeytoken` is the only
+  explicit value); unknown kinds → normal literal + one escaped warning
+  per load; dedup stays by value; hand-edit transitions supported.
+- **README onboarding overhaul** — canonical install location
+  `~/.info-guard` (IG D102), defaults table, download → preflight →
+  install → build step renumbering, example-report placement (fresh-user
+  finding G1–G4).
+
+### Changed
+- Exit ladder in `docs/format-spec.md`: 4 is now normative (was
+  reserved); the watch reduction gains watch-side 4; consumer obligations
+  updated (codes > 4 remain unexpected).
+- `literals list` shows `kind` for honeytokens (2+2 masked display —
+  the `mask: full` directive is redaction-surface-only, never a CLI
+  rendering directive).
+
 ## [v0.6.1] - 2026-08-21
 
 Audit-response patch release (external audit, 2026-08-21 — findings

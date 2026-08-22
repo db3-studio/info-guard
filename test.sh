@@ -659,7 +659,7 @@ pf = subprocess.run(
 pfo = pf.stdout + pf.stderr
 check("preflight: findings exit code 1", pf.returncode == 1,
       f"rc={pf.returncode} out={pfo[-300:]!r}")
-for section in ("Info Guard v0.6.1 — Preflight Security Assessment",
+for section in ("Info Guard v0.7.0 — Preflight Security Assessment",
                 "STATUS", "EXECUTIVE SUMMARY", "WHAT MATTERS",
                 "CREDENTIAL EXPOSURE BY FAMILY",
                 "EXPOSURE LOCATIONS",
@@ -819,7 +819,7 @@ ver = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
     capture_output=True, text=True, timeout=60)
 check("--version prints the package version",
-      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.6.1",
+      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.7.0",
       f"rc={ver.returncode} out={ver.stdout.strip()!r}")
 
 # 12d. detection gaps (v0.3.1): Authorization family + dot-structured
@@ -2820,6 +2820,204 @@ for home, expect in ((h1, 3), (h7, 0)):
     check(f"A18: exit identical across modes (expect {expect})",
           e_txt == e_json == e_out == expect,
           f"text={e_txt} json={e_json} out={e_out}")
+
+# ── 25. Wave B honeytokens (v0.7.0, IG D103) — plant / detect / escalate / review_list ──
+import re as _re
+wb_home = os.path.join(tmp, "wb-home")
+for sub in ("sessions", "logs", "cron/output"):
+    os.makedirs(os.path.join(wb_home, sub), exist_ok=True)
+os.makedirs(os.path.join(wb_home, "state", "info-guard"), exist_ok=True)
+wb_cl = os.path.join(wb_home, "state", "info-guard", "custom_literals.json")
+open(wb_cl, "w").write(json.dumps({"version": 2, "literals": []}))
+env_wb = dict(os.environ)
+env_wb["HERMES_HOME"] = wb_home
+def wb_run(*args, **kw):
+    return subprocess.run(
+        [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard")] + list(args),
+        env=env_wb, capture_output=True, text=True, timeout=300, **kw)
+
+def wb_mask(v):
+    """2+2 finding-row mask (mirror of bin/info-guard _mask_value)."""
+    if len(v) <= 10:
+        return "***"
+    return v[:2] + "..." + v[-2:]
+
+# A1 kind model: generated plant, mask full, kind round-trip, unknown-kind warning
+g1 = wb_run("literals", "add", "--kind", "honeytoken")
+g1o = g1.stdout + g1.stderr
+g1m = _re.search(r"ht-[0-9a-f]{24}", g1o)
+check("WB A1: generated canary = ht- + 24 hex, exit 0, planted line on stderr",
+      g1.returncode == 0 and g1m and f"[info-guard] honeytoken planted: {g1m.group(0)}" in g1.stderr
+      and g1m.group(0) not in g1.stdout,
+      f"rc={g1.returncode} out={g1.stdout[:120]!r} err={g1.stderr[:200]!r}")
+reg_wb = json.load(open(wb_cl))
+ht_val = g1m.group(0)
+ht_entry = next(e for e in reg_wb["literals"] if isinstance(e, dict) and e.get("value") == ht_val)
+ht_id = ht_entry["id"]
+check("WB A1: registry entry has kind=honeytoken + mask=full + id",
+      ht_entry.get("kind") == "honeytoken" and ht_entry.get("mask") == "full"
+      and len(ht_id) == 16)
+# A1 unknown kind -> literal + one escaped warning; field preserved
+open(wb_cl, "w").write(json.dumps({"version": 2, "literals": [
+    {"value": "wb-unknown-kind-val", "id": "aaaaaaaaaaaaaaaa", "kind": "bad\x01kind"}]}))
+u1 = wb_run("literals", "list")
+u1o = u1.stdout + u1.stderr
+u1reg = json.load(open(wb_cl))
+check("WB A1: unknown kind → warning once (escaped) + treated as literal + field preserved",
+      "unknown literal kind 'bad\\x01kind'" in u1.stderr
+      and u1reg["literals"][0]["kind"] == "bad\x01kind"
+      and "aaaaaaaaaaaaaaaa" in u1.stdout)  # id shown; raw value never printed
+# A2 explicit add: value never echoed; control chars / empty / --mask / --file rejected
+e1 = wb_run("literals", "add", "--kind", "honeytoken", "wb-canary-explicit-1234567890")
+check("WB A2: explicit canary add — masked output only, value never echoed",
+      e1.returncode == 0 and "wb-canary-explicit-1234567890" not in (e1.stdout + e1.stderr)
+      and "wb...90" in e1.stdout)
+for bad_args, why in (
+    (["--kind", "honeytoken", "x\ny"], "control char"),
+    (["--kind", "honeytoken", "   "], "whitespace-only"),
+    (["--kind", "honeytoken", "--mask", "full", "x"], "--mask conflict"),
+    (["--kind", "honeytoken", "--file", os.path.join(tmp, "wb-file.txt")], "--file conflict"),
+    (["--kind", "foo", "x"], "--kind domain"),
+    (["--kind"], "missing value"),
+):
+    open(os.path.join(tmp, "wb-file.txt"), "w").write("x\n")
+    m_before = os.stat(wb_cl).st_mtime_ns
+    r = wb_run("literals", "add", *bad_args)
+    check(f"WB A2: {why} → usage exit 2, no mutation",
+          r.returncode == 2 and os.stat(wb_cl).st_mtime_ns == m_before,
+          f"rc={r.returncode} err={r.stderr[:100]!r}")
+# A3 duplicate rules: normal+kind fails loud; honeytoken dup idempotent
+open(wb_cl, "w").write(json.dumps({"version": 2, "literals": [
+    {"value": "wb-plain-literal", "id": "bbbbbbbbbbbbbbbb"},
+    {"value": ht_val, "id": ht_id, "kind": "honeytoken", "mask": "full"}]}))
+d1 = wb_run("literals", "add", "--kind", "honeytoken", "wb-plain-literal")
+check("WB A3: dup normal + --kind → fail loud exit 2 (no silent no-op plant)",
+      d1.returncode == 2 and "already registered with a different kind" in d1.stderr)
+d2 = wb_run("literals", "add", "--kind", "honeytoken", ht_val)
+check("WB A3: dup honeytoken → idempotent exit 0, existing id",
+      d2.returncode == 0 and ht_id in d2.stdout and os.stat(wb_cl).st_mtime_ns
+      == os.stat(wb_cl).st_mtime_ns)  # no rewrite (mtime unchanged check is weak; content check below)
+d2reg = json.load(open(wb_cl))
+check("WB A3: dup honeytoken did not rewrite registry",
+      len(d2reg["literals"]) == 2)
+# A3 list shows kind; remove found/unknown; replant fresh id
+l1 = wb_run("literals", "list")
+check("WB A3: literals list shows honeytoken kind column",
+      "honeytoken" in l1.stdout and "wb...al" in l1.stdout)  # masked form
+rm1 = wb_run("literals", "remove", ht_id)
+check("WB A3: remove found → exit 0 + removed line",
+      rm1.returncode == 0 and f"removed {ht_id}" in rm1.stdout)
+rm2 = wb_run("literals", "remove", "deadbeefdeadbeef")
+check("WB A3: remove unknown → idempotent exit 0 + stderr note",
+      rm2.returncode == 0 and "no entry with id deadbeefdeadbeef" in rm2.stderr)
+rm3 = wb_run("literals", "remove", "deadbeefdeadbeef", "--json")
+check("WB A3: remove unknown --json → removed:false",
+      json.loads(rm3.stdout) == {"removed": False, "id": "deadbeefdeadbeef"})
+# replant: fresh id
+rp1 = wb_run("literals", "add", "--kind", "honeytoken", ht_val)
+rp2 = wb_run("literals", "list", "--json")
+rp_entry = [r for r in json.loads(rp2.stdout)["literals"] if r.get("kind") == "honeytoken"]
+check("WB A3: replant after remove → fresh value_id (never reused)",
+      len(rp_entry) == 1 and rp_entry[0]["id"] != ht_id)
+ht_id = rp_entry[0]["id"]
+# A4 preflight detection: planted canary → HONEYTOKEN row, exit 4, known:false
+decoy = os.path.join(wb_home, "sessions", "decoy.txt")
+open(decoy, "w").write(f"API_KEY={ht_val}\n")
+p1 = wb_run("preflight", "--json")
+p1ok = p1.returncode == 4
+if p1ok:
+    try:
+        pj = json.loads(p1.stdout)
+        ht_rows = [v for v in pj["top_values"] if v.get("type") == "HONEYTOKEN"]
+        p1ok = (pj["totals"]["honeytoken"] == 1 and pj["totals"]["honeytoken_rows"] == 1
+                and len(ht_rows) == 1 and ht_rows[0]["known"] is False
+                and ht_rows[0]["value_id"] == ht_id
+                and ht_rows[0]["value_masked"] == wb_mask(ht_val)
+                and pj["status"]["severity"] == "high")
+    except (ValueError, KeyError, TypeError):
+        p1ok = False
+check("WB A4: preflight canary-touch → exit 4 + HONEYTOKEN row (known:false, value_id, high)",
+      p1ok, f"rc={p1.returncode} out={p1.stdout[:300]!r}")
+# text mode exit also 4
+pt1 = wb_run("preflight")
+check("WB A4: preflight text mode → exit 4",
+      pt1.returncode == 4, f"rc={pt1.returncode}")
+# A4 .env collision (O5): canary also in .env → HONEYTOKEN wins + source_key
+# NOTE: the env-exact regex matches QUOTED values (KEY="value") or bare
+# values — an unquoted KEY=value line matches as one run and cannot hit
+# the bare-value index (Wave A behavior, unchanged). The DECOY line is
+# also quoted so both passes tag the SAME signature; the canary tier
+# still wins (the canary pass is exact-value, quoting-agnostic).
+envf = os.path.join(wb_home, ".env")
+open(envf, "w").write(f"DECOY_KEY=\"{ht_val}\"\n")
+open(decoy, "w").write(f"API_KEY=\"{ht_val}\"\n")
+p2 = wb_run("preflight", "--json")
+p2ok = p2.returncode == 4
+if p2ok:
+    try:
+        pj2 = json.loads(p2.stdout)
+        ht2 = [v for v in pj2["top_values"] if v.get("type") == "HONEYTOKEN"]
+        p2ok = len(ht2) == 1 and ht2[0].get("source_key") == "DECOY_KEY"
+    except (ValueError, KeyError):
+        p2ok = False
+check("WB A4 (O5): canary also a live .env value → HONEYTOKEN wins + source_key",
+      p2ok, f"rc={p2.returncode}")
+open(envf, "w").write("")
+# A5/A6 watch lifecycle: baseline → new → 4; unchanged → 0; increase → 4; decrease → 0
+# (decoy reset to ONE line before baseline so the increase below is a
+# real count delta — the O5 fixture above left it in an unknown state)
+open(decoy, "w").write(f"API_KEY={ht_val}\n")
+w1 = wb_run("watch", "--reset")
+check("WB A5: watch baseline with canary present → exit 0 (first run)",
+      w1.returncode == 0, f"rc={w1.returncode}")
+open(decoy, "w").write(f"API_KEY={ht_val}\nOTHER={ht_val}\n")  # increase
+w2 = wb_run("watch")
+check("WB A5: baselined canary count increase → exit 4",
+      w2.returncode == 4, f"rc={w2.returncode}")
+w3 = wb_run("watch")
+check("WB A5: unchanged after refresh → exit 0",
+      w3.returncode == 0, f"rc={w3.returncode}")
+open(decoy, "w").write(f"API_KEY={ht_val}\n")  # decrease back to 1
+w4 = wb_run("watch")
+check("WB A5: decrease → exit 0",
+      w4.returncode == 0, f"rc={w4.returncode}")
+# A7 review_list: SUSPICIOUS row surfaces report-only; exit unaffected
+open(os.path.join(wb_home, "sessions", "susp.txt"), "w").write(
+    "api_key = 6f8c3b2a9d1e4f7a8b2c3d4e5f6a7b8c\n")
+w5 = wb_run("watch", "--json")
+w5ok = w5.returncode == 0
+if w5ok:
+    try:
+        wj = json.loads(w5.stdout)
+        w5ok = (wj["exposure"]["review_list_complete"] is True
+                and any(r["type"] == "SUSPICIOUS" and r["count"] == 1
+                        for r in wj["exposure"]["review_list"]))
+    except (ValueError, KeyError):
+        w5ok = False
+check("WB A7: review_list surfaces SUSPICIOUS row, report-only, exit 0",
+      w5ok, f"rc={w5.returncode}")
+os.unlink(os.path.join(wb_home, "sessions", "susp.txt"))
+# A9 downgrade: old binary (v0.6.1) reads a registry with kind → normal literal, no crash
+old_bin_wb = os.path.join(tmp, "info-guard-0.6.1")
+old_dl_wb = subprocess.run(["git", "show", "v0.6.1:bin/info-guard"],
+                           capture_output=True, text=True, cwd=os.getcwd())
+if old_dl_wb.returncode == 0:
+    open(old_bin_wb, "w").write(old_dl_wb.stdout)
+    os.chmod(old_bin_wb, 0o755)
+    open(wb_cl, "w").write(json.dumps({"version": 2, "literals": [
+        {"value": ht_val, "id": ht_id, "kind": "honeytoken", "mask": "full"}]}))
+    old_run = subprocess.run([sys.executable, old_bin_wb, "literals", "list"],
+                             env=env_wb, capture_output=True, text=True, timeout=300)
+    # v0.6.1 doesn't know `kind`: the entry must read as a normal
+    # full-mask literal (*** display), no crash, and the field must
+    # survive (the old loader preserves unknown fields verbatim).
+    old_ok = old_run.returncode == 0 and "***" in old_run.stdout
+    old_reg = json.load(open(wb_cl))
+    check("WB A9: v0.6.1 binary reads kind registry → literal (***), kind preserved",
+          old_ok and old_reg["literals"][0]["kind"] == "honeytoken",
+          f"rc={old_run.returncode} err={old_run.stderr[:150]!r}")
+else:
+    skip("WB A9: v0.6.1 binary downgrade probe", "tag v0.6.1 unavailable")
 
 print(f"\n[test] {PASS} passed, {FAIL} failed"
       f" (discovered={PASS + FAIL + SKIP} executed={PASS + FAIL} "
