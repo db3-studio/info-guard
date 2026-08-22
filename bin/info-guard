@@ -46,13 +46,25 @@ Usage:
                                     literals, picks .env sources, builds the
                                     pattern file. --all accepts every
                                     candidate non-interactively (agents/tests).
-  info-guard check                  Health check / schedulable watchdog:
+  info-guard check [--heal] [--battery]
+                                    Health check / schedulable watchdog:
                                     engine marker, pattern file, custom
                                     literals, gitleaks, patch-state probe,
-                                    supported-version floor. Exit 0 healthy,
-                                    1 broken (run install.sh), 2 error.
+                                    supported-version floor, W12 seven-check
+                                    smoke (proves the engine masks). --heal
+                                    repairs a broken engine via install.sh
+                                    (explicit only); --battery runs the full
+                                    sandboxed battery. Exit 0 healthy,
+                                    1 broken, 2 usage OR operational.
                                     No alert channel assumed — wire the
                                     non-zero exit to your scheduler.
+  info-guard update [--check] [--json] [--rollback]
+                                    Update the package from the configured
+                                    origin (strict vX.Y.Z tags, HTTPS only;
+                                    --check report-only exit 1 when newer;
+                                    --rollback returns to the last verified
+                                    release by commit id). Run BEFORE
+                                    `hermes update` (D42 ordering contract).
   info-guard literals add VALUE...  Register custom literals (ids assigned;
                                     --mask STYLE, --file FILE for bulk,
                                     --json for script capture;
@@ -81,6 +93,7 @@ This is the redaction layer only. The full stack — secret inventory,
 leak detection, rotation, watchdogs — is documented in docs/full-stack.md.
 """
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -90,6 +103,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -111,7 +125,8 @@ _SUBCOMMAND_USAGE = {
     "preflight": "info-guard preflight [DIR ...] [--full] [--json] [--json-out FILE]   Zero-config leak scan (read-only, masked)",
     "watch": "info-guard watch [DIR ...] [--reset] [--json] [--json-out FILE]   Delta monitor vs the watch baseline (cron-friendly exits)",
     "setup": "info-guard setup [--all]            Interactive bootstrap (registers custom literals, builds patterns)",
-    "check": "info-guard check                    Health check / schedulable watchdog",
+    "check": "info-guard check [--heal] [--battery]   Health check / schedulable watchdog (fast smoke by default; --heal repairs the engine; --battery runs the full sandboxed battery)",
+    "update": "info-guard update [--check] [--json] [--rollback]   Update the package from the configured origin (run BEFORE `hermes update` — D42 ordering contract)",
     "literals": "info-guard literals add VALUE... [--mask STYLE] [--file FILE] [--json]   Register custom literals (ids assigned)\n"
                 "info-guard literals list [--json]   List registered literals (id + masked value)",
 }
@@ -3717,26 +3732,1001 @@ def cmd_setup(args):
     return 0
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Wave C (P4 Self-Sustain, Phase A): W10 update / W11 heal / W12 batteries
+# / W6 cron. Binding contract: proposals/self-sustain.md v1.6 (IG D113).
+# ═══════════════════════════════════════════════════════════════════════
+
+_UPDATE_SCHEMA = "info-guard/update/v1"
+_UPDATE_ERROR_CLASSES = ("none", "usage", "network", "dirty_tree", "not_git",
+                         "lock", "checkout", "install", "tag_mismatch",
+                         "version_mismatch", "verify", "state", "repair")
+_RELEASE_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+_PATCHED_FILES = ("agent/redact.py", "cli.py", "gateway/run.py",
+                  "hermes_cli/config.py", "hermes_cli/main.py")
+_CRON_MARKER_PREFIX = "info-guard-managed:"
+
+
+def _pkg_root() -> Path:
+    """The running binary resolves its own package root via __file__
+    (<pkg> = bin/..) — update works from any cwd; ~/.info-guard is the
+    documented canonical path but is never hardcoded in logic (W10)."""
+    return Path(__file__).resolve().parent.parent
+
+
+def _git(args, cwd, timeout=60):
+    """Run git in cwd. Returns (rc|None, stdout, stderr); None rc = the
+    invocation could not run (missing git, timeout)."""
+    try:
+        r = subprocess.run(["git", "-C", str(cwd)] + list(args),
+                           capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout, r.stderr
+    except (OSError, subprocess.TimeoutExpired):
+        return None, "", ""
+
+
+def _pkg_is_git(pkg) -> bool:
+    return (pkg / ".git").exists() and _git(["rev-parse", "--is-inside-work-tree"],
+                                            pkg)[0] == 0
+
+
+def _origin_url(pkg):
+    """The RAW configured origin URL (git config, not `git remote get-url`
+    — get-url applies url.<base>.insteadOf rewriting, which would hide the
+    https scheme from the HTTPS policy check; the rewrite still applies at
+    git's transport layer for ls-remote/fetch)."""
+    rc, out, _ = _git(["config", "--get", "remote.origin.url"], pkg)
+    return out.strip() if rc == 0 and out.strip() else None
+
+
+def _pkg_dirty(pkg) -> bool:
+    """Fail closed on a dirty package tree (staged + worktree tracked
+    changes; untracked files are not at risk from a checkout). Never
+    stashes or resets operator changes (invariant 5)."""
+    rc, out, _ = _git(["status", "--porcelain", "--untracked-files=no"], pkg)
+    return True if rc != 0 else bool(out.strip())
+
+
+class _PkgLock:
+    """flock package-checkout lock (<pkg>/.git/info-guard.lock), distinct
+    from the target-checkout lock install.sh holds. create=False (used by
+    update --check) opens an EXISTING lock file read-only and never creates
+    it — the file is created by mutating operations, so its absence means
+    no update is in progress (read-only non-mutation contract, A2/S2)."""
+
+    def __init__(self, pkg, create=True):
+        self.path = pkg / ".git" / "info-guard.lock"
+        self.create = create
+        self.fd = None
+
+    def acquire(self) -> bool:
+        try:
+            if self.create:
+                self.fd = os.open(str(self.path), os.O_CREAT | os.O_RDWR, 0o600)
+            else:
+                if not self.path.exists():
+                    return True
+                self.fd = os.open(str(self.path), os.O_RDONLY)
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(self.fd)
+                self.fd = None
+                return False
+            return True
+        except OSError:
+            if self.fd is not None:
+                try:
+                    os.close(self.fd)
+                except OSError:
+                    pass
+                self.fd = None
+            return False
+
+    def release(self):
+        if self.fd is not None:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            self.fd = None
+
+
+def _discover_release(pkg):
+    """Origin-qualified release discovery: `git ls-remote --tags origin`,
+    strict vX.Y.Z grammar only, annotated tags peeled to their commit via
+    the ^{} lines. Local tags are never a selection source (S1). Returns
+    (tag, commit) for the highest SemVer, or (None, None)."""
+    rc, out, _ = _git(["ls-remote", "--tags", "origin"], pkg, timeout=60)
+    if rc != 0:
+        return None, None
+    commits = {}
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 2 or not parts[1].startswith("refs/tags/"):
+            continue
+        name = parts[1][len("refs/tags/"):]
+        peeled = name.endswith("^{}")
+        if peeled:
+            name = name[:-3]
+        if peeled:
+            commits[name] = parts[0]          # annotated -> peeled commit
+        else:
+            commits.setdefault(name, parts[0])
+    best = None
+    for name, sha in commits.items():
+        m = _RELEASE_TAG_RE.match(name)
+        if not m:
+            continue
+        ver = tuple(int(x) for x in m.groups())
+        if best is None or ver > best[0]:
+            best = (ver, name, sha)
+    return (best[1], best[2]) if best else (None, None)
+
+
+def _read_package_version(pkg) -> str | None:
+    """The checked-out bin/info-guard's _PACKAGE_VERSION constant (read as
+    text — never imported)."""
+    try:
+        text = (pkg / "bin" / "info-guard").read_text(errors="replace")
+    except OSError:
+        return None
+    m = re.search(r'_PACKAGE_VERSION\s*=\s*"([^"]+)"', text)
+    return m.group(1) if m else None
+
+
+def _read_install_manifest() -> dict:
+    try:
+        data = json.loads(INSTALL_MANIFEST.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_install_manifest(doc: dict) -> None:
+    _atomic_write_json(INSTALL_MANIFEST, doc)
+
+
+def _write_prev_ref(pkg, commit) -> bool:
+    """Durable previous-commit ref (gc protection, §3.1.1): rollback must
+    not depend on reflog reachability."""
+    rc, _, _ = _git(["update-ref", "refs/info-guard/previous", commit], pkg)
+    return rc == 0
+
+
+def _read_prev_ref(pkg) -> str | None:
+    rc, out, _ = _git(["rev-parse", "--verify", "--quiet",
+                       "refs/info-guard/previous"], pkg)
+    return out.strip() if rc == 0 and out.strip() else None
+
+
+def _commit_available(pkg, commit) -> bool:
+    rc, _, _ = _git(["cat-file", "-e", f"{commit}^{{commit}}"], pkg)
+    return rc == 0
+
+
+def _engine_state() -> str:
+    """Deterministic engine state for the update envelope: ACTIVE (incl.
+    ACTIVE-by-upstream — markers present, patch not a working-tree
+    modification), PARTIAL, MISSING, DRIFT (markers complete but the
+    working-tree patch differs from this package's artifact)."""
+    inst = _installation_status()
+    n = sum(inst["markers"].values())
+    if n == 0:
+        return "MISSING"
+    if n < 5:
+        return "PARTIAL"
+    probe_ok, _ = _artifact_probe()
+    if probe_ok:
+        return "ACTIVE"
+    return "DRIFT" if not _is_upstream_merged() else "ACTIVE"
+
+
+def _is_upstream_merged() -> bool:
+    """PR #87953 merged state: markers present in HEAD + reverse-apply fails
+    (not a working-tree patch) + forward apply fails (already in HEAD)."""
+    checkout = _HERMES_HOME / "hermes-agent"
+    patch = _pkg_root() / "patch" / "redactor-registry-patterns.patch"
+    if not (checkout / ".git").exists() or not patch.is_file():
+        return False
+    for rel, marker in _ENGINE_MARKERS.items():
+        rc, out, _ = _git(["show", f"HEAD:{rel}"], checkout)
+        if rc != 0 or marker not in out:
+            return False
+    if _git(["apply", "--reverse", "--check", str(patch)], checkout)[0] == 0:
+        return False
+    if _git(["apply", "--check", str(patch)], checkout)[0] == 0:
+        return False
+    return True
+
+
+def _run_install(pkg, checkout, timeout=1800):
+    """Canonical install.sh with the internal-invocation contract:
+    --no-config --no-cron (never surfaces the interactive cron prompt, A14).
+    cwd is pinned to the package root — test.sh (install.sh's battery)
+    resolves install.sh/uninstall.sh via os.getcwd()."""
+    return subprocess.run(
+        ["bash", str(pkg / "install.sh"), "--checkout", str(checkout),
+         "--no-config", "--no-cron"],
+        capture_output=True, text=True, timeout=timeout, cwd=str(pkg))
+
+
+def _classify_install_failure(stderr: str, during_apply: bool) -> str:
+    """Map install.sh's exit-2 operational refusals to the envelope's
+    error_class (the §3.11 heal-not-attemptable / apply-time rows)."""
+    low = (stderr or "").lower()
+    if "another update/heal in progress" in low or "lock held" in low:
+        return "lock"
+    if "could not determine the target hermes version" in low:
+        return "version_mismatch"
+    if "refusing to overwrite" in low or "expected product state" in low:
+        return "repair"
+    return "install" if during_apply else "repair"
+
+
+class _UpdateRun:
+    """Update command state: the JSON envelope (one shape for every
+    reachable outcome) + stdout-purity routing (json mode -> chatter to
+    stderr, stdout carries ONLY the envelope)."""
+
+    def __init__(self, json_mode: bool):
+        self.json_mode = json_mode
+        self.env = {"schema": _UPDATE_SCHEMA, "status": "error",
+                    "current": _PACKAGE_VERSION, "latest": None,
+                    "selected_commit": None, "engine": "UNKNOWN",
+                    "applied": False, "healed": False, "error_class": "none"}
+
+    def say(self, msg: str):
+        (sys.stderr if self.json_mode else sys.stdout).write(msg + "\n")
+
+    def finish(self, status, engine=None, latest=None, selected=None,
+               applied=None, healed=None, error_class="none", exit_code=0):
+        self.env["status"] = status
+        if engine is not None:
+            self.env["engine"] = engine
+        if latest is not None:
+            self.env["latest"] = latest
+        if selected is not None:
+            self.env["selected_commit"] = selected
+        if applied is not None:
+            self.env["applied"] = applied
+        if healed is not None:
+            self.env["healed"] = healed
+        self.env["error_class"] = error_class
+        if self.json_mode:
+            print(json.dumps(self.env, indent=2))
+        return exit_code
+
+
+def _recover_pending(u: _UpdateRun, pkg, man: dict):
+    """Stale-pending recovery (§3.1.1): a stale pending record is never
+    silently discarded and can never be replaced by a new transaction until
+    recovery succeeds. Returns (ok, error_class)."""
+    p = man.get("pending") or {}
+    prev_commit = p.get("previous_commit")
+    prev_version = p.get("previous_version")
+    if not prev_commit or not prev_version or not _commit_available(pkg, prev_commit):
+        u.say("[info-guard] update: stale pending transaction present but its "
+              "previous_commit is unavailable — manual recovery required "
+              "(pending preserved)")
+        return False, "state"
+    u.say(f"[info-guard] update: recovering stale pending transaction "
+          f"(checkout {prev_commit[:12]} by commit id)")
+    rc, _, _ = _git(["checkout", prev_commit], pkg, timeout=60)
+    if rc != 0:
+        return False, "checkout"
+    try:
+        inst = _run_install(pkg, _HERMES_HOME / "hermes-agent")
+    except subprocess.TimeoutExpired:
+        return False, "install"
+    for line in (inst.stdout + inst.stderr).splitlines():
+        u.say(line)
+    if inst.returncode != 0:
+        return False, _classify_install_failure(inst.stderr, during_apply=False)
+    man2 = _read_install_manifest()
+    if man2.get("version") != prev_version:
+        return False, "version_mismatch"
+    _write_install_manifest({"version": prev_version,
+                             "installed_at": man2.get("installed_at"),
+                             "previous_version": man2.get("previous_version"),
+                             "previous_commit": man2.get("previous_commit"),
+                             "pending": None})
+    u.say("[info-guard] update: recovered — package restored to the last "
+          "verified state, pending cleared")
+    return True, None
+
+
+def _update_check(u: _UpdateRun, pkg) -> int:
+    """update --check: read-only in every state (ls-remote only — no fetch,
+    no refs/index/worktree/FETCH_HEAD mutation, no repair)."""
+    origin = _origin_url(pkg)
+    if origin is None:
+        u.say("[info-guard] update: no origin configured on this checkout")
+        return u.finish("error", error_class="network", exit_code=2)
+    if not origin.startswith("https://"):
+        u.say("[info-guard] update: origin must be HTTPS (HTTPS git only — "
+              "the configured origin is the trust anchor); no fetch was made")
+        return u.finish("error", error_class="network", exit_code=2)
+    if _pkg_dirty(pkg):
+        u.say("[info-guard] update: package tree is dirty — resolve local "
+              "modifications first (never auto-stash)")
+        return u.finish("error", engine=_engine_state(), error_class="dirty_tree",
+                        exit_code=2)
+    engine = _engine_state()
+    tag, commit = _discover_release(pkg)
+    if tag is None:
+        u.say("[info-guard] update: no matching release tag (strict vX.Y.Z) "
+              "on the origin")
+        return u.finish("error", engine=engine, error_class="tag_mismatch",
+                        exit_code=2)
+    latest = tag[1:]
+    cur = _version_tuple(_PACKAGE_VERSION) or (0,)
+    lat = _version_tuple(latest) or (0,)
+    if lat > cur:
+        u.say(f"[info-guard] update: newer version available: "
+              f"{_PACKAGE_VERSION} -> {latest} (check only — nothing changed)")
+        return u.finish("update_available", engine=engine, latest=latest,
+                        exit_code=1)
+    u.say(f"[info-guard] update: up to date ({_PACKAGE_VERSION})"
+          + (f" — engine {engine}" if engine != "ACTIVE" else ""))
+    return u.finish("up_to_date", engine=engine, latest=_PACKAGE_VERSION,
+                    exit_code=0)
+
+
+def _heal_via_install(u: _UpdateRun, pkg, checkout) -> int:
+    """Heal-only install path (current tag, broken engine). Returns
+    install.sh's rc; the envelope error_class is recorded on u."""
+    try:
+        inst = _run_install(pkg, checkout)
+    except subprocess.TimeoutExpired:
+        u._install_error_class = "repair"
+        return 2
+    u._install_error_class = _classify_install_failure(inst.stderr,
+                                                       during_apply=False)
+    for line in (inst.stdout + inst.stderr).splitlines():
+        u.say(line)
+    return inst.returncode
+
+
+def _update_apply(u: _UpdateRun, pkg) -> int:
+    """Default (mutating) update path — the explicit-mutation surface."""
+    # stale-pending recovery FIRST (r1 MAJ-1 fold): never overwritten by a
+    # new transaction
+    man = _read_install_manifest()
+    if man.get("pending"):
+        ok, err = _recover_pending(u, pkg, man)
+        if not ok:
+            return u.finish("error", error_class=err, exit_code=2)
+        man = _read_install_manifest()
+    origin = _origin_url(pkg)
+    if origin is None:
+        u.say("[info-guard] update: no origin configured on this checkout")
+        return u.finish("error", error_class="network", exit_code=2)
+    if not origin.startswith("https://"):
+        u.say("[info-guard] update: origin must be HTTPS (HTTPS git only — "
+              "the configured origin is the trust anchor); no fetch was made")
+        return u.finish("error", error_class="network", exit_code=2)
+    if _pkg_dirty(pkg):
+        u.say("[info-guard] update: package tree is dirty — resolve local "
+              "modifications first (never auto-stash, no checkout)")
+        return u.finish("error", engine=_engine_state(), error_class="dirty_tree",
+                        exit_code=2)
+    engine = _engine_state()
+    tag, commit = _discover_release(pkg)
+    if tag is None:
+        u.say("[info-guard] update: no matching release tag (strict vX.Y.Z) "
+              "on the origin")
+        return u.finish("error", engine=engine, error_class="tag_mismatch",
+                        exit_code=2)
+    latest = tag[1:]
+    cur = _version_tuple(_PACKAGE_VERSION) or (0,)
+    lat = _version_tuple(latest) or (0,)
+    if lat <= cur:
+        # current tag — engine ACTIVE -> up to date; otherwise heal-only
+        if engine == "ACTIVE":
+            u.say(f"[info-guard] update: up to date ({_PACKAGE_VERSION}) — "
+                  f"engine ACTIVE")
+            return u.finish("up_to_date", engine=engine,
+                            latest=_PACKAGE_VERSION, exit_code=0)
+        u.say(f"[info-guard] update: up to date ({_PACKAGE_VERSION}) but "
+              f"engine {engine} — heal-only install (no tag change)")
+        rc = _heal_via_install(u, pkg, _HERMES_HOME / "hermes-agent")
+        if rc == 0:
+            return u.finish("up_to_date", engine="ACTIVE",
+                            latest=_PACKAGE_VERSION, healed=True, exit_code=0)
+        if rc == 1:
+            return u.finish("heal_failed", engine=engine,
+                            latest=_PACKAGE_VERSION, error_class="repair",
+                            exit_code=1)
+        err = getattr(u, "_install_error_class", "repair")
+        eng = "UNKNOWN" if err in ("lock", "version_mismatch") else engine
+        return u.finish("error", engine=eng, latest=_PACKAGE_VERSION,
+                        error_class=err, exit_code=2)
+    # ── newer release: apply transaction ──────────────────────────────
+    head_before = _git(["rev-parse", "HEAD"], pkg)[1].strip()
+    prev_version = man.get("version") or _PACKAGE_VERSION
+    pending = {"previous_version": prev_version,
+               "previous_commit": head_before,
+               "selected_commit": commit,
+               "started_at": datetime.now(timezone.utc).isoformat(
+                   timespec="seconds").replace("+00:00", "Z")}
+    _write_install_manifest({**man, "pending": pending})
+    u.say(f"[info-guard] update: applying {latest} (origin commit "
+          f"{commit[:12]})")
+    # fetch WITHOUT writing a local tag (FETCH_HEAD only — an existing local
+    # tag pointing elsewhere is never a collision)
+    rc, _, err = _git(["fetch", "origin", f"refs/tags/{tag}"], pkg, timeout=120)
+    if rc != 0:
+        u.say("[info-guard] update: fetch failed — no checkout performed "
+              "(pending preserved)")
+        return u.finish("error", engine=engine, latest=latest,
+                        selected=commit, error_class="network",
+                        exit_code=2)
+    fh_sha = ""
+    try:
+        fh_sha = (pkg / ".git" / "FETCH_HEAD").read_text().split("\t")[0].strip()
+    except OSError:
+        pass
+    if fh_sha != commit:
+        u.say("[info-guard] update: FETCH_HEAD does not resolve to the "
+              "selected origin commit — aborting (pending preserved)")
+        return u.finish("error", engine=engine, latest=latest,
+                        selected=commit, error_class="network",
+                        exit_code=2)
+    rc, _, _ = _git(["checkout", commit], pkg, timeout=60)
+    if rc != 0:
+        return u.finish("error", engine="UNKNOWN", latest=latest,
+                        selected=commit, error_class="checkout",
+                        exit_code=2)
+    u.env["applied"] = True   # the selected commit was checked out
+    try:
+        inst = _run_install(pkg, _HERMES_HOME / "hermes-agent")
+    except subprocess.TimeoutExpired:
+        return u.finish("error", engine="UNKNOWN", latest=latest,
+                        selected=commit, applied=True,
+                        error_class="install", exit_code=2)
+    for line in (inst.stdout + inst.stderr).splitlines():
+        u.say(line)
+    if inst.returncode != 0:
+        err = _classify_install_failure(inst.stderr, during_apply=True)
+        eng = "UNKNOWN" if err in ("lock", "version_mismatch") else engine
+        return u.finish("error", engine=eng, latest=latest,
+                        selected=commit, applied=True,
+                        error_class=err, exit_code=2)
+    # ── post-apply verification (version-source agreement, §3.8) ──────
+    new_ver = _read_package_version(pkg)
+    man2 = _read_install_manifest()
+    head_now = _git(["rev-parse", "HEAD"], pkg)[1].strip()
+    if (head_now != commit or new_ver != latest
+            or man2.get("version") != latest
+            or man2.get("previous_version") != prev_version
+            or man2.get("previous_commit") != head_before):
+        u.say("[info-guard] update: version-source disagreement after apply — "
+              "no 'updated' claim is made (rollback: info-guard update "
+              "--rollback)")
+        return u.finish("error", engine="UNKNOWN", latest=latest,
+                        selected=commit, applied=True,
+                        error_class="version_mismatch", exit_code=2)
+    if man2.get("pending") != pending:
+        u.say("[info-guard] update: manifest transaction fields not preserved "
+              "through install — no 'verified' claim (state)")
+        return u.finish("error", engine="UNKNOWN", latest=latest,
+                        selected=commit, applied=True,
+                        error_class="state", exit_code=2)
+    eng_after = _engine_state()
+    healed = engine != "ACTIVE" and eng_after == "ACTIVE"
+    _write_install_manifest({"version": latest,
+                             "installed_at": man2.get("installed_at"),
+                             "previous_version": prev_version,
+                             "previous_commit": head_before,
+                             "pending": None})
+    _write_prev_ref(pkg, head_before)
+    u.say(f"[info-guard] update: updated to {latest} — engine {eng_after}, "
+          f"previous release {prev_version} ({head_before[:12]}) recorded")
+    return u.finish("updated", engine=eng_after, latest=latest,
+                    selected=commit, applied=True, healed=healed,
+                    exit_code=0)
+
+
+def _update_rollback(u: _UpdateRun, pkg) -> int:
+    """update --rollback (D113): executable rollback by commit id — never by
+    tag name; no local tag is required. Resolves the previous commit from
+    refs/info-guard/previous (fallback: install.json.previous_commit)."""
+    man = _read_install_manifest()
+    if man.get("pending"):
+        ok, err = _recover_pending(u, pkg, man)
+        if not ok:
+            return u.finish("error", error_class=err, exit_code=2)
+        man = _read_install_manifest()
+    prev_commit = _read_prev_ref(pkg) or man.get("previous_commit")
+    prev_version = man.get("previous_version")
+    if not prev_commit or not prev_version or not _commit_available(pkg, prev_commit):
+        u.say("[info-guard] update: previous release commit no longer "
+              "available locally — cannot roll back")
+        return u.finish("error", error_class="state", exit_code=2)
+    cur_version = man.get("version") or _PACKAGE_VERSION
+    head_before = _git(["rev-parse", "HEAD"], pkg)[1].strip()
+    engine = _engine_state()
+    u.say(f"[info-guard] update: rolling back to {prev_version} "
+          f"(commit {prev_commit[:12]} by commit id)")
+    rc, _, _ = _git(["checkout", prev_commit], pkg, timeout=60)
+    if rc != 0:
+        return u.finish("error", engine="UNKNOWN", error_class="checkout",
+                        exit_code=2)
+    u.env["applied"] = True
+    try:
+        inst = _run_install(pkg, _HERMES_HOME / "hermes-agent")
+    except subprocess.TimeoutExpired:
+        return u.finish("error", engine="UNKNOWN", error_class="install",
+                        exit_code=2)
+    for line in (inst.stdout + inst.stderr).splitlines():
+        u.say(line)
+    if inst.returncode != 0:
+        err = _classify_install_failure(inst.stderr, during_apply=True)
+        return u.finish("error", engine="UNKNOWN", error_class=err, exit_code=2)
+    new_ver = _read_package_version(pkg)
+    man2 = _read_install_manifest()
+    head_now = _git(["rev-parse", "HEAD"], pkg)[1].strip()
+    if (head_now != prev_commit or new_ver != prev_version
+            or man2.get("version") != prev_version):
+        u.say("[info-guard] update: rollback verification failed — no "
+              "successful rollback claim is made")
+        return u.finish("error", engine="UNKNOWN", error_class="version_mismatch",
+                        exit_code=2)
+    eng_after = _engine_state()
+    healed = engine != "ACTIVE" and eng_after == "ACTIVE"
+    _write_install_manifest({"version": prev_version,
+                             "installed_at": man2.get("installed_at"),
+                             "previous_version": cur_version,
+                             "previous_commit": head_before,
+                             "pending": None})
+    _write_prev_ref(pkg, head_before)
+    u.say(f"[info-guard] update: rolled back to {prev_version} — previous "
+          f"release {cur_version} ({head_before[:12]}) recorded, pending clear")
+    return u.finish("updated", engine=eng_after, latest=None,
+                    selected_commit=None, applied=True, healed=healed,
+                    exit_code=0)
+
+
+def cmd_update(args):
+    """W10 — info-guard update [--check] [--json] [--rollback]."""
+    json_mode = "--json" in (args or [])
+    check_mode = "--check" in (args or [])
+    rollback = "--rollback" in (args or [])
+    for a in (args or []):
+        if a.startswith("--") and a not in ("--json", "--check", "--rollback"):
+            print(f"[info-guard] Warning: unknown option '{a}'", file=sys.stderr)
+        elif not a.startswith("--"):
+            print(f"[info-guard] update: unexpected argument '{a}' "
+                  f"(try `info-guard update --help`)", file=sys.stderr)
+            u = _UpdateRun(json_mode)
+            return u.finish("error", error_class="usage", exit_code=2)
+    u = _UpdateRun(json_mode)
+    if check_mode and rollback:
+        u.say("[info-guard] usage: --check and --rollback are mutually "
+              "exclusive (D113)")
+        return u.finish("error", error_class="usage", exit_code=2)
+    pkg = _pkg_root()
+    if not _pkg_is_git(pkg):
+        u.say("[info-guard] update: package is not a git checkout — update "
+              "requires a git install (git clone); tarball installs are "
+              "refused")
+        return u.finish("error", error_class="not_git", exit_code=2)
+    lock = _PkgLock(pkg, create=not check_mode)
+    if not lock.acquire():
+        u.say("[info-guard] update: another update in progress (package "
+              "lock held)")
+        return u.finish("error", error_class="lock", exit_code=2)
+    try:
+        if rollback:
+            return _update_rollback(u, pkg)
+        if check_mode:
+            return _update_check(u, pkg)
+        return _update_apply(u, pkg)
+    except BaseException:
+        # sanitized boundary: an internal failure surfaces as ONE generic
+        # value-free line + an error envelope — never a traceback carrying
+        # package/registry content (mirrors the preflight boundary)
+        u.say("[info-guard] update: internal error — operation incomplete "
+              "(generic; run `info-guard update --check` for state)")
+        return u.finish("error", error_class="state", exit_code=2)
+    finally:
+        lock.release()
+
+
+# ── W12: the seven in-process smoke checks (single fixture source: the
+#    same synthetic probe corpus as test.sh's masking section) ───────────
+def _smoke_failed() -> list:
+    """Run the seven named smoke checks in-process against the checkout's
+    engine (agent/redact.py — stdlib-only import chain). Read-only: the
+    probes use scratch temp files; the real pattern file/registry/state are
+    never read or written. Returns the list of failed check names."""
+    checkout = _HERMES_HOME / "hermes-agent"
+    if not (checkout / "agent" / "redact.py").is_file():
+        return []   # engine state (MISSING) already covers this
+    saved_path = list(sys.path)
+    sys.path.insert(0, str(checkout))
+    try:
+        from agent.redact import redact_sensitive_text as _redact
+    except Exception:
+        return ["smoke engine import"]
+    finally:
+        sys.path[:] = saved_path
+    failed = []
+    tmp = Path(tempfile.mkdtemp(prefix="ig-smoke-"))
+    try:
+        default_lit = "ig-probe-default-" + "12345"
+        full_lit = "ig-probe-full-mask-" + "67890"
+        short_lit = "ig-short-" + "42"
+        pfile = tmp / "patterns.json"
+        _atomic_write_json(pfile, {
+            "mask": {"head": 2, "tail": 2, "floor": 12},
+            "literals": [default_lit,
+                         {"value": full_lit, "mask": "full"}, short_lit],
+            "key_patterns": {"IG_PROBE_PIN": True},
+        })
+
+        def redact(text, file_read=False, patterns=str(pfile)):
+            os.environ["HERMES_REDACT_PATTERNS"] = patterns
+            return _redact(text, file_read=file_read)
+
+        if redact(default_lit) != "ig...45":
+            failed.append("WC SMOKE-1 exact-value partial masking")
+        if redact(full_lit) != "***":
+            failed.append("WC SMOKE-2 full mask")
+        if redact(short_lit) != "***":
+            failed.append("WC SMOKE-3 short-value floor")
+        if redact("IG_PROBE_PIN=1234") != "IG_PROBE_PIN=***":
+            failed.append("WC SMOKE-4 key-pattern masking")
+        # 5: broken pattern file -> fail-safe fallback, no unmasked gap, NO
+        # repair performed by the smoke
+        broken = tmp / "broken.json"
+        good = {"mask": {"head": 2, "tail": 2, "floor": 12},
+                "literals": ["ig-broken-" + "probe"], "key_patterns": {}}
+        t0 = time.time()
+        _atomic_write_json(broken, good)
+        os.utime(broken, (t0, t0))
+        redact("ig-broken-" + "probe", patterns=str(broken))   # prime cache
+        broken.write_text("{not json")
+        os.utime(broken, (t0 + 2, t0 + 2))
+        out = redact("ig-broken-" + "probe", patterns=str(broken))
+        if "ig-broken-" + "probe" in out:
+            failed.append("WC SMOKE-5 broken-pattern fail-safe")
+        elif broken.read_text() != "{not json":
+            failed.append("WC SMOKE-5 broken-pattern fail-safe (smoke repaired "
+                          "the file — must be read-only)")
+        # 6: missing pattern file -> no-op; built-in redaction still works
+        os.environ.pop("HERMES_REDACT_PATTERNS", None)
+        if _redact("hello world") != "hello world":
+            failed.append("WC SMOKE-6 missing-pattern no-op")
+        # 7: file_read sentinel — a masked value can never be written back
+        sent = redact(f"value={default_lit}", file_read=True)
+        if sent == f"value={default_lit}" or "ig-probe" in sent or "12345" in sent:
+            failed.append("WC SMOKE-7 file-read sentinel")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        os.environ.pop("HERMES_REDACT_PATTERNS", None)
+    return failed
+
+
+# ── W6: stale-cron probe (read-only; warning-only; exit-0 limitation) ────
+def _shell_tokens(line: str):
+    """Tokenize a crontab line respecting single-quoted segments: a '…'
+    region is ONE token, '\\'' inside it is an escaped quote. Quote
+    wrappers are stripped and '\\'' unescaped (canonicalization). Returns
+    None on malformed input (unterminated quote)."""
+    tokens, cur, i, n = [], [], 0, len(line)
+    in_q = False
+    while i < n:
+        c = line[i]
+        if in_q:
+            if c == "'":
+                if line[i:i + 4] == "'\\''":
+                    cur.append("'")
+                    i += 4
+                    continue
+                in_q = False
+                i += 1
+                continue
+            cur.append(c)
+            i += 1
+            continue
+        if c == "'":
+            in_q = True
+            i += 1
+            continue
+        if c.isspace():
+            if cur:
+                tokens.append("".join(cur))
+                cur = []
+            i += 1
+            continue
+        cur.append(c)
+        i += 1
+    if in_q:
+        return None
+    if cur:
+        tokens.append("".join(cur))
+    return tokens
+
+
+def _unsafe_cron_value(v: str) -> bool:
+    """% is rejected at crontab serialization/parsing (cron's daemon layer
+    treats it as an input separator even inside shell quotes); newlines and
+    control characters are rejected likewise."""
+    return any(ord(c) < 32 or ord(c) == 127 or c == "%" for c in v)
+
+
+def _parse_managed_line(line: str):
+    """Parse one managed crontab line -> (exe_path, hermes_home) or None.
+    Grammar: leading NAME='…' assignments, then the executable word
+    '<pkg>/bin/info-guard', then `check`, then `# info-guard-managed:'<pkg>'`.
+    %/control characters anywhere -> rejected (None)."""
+    toks = _shell_tokens(line)
+    if not toks:
+        return None
+    exe, hermes_home, i = None, None, 0
+    while i < len(toks):
+        t = toks[i]
+        if "=" in t and not t.startswith("#"):
+            k, _, v = t.partition("=")
+            if k == "HERMES_HOME" and hermes_home is None:
+                hermes_home = v
+            i += 1
+            continue
+        if exe is None:
+            exe = t
+            i += 1
+            continue
+        break
+    if exe is None:
+        return None
+    rest = toks[i:]
+    if not rest or rest[0] != "check":
+        return None
+    marker_ok = False
+    for t in rest[1:]:
+        if t == "#":
+            continue
+        if t.startswith(_CRON_MARKER_PREFIX):
+            val = t[len(_CRON_MARKER_PREFIX):]
+            marker_ok = bool(val) and not _unsafe_cron_value(val)
+        else:
+            return None
+    if not marker_ok:
+        return None
+    for v in (exe, hermes_home or ""):
+        if _unsafe_cron_value(v):
+            return None
+    return exe, hermes_home
+
+
+def _cron_probe_warnings():
+    """Read-only stale-cron probe (W6/A9): scan the operator's crontab for
+    info-guard-managed lines, tokenize (never split naively), validate
+    (%/control rejection), and warn when the resolved absolute binary is
+    missing or its --version differs from the running binary. NEVER mutates,
+    NEVER executes arbitrary crontab text. Warning is exit-0 (documented
+    limitation — not a health verdict)."""
+    crontab = shutil.which("crontab")
+    if crontab is None:
+        print("[info-guard] ⚠ cron probe unavailable (no crontab on PATH) — "
+              "skipped; warning is exit 0, never a health verdict")
+        return
+    try:
+        r = subprocess.run([crontab, "-l"], capture_output=True, text=True,
+                           timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        print("[info-guard] ⚠ cron probe unavailable (crontab -l failed) — "
+              "skipped; warning is exit 0, never a health verdict")
+        return
+    if r.returncode != 0:
+        return   # "no crontab for <user>" is normal — nothing managed exists
+    for line in r.stdout.splitlines():
+        if _CRON_MARKER_PREFIX not in line:
+            continue
+        parsed = _parse_managed_line(line)
+        if parsed is None:
+            print("[info-guard] ⚠ cron: an info-guard-managed line is "
+                  "malformed or unsafe ('%'/control chars) — rejected, never "
+                  "executed (warning only)")
+            continue
+        exe, hermes_home = parsed
+        if not Path(exe).is_file():
+            print("[info-guard] ⚠ cron: a managed line points at a missing "
+                  "binary — stale install? (warning only; never repaired)")
+            continue
+        try:
+            vr = subprocess.run([exe, "--version"], capture_output=True,
+                                text=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            print("[info-guard] ⚠ cron: a managed binary could not report "
+                  "its version (warning only)")
+            continue
+        if vr.returncode == 0 and vr.stdout.strip() != f"info-guard {_PACKAGE_VERSION}":
+            print("[info-guard] ⚠ cron: a managed line points at a DIFFERENT "
+                  "info-guard version — stale install? (warning only; never "
+                  "auto-fixed)")
+
+
+# ── W12: check --battery (sandboxed full battery) ───────────────────────
+def _snapshot_real_state() -> str:
+    """Byte-level snapshot of the real package/target/registry/state/git
+    metadata for the S7 no-mutation assertion."""
+    parts = []
+    pkg = _pkg_root()
+    for name in ("HEAD", "index", "packed-refs"):
+        p = pkg / ".git" / name
+        if p.exists():
+            parts.append(f"{name}:" + hashlib.sha256(p.read_bytes()).hexdigest())
+        else:
+            parts.append(f"{name}:ABSENT")
+    for ref in sorted((pkg / ".git" / "refs").rglob("*")) if (pkg / ".git" / "refs").exists() else []:
+        if ref.is_file():
+            parts.append(f"ref:{ref.relative_to(pkg / '.git')}:"
+                         + hashlib.sha256(ref.read_bytes()).hexdigest())
+    rc, out, _ = _git(["status", "--porcelain", "--untracked-files=no"], pkg)
+    parts.append(f"pkg_status:{out}")
+    rc, out, _ = _git(["rev-parse", "HEAD"], pkg)
+    parts.append(f"pkg_head:{out.strip()}")
+    checkout = _HERMES_HOME / "hermes-agent"
+    for rel in _PATCHED_FILES:
+        p = checkout / rel
+        if p.is_file():
+            parts.append(f"target:{rel}:"
+                         + hashlib.sha256(p.read_bytes()).hexdigest())
+        else:
+            parts.append(f"target:{rel}:ABSENT")
+    if (checkout / ".git").exists():
+        for name in ("HEAD", "index", "packed-refs"):
+            p = checkout / ".git" / name
+            parts.append(f"tgt:{name}:" + (hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else "ABSENT"))
+        fh = checkout / ".git" / "FETCH_HEAD"
+        parts.append(f"tgt:FETCH_HEAD:" + ("PRESENT" if fh.exists() else "ABSENT"))
+    for f in ("install.json", "redact_patterns.json", "custom_literals.json"):
+        p = STATE_DIR / f
+        parts.append(f"state:{f}:" + (hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else "ABSENT"))
+    cl = STATE_DIR / "cron-install.lock"
+    parts.append(f"state:cron-install.lock:" + ("PRESENT" if cl.exists() else "ABSENT"))
+    return "\n".join(parts)
+
+
+def _check_battery() -> int:
+    """check --battery: run the full committed test.sh sandboxed (scratch
+    HERMES_HOME + scratch target checkout), bounded timeout, no-recursion,
+    byte-no-mutation of the real package/target/registry/state/git metadata
+    (S7). Exit 0 all green · 1 battery verdict broken · 2 operational
+    (timeout, sandbox failure). IG_TEST_BATTERY_FAKE=1 (test-only, off by
+    default) substitutes a stub battery so the wrapper's own assertions can
+    be exercised without recursion."""
+    pkg = _pkg_root()
+    snap_before = _snapshot_real_state()
+    scratch = Path(tempfile.mkdtemp(prefix="ig-battery-"))
+    try:
+        target = scratch / "target"
+        real_checkout = _HERMES_HOME / "hermes-agent"
+        if not (real_checkout / "agent" / "redact.py").is_file():
+            print("[info-guard] ✗ check --battery: no target checkout — "
+                  "cannot run the battery (operational)", file=sys.stderr)
+            return 2
+        for rel in _PATCHED_FILES:
+            src = real_checkout / rel
+            dst = target / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+        for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
+                    ["git", "-c", "user.email=ig@test",
+                     "-c", "user.name=ig-test", "commit", "-q", "-m", "base"]):
+            subprocess.run(cmd, cwd=str(target), capture_output=True,
+                           check=True, timeout=60)
+        home = scratch / "home"
+        home.mkdir()
+        log = scratch / "battery.log"
+        env = dict(os.environ)
+        env["HERMES_HOME"] = str(home)
+        env.pop("HERMES_REDACT_PATTERNS", None)
+        if os.environ.get("IG_TEST_BATTERY_FAKE") == "1":
+            log.write_text("fake battery (IG_TEST_BATTERY_FAKE test mode)\n"
+                           "(discovered=1 executed=1 passed=1 skipped=0 failed=0)\n")
+            rc = 0
+        else:
+            try:
+                with open(log, "w") as f:
+                    r = subprocess.run(
+                        ["bash", str(pkg / "test.sh"), "--checkout", str(target)],
+                        cwd=str(pkg), env=env, stdout=f,
+                        stderr=subprocess.STDOUT, timeout=1800)
+                rc = r.returncode
+            except subprocess.TimeoutExpired:
+                print("[info-guard] ✗ check --battery: battery timed out "
+                      "(bounded; operational failure)", file=sys.stderr)
+                return 2
+        out = log.read_text(errors="replace")
+        # no-recursion assertion: the committed battery must never invoke
+        # `check --battery` (S7)
+        src = (pkg / "test.sh").read_text(errors="replace")
+        recursive = any(("info-guard" in ln and "--battery" in ln
+                         and "check" in ln and not ln.strip().startswith("#"))
+                        for ln in src.splitlines())
+        if recursive:
+            print("[info-guard] ✗ check --battery: test.sh recursively "
+                  "invokes check --battery (S7 violation)", file=sys.stderr)
+            return 2
+        print("── check --battery (sandboxed) ──")
+        shown = 0
+        for line in out.splitlines():
+            if ("discovered=" in line or "✗" in line or "FAIL" in line
+                    or "✓ check" in line or "✓ engine" in line):
+                print(line)
+                shown += 1
+        if shown == 0:
+            print("(no summary lines captured)")
+        snap_after = _snapshot_real_state()
+        if snap_before != snap_after:
+            print("[info-guard] ✗ check --battery: REAL state mutated by the "
+                  "battery run — S7 violation (package/target/registry/state/"
+                  "git metadata must be byte-unchanged)", file=sys.stderr)
+            return 2
+        if rc == 0:
+            print("[info-guard] ✓ check --battery: full battery green "
+                  "(sandboxed; real state byte-unchanged)")
+            return 0
+        print("[info-guard] ✗ check --battery: the battery reported failures "
+              "(verdict: broken)", file=sys.stderr)
+        return 1
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def cmd_check(args):
     """Health check — the package's schedulable watchdog. Verifies the
-    engine marker survived updates, the pattern file is present, the
-    applied patch matches this package's artifact, and the live Hermes is
-    within the tested release range. Exit 0 = healthy, 1 = broken,
-    2 = error. No alert channel assumed: the caller's scheduler decides
-    what to do with a non-zero exit (cron mail, ntfy, ...)."""
+    engine marker survived updates, the pattern file is present, the applied
+    patch matches this package's artifact, the live Hermes is within the
+    tested release range, and (W12) the engine actually masks (seven
+    in-process smoke checks). --heal = explicit engine repair via install.sh
+    (never automatic); --battery = full sandboxed test.sh. Exit 0 = healthy,
+    1 = broken (completed verdict), 2 = usage OR operational (D94). No alert
+    channel assumed: the caller's scheduler decides what to do with a
+    non-zero exit (cron mail, ntfy, ...)."""
+    args = args or []
+    heal = "--heal" in args
+    battery = "--battery" in args
+    for a in args:
+        if a.startswith("--") and a not in ("--heal", "--battery"):
+            print(f"[info-guard] Warning: unknown option '{a}'", file=sys.stderr)
+    if heal and battery:
+        print("[info-guard] usage: --heal and --battery are mutually "
+              "exclusive", file=sys.stderr)
+        return 2
+    if battery:
+        return _check_battery()
     problems = 0
+    operational = False
     inst = _installation_status()
+    upstream = False
     if inst["engine"]:
         print("[info-guard] ✓ engine: ACTIVE — all 5 patch markers present")
         probe_ok, probe_msg = _artifact_probe()
         if not probe_ok:
-            problems += 1
-            print(f"[info-guard] ✗ patch state: {probe_msg}")
+            if _is_upstream_merged():
+                upstream = True
+                print("[info-guard] ℹ patch state: ACTIVE-by-upstream — patch "
+                      "present in Hermes HEAD (PR #87953 merged); behavior "
+                      "verified by the smoke below (markers alone never "
+                      "prove the engine masks)")
+            else:
+                problems += 1
+                print(f"[info-guard] ✗ patch state: {probe_msg}")
         ver, src = _checkout_version()
         if ver is None:
             print("[info-guard] ⚠ supported range: could not detect the live "
                   "Hermes version (no git tags, no hermes on PATH) — range "
-                  f"check skipped (tested: {_fmt_version(_SUPPORTED_MIN)}–"
+                  "check skipped (tested: "
+                  f"{_fmt_version(_SUPPORTED_MIN)}–"
                   f"{_fmt_version(_SUPPORTED_MAX)})")
         elif ver > _pad_tuple(_SUPPORTED_MAX, len(ver)):
             problems += 1
@@ -3764,12 +4754,24 @@ def cmd_check(args):
         print(f"[info-guard] ✗ engine: PARTIAL — markers missing in: {missing}. "
               f"A failed `hermes update` likely half-reverted the patch; "
               f"restore the files (`git checkout` them in the checkout) and "
-              f"re-run ./install.sh")
+              f"re-run ./install.sh, or run `info-guard check --heal`")
     else:
         problems += 1
         print("[info-guard] ✗ engine: MISSING — no patch markers found; "
               "`hermes update` likely wiped the patch; run ./install.sh "
-              "(idempotent) or ./uninstall.sh if you want out")
+              "(idempotent), `info-guard check --heal`, or ./uninstall.sh if "
+              "you want out")
+    # W12 smoke: the health verdict proves the engine actually masks
+    if inst["engine"]:
+        smoke_failed = _smoke_failed()
+        for name in smoke_failed:
+            problems += 1
+            print(f"[info-guard] ✗ smoke: {name} — the engine does not mask "
+                  f"correctly; this is a BROKEN verdict even though markers "
+                  f"are present")
+        if not smoke_failed and upstream:
+            print("[info-guard] ✓ smoke: all 7 checks pass — ACTIVE-by-upstream "
+                  "behavior verified")
     if inst["patterns"]:
         try:
             data = json.loads(MATCHER.read_text())
@@ -3778,9 +4780,14 @@ def cmd_check(args):
             print(f"[info-guard] ✓ pattern file: present ({len(lits)} literals, "
                   f"{n_full} full-mask, {len(data.get('key_patterns', {}))} "
                   f"key patterns)")
-        except (OSError, ValueError):
+        except OSError:
+            operational = True
+            print(f"[info-guard] ✗ pattern file: UNREADABLE at {MATCHER} — "
+                  f"state inaccessible (operational, exit 2)", file=sys.stderr)
+        except ValueError:
             problems += 1
-            print(f"[info-guard] ✗ pattern file: unreadable at {MATCHER}")
+            print(f"[info-guard] ✗ pattern file: invalid JSON at {MATCHER} — "
+                  f"run `info-guard build` to regenerate (recovery message)")
     else:
         problems += 1
         print(f"[info-guard] ✗ pattern file: missing — run ./install.sh then "
@@ -3793,10 +4800,48 @@ def cmd_check(args):
     else:
         print("[info-guard] ⚠ gitleaks: absent — OPTIONAL; preflight degrades "
               "to key-shape pass (install with `info-guard preflight`)")
+    _cron_probe_warnings()
     print()
+    if operational:
+        print("[info-guard] ✗ check FAILED — state inaccessible (operational "
+              "failure, exit 2)", file=sys.stderr)
+        return 2
     if problems:
         print(f"[info-guard] ✗ check FAILED — {problems} problem(s) found")
+        if heal:
+            print("[info-guard] check --heal: attempting engine repair via "
+                  "install.sh (--no-config --no-cron)…")
+            target = _HERMES_HOME / "hermes-agent"
+            if not (target / "agent" / "redact.py").is_file():
+                print("[info-guard] ✗ check --heal: no target checkout — "
+                      "repair cannot be attempted (operational, exit 2)",
+                      file=sys.stderr)
+                return 2
+            try:
+                inst_run = _run_install(_pkg_root(), target)
+            except subprocess.TimeoutExpired:
+                print("[info-guard] ✗ check --heal: install timed out "
+                      "(operational, exit 2)", file=sys.stderr)
+                return 2
+            for line in (inst_run.stdout + inst_run.stderr).splitlines():
+                print(line)
+            if inst_run.returncode == 0:
+                leftover = [n for n in _smoke_failed()]
+                print("[info-guard] ✓ check --heal: engine restored — re-run "
+                      "`info-guard check` to confirm the verdict")
+                return 1 if leftover else 0
+            if inst_run.returncode == 2:
+                print("[info-guard] ✗ check --heal: repair could not be "
+                      "attempted (operational, exit 2)", file=sys.stderr)
+                return 2
+            print("[info-guard] ✗ check --heal: repair attempted but the "
+                  "engine is still broken (completed verdict, exit 1)",
+                  file=sys.stderr)
+            return 1
         return 1
+    if heal:
+        print("[info-guard] check --heal: engine already ACTIVE — nothing to "
+              "repair")
     print("[info-guard] ✓ check OK — Info Guard healthy")
     return 0
 
@@ -3828,6 +4873,8 @@ def main(argv):
         return cmd_setup(rest)
     if cmd == "check":
         return cmd_check(rest)
+    if cmd == "update":
+        return cmd_update(rest)
     if cmd == "literals":
         return cmd_literals(rest)
     print(f"[info-guard] unknown command: {cmd} (try `info-guard --help`)")
