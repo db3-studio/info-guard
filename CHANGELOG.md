@@ -4,6 +4,24 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 
 > Convention: micro-version fixes within the same workstream are consolidated into the latest entry of that wave, not captured per tag.
 
+## [v0.6.1] - 2026-08-21
+
+Audit-response patch release (external audit, 2026-08-21 — findings
+S1–S3; the audit material itself stays private).
+
+### Fixed
+- **`uninstall.sh` engine-integrity check (S2)** — now uses the same
+  5-marker check as `install.sh` and `check`: a partial install (e.g. a
+  half-reverted `hermes update`) is refused loudly instead of reporting
+  "nothing to reverse" and leaving 4 files patched behind. Regression
+  tests added.
+- **`install.sh` manifest version extraction (S3)** — dropped the
+  GNU-only `grep -oP`; BSD grep (macOS) previously recorded
+  `"version": "unknown"` in `install.json`.
+- **README `literals add` example (S1)** — `--file` is now the documented
+  default with a warning on the argv form (shell-history / process-list
+  exposure).
+
 ## [v0.6.0] - 2026-08-21
 
 ### Added

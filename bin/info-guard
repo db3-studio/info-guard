@@ -98,7 +98,7 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.6.0"
+_PACKAGE_VERSION = "0.6.1"
 
 # Per-subcommand usage lines (v0.4.1, IG D55): printed by
 # `info-guard <cmd> --help` (exit 0). Mirror the __doc__ usage block —
