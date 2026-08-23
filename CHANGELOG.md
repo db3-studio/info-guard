@@ -4,6 +4,44 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 
 > Convention: micro-version fixes within the same workstream are consolidated into the latest entry of that release, not captured per tag.
 
+## [v0.9.0] - 2026-08-23
+
+Discovery: `discover` enumerates unregistered secrets from operator-named
+source paths (read-only, pointer-only), and `literals add --from` enrolls
+one source value by key.
+
+### Added
+- **`info-guard discover [PATH ...] [--json]`** — scans operator-named
+  source paths (or the `discover.dirs` list in `custom_literals.json`;
+  CLI paths completely override configuration) for key-shaped values that
+  are not yet registered, and emits candidate pointers — key, source,
+  line, shape class, matched pattern — never values. Exit 0 = clean,
+  1 = candidates, 2 = error (JSON envelope `info-guard/discover/v1`).
+  Read-only: the registry is never written, no candidate state is
+  persisted, and no implicit path (cwd, installation, repository,
+  deployment) is ever scanned. Traversal is anchored and bounded (depth
+  32 excluding the root, 10,000 files total, 10 MiB per file — exact
+  boundary inclusive), never follows symlinks (any symlink fails closed),
+  and skips binary files. Unknown flags are usage errors; stderr is empty
+  for every JSON result.
+- **`info-guard literals add --from SOURCE:KEY [--json]`** — the sole
+  enrollment bridge for discovered candidates: re-reads the named source
+  through a single anchored no-follow open, parses the record with the
+  shared `.env` grammar, fingerprints the complete file, revalidates the
+  opened handle and the original path binding (rename or symlink
+  substitution after open fails closed, exit 2, registry untouched), and
+  registers the value atomically. Duplicate values return the existing id
+  without rewriting (`{"added": [], "duplicates": [...]}`). `--from`
+  accepts `--from SOURCE:KEY`, `--from=SOURCE:KEY`, and
+  `--from -- SOURCE:KEY`; it is mutually exclusive with positional
+  values, `--file`, `--mask`, and `--kind`. Selectors split at the last
+  colon, so colon-containing paths work.
+- Candidate pointers are exactly five fields and include only enrollable
+  records: same-file duplicate keys, colon-form records, dashed keys,
+  `export`-prefixed lines, bare token-prefix values, and registered
+  values are never emitted. Values are suppressed from output by
+  internal digest comparison only.
+
 ## [v0.8.0] - 2026-08-23
 
 Self-maintenance: `update` (check/apply/rollback), patch heal

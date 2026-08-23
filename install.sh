@@ -308,7 +308,7 @@ else
     say "pattern file exists — left untouched"
 fi
 if [ ! -f "$STATE_DIR/custom_literals.json" ]; then
-    echo '{"literals": []}' > "$STATE_DIR/custom_literals.json"
+    echo '{"version": 2, "literals": []}' > "$STATE_DIR/custom_literals.json"
     chmod 600 "$STATE_DIR/custom_literals.json"
     say "seeded $STATE_DIR/custom_literals.json (edit it, then \`info-guard build\`)"
 fi

@@ -1169,3 +1169,106 @@ operator-supplied argument, child output, or source path:
 - The `patterns` (regex) section is v2 (planned) — format-based redaction
   (any email/phone/SSN shape) on top of the exact-value engine. See
   `docs/full-stack.md`.
+
+## Discover output format (v0.9.0)
+
+`info-guard discover [PATH ...] [--json]` scans operator-named source
+paths (or the `discover.dirs` list in `custom_literals.json`; CLI paths
+completely override configuration) and reports key-shaped values that are
+not yet registered. It is read-only: the registry is never written, no
+candidate state is persisted, and no implicit path is scanned. Traversal
+is anchored (directory handles, no-follow opens at every component — any
+symlink fails closed), bounded (depth 32 excluding the named root, 10,000
+regular files total across all roots, 10 MiB per file inclusive; a file
+larger than the bound is `scan_limit` regardless of binary status), and
+skips NUL-byte files (UTF-16 sources are skipped as binary). Binary and
+non-enrollable constructs are never candidates.
+
+### Text mode
+
+- exit 0 (clean): empty stdout, empty stderr
+- exit 1 (candidates): one line per pointer, five tab-separated fields in
+  order: `key`, `source`, `line`, `shape_class`, `matched_pattern`
+- exit 2 (error): stdout empty, one value-free stderr diagnostic
+
+Fields are escaped deterministically: `\` → `\\`, tab/CR/LF → `\t`/`\r`/`\n`,
+C0/C1 control bytes and invalid UTF-8 bytes → uppercase `\xNN`, other
+Unicode control/format/separator scalars → `\u{NNNN}`.
+
+### JSON mode
+
+One envelope on stdout, stderr always empty:
+
+```json
+{"schema": "info-guard/discover/v1", "status": "clean|candidates|error",
+ "count": 0, "candidates": [], "error_class": null}
+```
+
+- `clean` → exit 0 · `candidates` → exit 1 · `error` → exit 2
+- `count == len(candidates)` is a normative invariant
+- candidates are exactly five fields (`key`, `source`, `line`,
+  `shape_class`, `matched_pattern`) — pointers only, values never appear;
+  registered values are suppressed by internal digest comparison
+- `error_class` is `null` unless `status == "error"`
+
+### Error classes (exit 2)
+
+`usage` (unknown flag, no sources, invalid selector) ·
+`registry_unavailable` (absent/unreadable/old-schema registry) ·
+`invalid_config` (malformed `discover.dirs`) · `invalid_source` (empty or
+NUL CLI path) · `source_unreadable` (missing, inaccessible, symlink,
+special file, race) · `scan_limit` (depth/file-count/size bound) ·
+`detector_error` (operational detector/parser failure — accumulated
+candidates are discarded).
+
+Unknown `--*` flags are usage errors (not warnings) so clean and candidate
+results have exactly empty stderr.
+
+## Enrollment: `literals add --from` (v0.9.0)
+
+`info-guard literals add --from SOURCE:KEY [--json]` is the sole
+enrollment bridge for discovered candidates. The selector splits at the
+**last colon** (colon-containing paths work; POSIX paths only). Accepted
+forms: `--from SOURCE:KEY`, `--from=SOURCE:KEY`, and
+`--from -- SOURCE:KEY` (a source beginning with `-` requires the latter
+two). `--from` is mutually exclusive with positional values, `--file`,
+`--mask`, and `--kind`. The key must match the `.env` grammar key token.
+
+Enrollment opens the source exactly once (anchored, no-follow), parses it
+with the shared `.env` grammar, fingerprints the complete file, then
+revalidates the opened handle and the original path binding — a rename or
+symlink substitution after the open fails closed (exit 2) with the
+registry untouched. Same-file duplicate records for the key are ambiguous
+and fail closed. The registry is read non-mutating before commit and
+re-verified at the commit boundary; the write is the canonical atomic
+write.
+
+Output:
+
+- text success: the assigned `value_id` only (never the value)
+- `--json` success: the existing add envelope —
+  `{"added": [{"value_masked": "...", "id": "..."}], "duplicates": []}`;
+  an already-registered value returns the existing id in `duplicates`
+  with no rewrite
+- any failure: empty stdout, value-free stderr, exit 2 (no JSON error
+  envelope — the existing literals convention)
+
+## Consumer obligations — discover JSON (v0.9.0)
+
+Consumers of the `info-guard/discover/v1` envelope must:
+
+1. **Tolerate unknown fields** — additive fields may appear in any
+   object; unknown fields must never break parsing.
+2. **Tolerate additive candidate fields** — candidate pointers carry
+   exactly five fields today (`key`, `source`, `line`, `shape_class`,
+   `matched_pattern`); future releases may add fields. Consumers must
+   not reject candidates for unknown fields.
+3. **Preserve and report unknown `status` values** — a status other
+   than `clean`/`candidates`/`error` must never be silently treated as
+   `clean`; forward it as received.
+4. **Preserve and report unknown `error_class` values** — an unknown
+   class must never be silently mapped to a known one; forward it as
+   received.
+5. **Treat an unrecognized security-significant `status` or `error_class` as unhandled** — never downgrade an unknown status to `clean` or map an unknown class to a known one; surface it to the operator.
+6. **Do not assume the five candidate fields are the complete set** — treat `key`, `source`, `line`, `shape_class`, `matched_pattern` as the guaranteed minimum; future fields may be added.
+7. **Continue applying the non-disclosure invariant to future fields** — any field added later must also never expose raw secret values.
