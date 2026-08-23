@@ -133,7 +133,7 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.8.1"
+_PACKAGE_VERSION = "0.9.0"
 
 # Per-subcommand usage lines (v0.4.1, IG D55): printed by
 # `info-guard <cmd> --help` (exit 0). Mirror the __doc__ usage block —
@@ -3666,6 +3666,18 @@ def _process_file(fd, norm, st, registry_hashes):
             "scan_limit", f"file grew past 10 MiB during read: {norm}")
     if b"\x00" in data:
         return []                        # binary (incl. UTF-16) — skip
+    try:
+        return _detect_and_filter(data, norm, registry_hashes)
+    except _DiscoverError:
+        raise
+    except Exception as e:               # defensive: an operational
+        raise _DiscoverError(            # detector/parser failure maps to
+            "detector_error",            # detector_error (plan 3.2, item 30)
+            f"detector failure: {norm}") from e
+
+
+def _detect_and_filter(data, norm, registry_hashes):
+    """Shared detect + filter pipeline for one file snapshot."""
     text = data.decode("utf-8", errors="replace")
     lines = text.splitlines()
     hits = []

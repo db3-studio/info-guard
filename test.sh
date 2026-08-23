@@ -5589,6 +5589,420 @@ check("WC A12: viewers leave registry and state unchanged",
       b_nomut,
       "byte-compared state dir + cwd git metadata across every viewer run")
 
+
+# ── Wave D (W8 discover): WD A20-A32 / WD S8-S10 ──────────────────────
+# Fixture: fresh HERMES_HOME + registry + synthetic source trees. All
+# values are synthetic; no raw value is ever printed by this battery.
+import importlib.machinery, importlib.util, inspect
+import contextlib, io
+WD = Path(tempfile.mkdtemp(prefix="ig-wd-"))
+WDH = WD / "home"
+WDREG = WDH / "state/info-guard/custom_literals.json"
+WDSRC = WD / "src"
+(WDH / "state/info-guard").mkdir(parents=True)
+WDSRC.mkdir()
+WDENV = dict(os.environ, HERMES_HOME=str(WDH))
+IGPY = [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard")]
+WD_CAPTURES = []          # (label, rc, stdout, stderr) for S8 leakage
+WD_VALUES = []            # synthetic values never allowed on any surface
+
+def wd_reg(vals=()):
+    (WDH / "state/info-guard").mkdir(parents=True, exist_ok=True)
+    WDREG.write_text(json.dumps({"version": 2, "literals": [
+        {"value": v, "id": f"w{abs(hash(v)):016x}"} for v in vals]}))
+
+def wd_run(*args, env=None, cwd=None):
+    r = subprocess.run(IGPY + list(args), capture_output=True, text=True,
+                       env=env or WDENV, cwd=cwd, timeout=180)
+    WD_CAPTURES.append((" ".join(args[:2]), r.returncode, r.stdout, r.stderr))
+    return r
+
+def wd_run_o(*args, cwd=None):
+    return subprocess.run(
+        [sys.executable, "-O", os.path.join(os.getcwd(), "bin", "info-guard")]
+        + list(args), capture_output=True, text=True, env=WDENV, cwd=cwd,
+        timeout=180)
+
+class _ThrowingRE:                       # forces a detector failure
+    def finditer(self, *a, **k):
+        raise RuntimeError("forced detector failure")
+
+V_A = "sk-wd-alpha-00000001"    # unregistered candidate
+V_B = "sk-wd-beta-00000002"     # unregistered candidate (nested)
+V_R = "sk-wd-reg-00000003"      # pre-registered (suppressed)
+V_DUP = "sk-wd-dup-00000004"    # enrolled then re-enrolled
+V_COL = "sk-wd-colon-00000016"  # colon-filename enrollment (fresh)
+WD_VALUES += [V_A, V_B, V_R, V_DUP, V_COL]
+
+# A22/A23 fixture: enrollable + excluded rows (dashed, colon-form,
+# export, same-file duplicate, pre-registered, comment text).
+wd_reg([V_R])
+(wdsrc_a := WDSRC / "a.env").write_text(
+    f"DEMO_API_TOKEN={V_A}\n"
+    f"GH_API_KEY-X=sk-wd-dashed-00000005\n"
+    f"COLON_FORM: sk-wd-colon-00000006\n"
+    f"export EXPORT_TOKEN=sk-wd-export-00000007\n"
+    f"REG_TOKEN={V_R}\n"
+    f"DUP_TOKEN=sk-wd-dup1-00000008\n"
+    f"DUP_TOKEN=sk-wd-dup2-00000009\n"
+    f"# API_TOKEN=sk-wd-comment-00000010\n")
+(wdsrc_b := WDSRC / "nested").mkdir()
+(wdsrc_b / "b.env").write_text(f"NESTED_TOKEN={V_B}\n")
+(wdsrc_b / "blob.bin").write_bytes(b"\x00\x01\x02binary")
+
+r = wd_run("discover", str(WDSRC), "--json")
+d = json.loads(r.stdout)
+check("WD A23: candidate identity — enrollable set exactly",
+      r.returncode == 1 and d["status"] == "candidates"
+      and d["count"] == 2 and d["error_class"] is None
+      and {c["key"] for c in d["candidates"]} == {"DEMO_API_TOKEN",
+                                                  "NESTED_TOKEN"}
+      and all(set(c) == {"key", "source", "line", "shape_class",
+                         "matched_pattern"} for c in d["candidates"])
+      and all(c["shape_class"] == "KEY-SHAPE"
+              and c["matched_pattern"].startswith("key-family:")
+              for c in d["candidates"])
+      and r.stderr == "",
+      f"count={d['count']} keys={sorted(c['key'] for c in d['candidates'])}")
+wd_empty = WD / "empty"
+wd_empty.mkdir()
+r2 = wd_run("discover", str(wd_empty), "--json")
+r3 = wd_run("discover", str(wd_empty))
+check("WD A22: clean discovery — empty tree",
+      r2.returncode == 0 and json.loads(r2.stdout)["status"] == "clean"
+      and r2.stderr == "" and r3.returncode == 0
+      and r3.stdout == "" and r3.stderr == "",
+      "json + text clean envelopes")
+r4 = wd_run("discover", str(wdsrc_a), "--json",
+            env=dict(os.environ, HERMES_HOME=str(WD / "nohome")))
+check("WD A21: registry unavailable fails closed",
+      r4.returncode == 2
+      and json.loads(r4.stdout)["error_class"] == "registry_unavailable"
+      and r4.stderr == "",
+      "absent registry -> registry_unavailable")
+WDREG.write_text('{"version": 1, "literals": ["old"]}')
+b0 = WDREG.read_bytes()
+r5 = wd_run("discover", str(wdsrc_a), "--json")
+check("WD A28: old-schema registry read-only, bytes untouched",
+      r5.returncode == 2
+      and json.loads(r5.stdout)["error_class"] == "registry_unavailable"
+      and WDREG.read_bytes() == b0,
+      "v1 registry -> registry_unavailable, no migration write")
+wd_reg([V_R])
+
+# E4 lifecycle (A20): discover -> enroll -> suppressed -> idempotent dup.
+r6 = wd_run("discover", str(WDSRC), "--json")
+r7 = wd_run("literals", "add", "--from", f"{wdsrc_a}:DEMO_API_TOKEN")
+r8 = wd_run("discover", str(WDSRC), "--json")
+r9 = wd_run("literals", "add", "--from", f"{wdsrc_a}:DEMO_API_TOKEN",
+            "--json")
+check("WD E4 lifecycle: discover -> --from enroll -> suppressed",
+      r6.returncode == 1
+      and r7.returncode == 0
+      and re.fullmatch(r"value [0-9a-f]{16}", r7.stdout.strip())
+      and V_A not in r7.stdout + r7.stderr
+      and r8.returncode == 1
+      and "DEMO_API_TOKEN" not in json.loads(r8.stdout)["candidates"]
+      and r9.returncode == 0
+      and json.loads(r9.stdout)["added"] == []
+      and len(json.loads(r9.stdout)["duplicates"]) == 1,
+      "enroll -> suppressed; duplicate -> idempotent existing id")
+# A24: enrollment feeds the existing registry pass (the value_id join)
+# and the preflight surface is UNCHANGED by W8 — verified once against
+# the pre-Wave-D binary: the assessment is byte-identical except
+# tool.version + scan timestamp, and the exit is identical (engine-less
+# fixture -> 1). The scanned dir must sit INSIDE HERMES_HOME —
+# preflight computes dir.relative_to(HERMES_HOME) and crashes on
+# outside dirs (pre-existing behavior, unchanged by W8; recorded for
+# the retrospective). NOTE: plain registered literals render "exposed"
+# in the assessment (registration protects output masking, not at-rest
+# status); the registry pass is the value_id join, asserted below.
+wd_scan = WDH / "scanme"
+wd_scan.mkdir(exist_ok=True)
+(wd_scan / "f.env").write_text(
+    f"KNOWN_TOKEN={V_A}\nFRESH_TOKEN={V_B}\n")
+r10 = wd_run("preflight", str(wd_scan), "--json")
+a24 = json.loads(r10.stdout) if r10.stdout else {}
+a24fam = {f.get("family"): f
+          for f in a24.get("families", {}).get("items", [])}
+check("WD A24: preflight ladder unchanged; assessment surface intact",
+      r10.returncode == 1                     # engine-less fixture exit —
+      and a24fam.get("KNOWN_TOKEN", {}).get("status") == "exposed"
+      and a24fam.get("FRESH_TOKEN", {}).get("status") == "exposed"
+      and V_A not in r10.stdout + r10.stderr,
+      f"exit={r10.returncode} "
+      f"known={a24fam.get('KNOWN_TOKEN', {}).get('status')} "
+      f"fresh={a24fam.get('FRESH_TOKEN', {}).get('status')}")
+
+# A25 failure matrix via the acceptance-harness DI hook (in-process).
+_old_hh = os.environ.get("HERMES_HOME")
+os.environ["HERMES_HOME"] = str(WDH)
+_wd_spec = importlib.util.spec_from_loader(
+    "igwd", importlib.machinery.SourceFileLoader(
+        "igwd", os.path.join(os.getcwd(), "bin", "info-guard")))
+wdm = importlib.util.module_from_spec(_wd_spec)
+_wd_spec.loader.exec_module(wdm)
+if _old_hh is None:
+    os.environ.pop("HERMES_HOME", None)
+else:
+    os.environ["HERMES_HOME"] = _old_hh
+
+check("WD A24: registry pass joins enrolled value (value_id)",
+      wdm._value_id_map().get(
+          hashlib.sha256(V_A.encode()).hexdigest()) is not None
+      and wdm._value_id_map().get(
+          hashlib.sha256(V_B.encode()).hexdigest()) is None,
+      "enrolled value joined; fresh value absent from the registry pass")
+
+def wd_variant(name, mutate):
+    reg0 = WDREG.read_bytes()
+    src = WDSRC / "hook.env"
+    if src.is_symlink() or src.exists():
+        src.unlink()
+    src.write_text("# keep\nA_TOKEN=sk-wd-hook-00000011\n")
+    fired = []
+    def hook(norm):
+        mutate(norm, src)
+        fired.append(1)
+    wdm._FROM_TEST_HOOK = hook
+    rc = wdm.cmd_literals(["add", "--from", f"{src}:A_TOKEN"])
+    ok = rc == 2 and WDREG.read_bytes() == reg0 and len(fired) == 1
+    check(f"WD A25 {name}: fail closed, registry byte-unchanged",
+          ok, f"rc={rc}")
+    wdm._FROM_TEST_HOOK = None
+
+def wd_mut_rename(_norm, src):
+    repl = WDSRC / "repl.env"
+    repl.write_text("A_TOKEN=sk-wd-other-00000012\n")
+    os.replace(repl, src)
+def wd_mut_symlink(_norm, src):
+    tmp = WDSRC / "real.env"
+    tmp.write_text("A_TOKEN=sk-wd-other-00000012\n")
+    src.unlink()
+    os.symlink(tmp, src)
+def wd_mut_truncate(_norm, src):
+    with open(src, "r+") as f:
+        f.truncate(0)
+def wd_mut_rewrite_outside(_norm, src):
+    src.write_text(src.read_text().replace("# keep", "# chng"))
+def wd_mut_rewrite_record(_norm, src):
+    src.write_text(src.read_text().replace(
+        "sk-wd-hook-00000011", "sk-wd-hook-00000013"))
+def wd_mut_remove_record(_norm, src):
+    src.write_text(src.read_text().replace("A_TOKEN=sk-wd-hook-00000011\n",
+                                           ""))
+wd_variant("c-rename-replace", wd_mut_rename)
+wd_variant("d-symlink-substitute", wd_mut_symlink)
+wd_variant("e-truncate", wd_mut_truncate)
+wd_variant("f-rewrite-outside", wd_mut_rewrite_outside)
+wd_variant("g-record-rewrite", wd_mut_rewrite_record)
+wd_variant("h-record-removal", wd_mut_remove_record)
+r11 = wd_run("literals", "add", "--from", f"{wdsrc_a}:NO_SUCH_KEY")
+r12 = wd_run("literals", "add", "--from", f"{WD / 'nope'}:KEY")
+r13 = wd_run("literals", "add", "--from", "badselector")
+check("WD A25: unknown key / missing source / bad selector fail closed",
+      r11.returncode == 2 and V_A not in r11.stdout + r11.stderr
+      and r12.returncode == 2 and r13.returncode == 2,
+      "value-free failures, no registry touch")
+
+# A26 adversarial: colon filename, comment non-record, no execution.
+wdsrc_a26 = WDSRC / "adv"
+wdsrc_a26.mkdir()
+(wdsrc_a26 / "a:b.env").write_text(f"COLON_PATH_TOKEN={V_COL}\n")
+(wdsrc_a26 / "q;uote'x.env").write_text(f"QMARK_TOKEN={V_B}\n")
+(wdsrc_a26 / "canary.sh").write_text(
+    "#!/bin/sh\ntouch " + str(WD / "executed") + "\n")
+os.chmod(wdsrc_a26 / "canary.sh", 0o755)
+r14 = wd_run("literals", "add", "--from",
+             f"{wdsrc_a26 / 'a:b.env'}:COLON_PATH_TOKEN", "--json")
+r15 = wd_run("discover", str(wdsrc_a26), "--json")
+check("WD A26: colon filename last-colon; metachar args as data; no exec",
+      r14.returncode == 0 and len(json.loads(r14.stdout)["added"]) == 1
+      and r15.returncode == 1
+      and not (WD / "executed").exists(),
+      "list-based args; canary never invoked")
+
+# A29 config surface: discover.dirs drives; malformed -> invalid_config.
+wd_reg([V_R])
+WDREG.write_text(json.dumps({"version": 2, "literals": [],
+                             "discover": {"dirs": [str(WDSRC)]}}))
+r16 = wd_run("discover", "--json")
+r17 = wd_run("discover", str(wd_empty), "--json")
+check("WD A29: discover.dirs config drives selection; CLI overrides",
+      r16.returncode == 1 and json.loads(r16.stdout)["count"] >= 1
+      and r17.returncode == 0 and json.loads(r17.stdout)["status"] == "clean",
+      "config root scanned; CLI path overrides config")
+WDREG.write_text(json.dumps({"version": 2, "literals": [],
+                             "discover": {"dirs": "not-a-list"}}))
+r18 = wd_run("discover", str(wd_empty), "--json")
+check("WD A29: malformed discover.dirs -> invalid_config (even with CLI)",
+      r18.returncode == 2
+      and json.loads(r18.stdout)["error_class"] == "invalid_config",
+      "structural validation at stage 3")
+wd_reg([V_R])
+r19 = wd_run("discover", "--json")
+check("WD A29: no sources -> usage",
+      r19.returncode == 2 and json.loads(r19.stdout)["error_class"] == "usage",
+      "")
+
+# A30 selector/grammar matrix.
+wdsrc_dash = WDSRC / "dash"
+wdsrc_dash.mkdir()
+(wdsrc_dash / "-d.env").write_text(f"DASH_TOKEN={V_DUP}\n")
+r20 = wd_run("literals", "add", "--from", "-d.env:DASH_TOKEN",
+             cwd=str(wdsrc_dash))
+r21 = wd_run("literals", "add", "--from=-d.env:DASH_TOKEN", "--json",
+             cwd=str(wdsrc_dash))
+r22 = wd_run("literals", "add", "--from", "--", "-d.env:DASH_TOKEN",
+             "--json", cwd=str(wdsrc_dash))
+check("WD A30: selector forms — unmarked leading-dash rejected; "
+      "equals and -- forms valid",
+      r20.returncode == 2 and "usage" in r20.stderr
+      and r21.returncode == 0 and len(json.loads(r21.stdout)["added"]) == 1
+      and r22.returncode == 0
+      and len(json.loads(r22.stdout)["duplicates"]) == 1,
+      "rejection + both valid leading-dash forms")
+r23 = wd_run("literals", "add", "--from", f"{wdsrc_a}:GH_API_KEY-X")
+r24 = wd_run("literals", "add", "--from", f"{wdsrc_a}:demo_api_token")
+check("WD A30: parser-rejected key + case sensitivity fail closed",
+      r23.returncode == 2 and r24.returncode == 2
+      and "invalid --from selector" in r23.stderr
+      and r23.stderr != "" and r24.stderr != "", "")
+
+# A31 traversal bounds: symlink fail-closed, depth, 10 MiB.
+evl = WDSRC / "evil"
+evl.mkdir()
+try:
+    (evl / "l").symlink_to("/etc")
+    r25 = wd_run("discover", str(evl), "--json")
+    check("WD A31: symlink anywhere fails closed (never skipped)",
+          r25.returncode == 2
+          and json.loads(r25.stdout)["error_class"] == "source_unreadable",
+          "")
+    (evl / "l").unlink()
+except OSError:
+    pass
+d33 = WD / "d33"
+p = d33
+for _i in range(34):
+    p = p / "x"
+p.mkdir(parents=True)
+(p / "f.env").write_text("D_TOKEN=sk-wd-depth-00000014\n")
+r26 = wd_run("discover", str(d33), "--json")
+check("WD A31: depth 33 -> scan_limit", r26.returncode == 2
+      and json.loads(r26.stdout)["error_class"] == "scan_limit", "")
+big = WD / "big.env"
+big.write_text("BIG_TOKEN=" + "a" * (10 * 1024 * 1024 + 1))
+r27 = wd_run("discover", str(big), "--json")
+check("WD A31: 10 MiB+1 file -> scan_limit (pre-binary)", r27.returncode == 2
+      and json.loads(r27.stdout)["error_class"] == "scan_limit", "")
+
+# A32: no implicit paths (canary files outside declared roots).
+(WD / "cwd-canary.env").write_text(f"CWD_TOKEN={V_B}\n")
+(WDH / "state/info-guard/canary.env").write_text(f"ST_TOKEN={V_B}\n")
+r28 = wd_run("discover", str(wd_empty), "--json")
+check("WD A32: no implicit cwd/state scan — canary files untouched",
+      r28.returncode == 0 and json.loads(r28.stdout)["status"] == "clean"
+      and json.loads(r28.stdout)["count"] == 0, "")
+
+# r3 fold items 29/30: invalid_source + detector_error discard-all.
+r29 = wd_run("discover", "", "--json")
+# A NUL byte cannot exist in POSIX argv (exec rejects it), so the NUL
+# path is exercised in-process against the same guard (list-based
+# arguments, no shell, no exec).
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _rc_nul = wdm.cmd_discover(["discover", "bad\x00path", "--json"])
+_dnul = json.loads(_buf.getvalue())
+check("WD item-29: empty/NUL CLI path -> invalid_source",
+      r29.returncode == 2
+      and json.loads(r29.stdout)["error_class"] == "invalid_source"
+      and r29.stderr == ""
+      and _rc_nul == 2 and _dnul["error_class"] == "invalid_source", "")
+wd_reg([V_R])
+disc = WDSRC / "disc"
+disc.mkdir(exist_ok=True)
+(disc / "a.env").write_text(f"GOOD_TOKEN={V_A}\n")
+(disc / "b.env").write_text(f"BAD_TOKEN=sk-wd-bad-00000015\n")
+os.chmod(disc / "b.env", 0)
+r31 = wd_run("discover", str(disc), "--json")
+os.chmod(disc / "b.env", 0o644)
+check("WD item-30: mid-run failure discards accumulated candidates",
+      r31.returncode == 2 and json.loads(r31.stdout)["count"] == 0
+      and json.loads(r31.stdout)["candidates"] == [],
+      f"error_class={json.loads(r31.stdout)['error_class']}")
+_fd = os.open(disc / "a.env", os.O_RDONLY)
+_orig_re = wdm._KEY_FORM_RE
+wdm._KEY_FORM_RE = _ThrowingRE()
+try:
+    try:
+        wdm._process_file(_fd, str(disc / "a.env"),
+                          os.fstat(_fd), set())
+        _der = None
+    except Exception as e:
+        _der = getattr(e, "error_class", None)
+finally:
+    wdm._KEY_FORM_RE = _orig_re
+    os.close(_fd)
+check("WD item-30: detector failure maps to detector_error",
+      _der == "detector_error", f"class={_der}")
+
+# S8 leakage: no raw value on any captured surface.
+check("WD S8: masked-only across all discover/--from surfaces",
+      all(all(v not in (o + e) for v in WD_VALUES)
+          for _l, _rc, o, e in WD_CAPTURES),
+      f"{len(WD_CAPTURES)} captured runs scanned")
+# S9 single-sourced detector (static): reuses existing regex objects.
+_src = inspect.getsource(wdm._detect_and_filter)
+check("WD S9: single-sourced detector — existing corpus reused",
+      "_KEY_FORM_RE" in _src and "_TRIVIAL_VALUES" in _src
+      and "_VALUE_TOKEN_RE" in _src and "re.compile" not in _src, "")
+# S10 no-shell (static + canary): no shell=True; canary not executed.
+_src10 = "".join(inspect.getsource(wdm.cmd_discover)
+                 + inspect.getsource(wdm._walk_dir)
+                 + inspect.getsource(wdm._literals_add_from))
+check("WD S10: no shell execution surface",
+      "shell=True" not in _src10 and "subprocess" not in _src10
+      and not (WD / "executed").exists(), "")
+
+# item 28: -O parity — read-only scenarios byte-identical under python -O
+# (an enrolling scenario would legitimately differ: the first run
+# registers the value, the -O re-run sees a duplicate).
+_par = True
+for _args in (("discover", str(WDSRC), "--json"),
+              ("discover", str(wd_empty), "--json"),
+              ("discover", "--json")):
+    _a = wd_run(*_args)
+    _b = wd_run_o(*_args)
+    _par = _par and (_a.returncode, _a.stdout, _a.stderr) == (
+        _b.returncode, _b.stdout, _b.stderr)
+check("WD item-28: optimized-interpreter parity (-O)",
+      _par, "byte-identical stdout/stderr/exit")
+
+# item 25: hook unreachable — exactly 3 occurrences in the shipped file
+# (definition, invocation guard, call); no CLI/env/config activation.
+_hook_count = open(os.path.join(os.getcwd(), "bin",
+                                "info-guard")).read().count("_FROM_TEST_HOOK")
+check("WD item-25: hook inert — no shipped activation surface",
+      _hook_count == 3, f"occurrences={_hook_count}")
+
+# item 26: stripped-PATH invocation works (gitleaks is a release-gate
+# step, D116 — the gate runs it against the repo + evidence).
+r33 = wd_run("discover", str(WDSRC), "--json",
+             env=dict(os.environ, HERMES_HOME=str(WDH), PATH="/usr/bin:/bin"))
+check("WD item-26: stripped-PATH invocation works",
+      r33.returncode == 1 and r33.stderr == "", "")
+
+# item 27: version identity (package constant == CLI == CHANGELOG title).
+_vid = wdm._PACKAGE_VERSION == "0.9.0"
+r34 = wd_run("--version")
+_vid = _vid and r34.stdout.strip() == "info-guard 0.9.0"
+_chg = "\n".join((Path(os.getcwd()) / "CHANGELOG.md").read_text().split("\n")[:12])
+_vid = _vid and "v0.9.0" in _chg
+check("WD item-27: version identity — constant == CLI == CHANGELOG",
+      _vid, f"const={wdm._PACKAGE_VERSION} cli={r34.stdout.strip()!r}")
+
+
 print(f"\n[test] {PASS} passed, {FAIL} failed"
       f" (discovered={PASS + FAIL + SKIP} executed={PASS + FAIL} "
       f"passed={PASS} skipped={SKIP} failed={FAIL})")

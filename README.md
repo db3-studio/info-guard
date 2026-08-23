@@ -372,6 +372,46 @@ decide is sensitive. The `id` on each entry is the `value_id` that
 URLs, usernames, flags, schedules — are excluded: masking those was pure
 information loss).
 
+## Discover unregistered secrets (v0.9.0)
+
+To find key-shaped values in your own source files that are **not yet
+registered**, point `discover` at them explicitly — it never scans
+anything you didn't name:
+
+```bash
+~/.info-guard/bin/info-guard discover /path/to/source --json
+# exit 0 = clean · 1 = candidates · 2 = error
+# candidates are pointers (key/source/line/shape/matched pattern) — never values
+```
+
+`discover` is read-only and bounded: depth 32, 10,000 files, 10 MiB per
+file (all fixed — a larger tree must be subdivided); it never follows
+symlinks, never scans your home, installation, repository, or any
+deployment path, and never writes the registry. Configured roots can be
+declared once in `custom_literals.json`:
+
+```json
+{"discover": {"dirs": ["/var/tmp/source-a", "/var/tmp/source-b"]}}
+```
+
+**`discover` does not register anything.** To enroll a candidate (the
+only sanctioned path from discovery to protection):
+
+```bash
+~/.info-guard/bin/info-guard literals add --from /path/to/source.env:API_TOKEN
+# re-reads the source live, verifies it is unchanged (rename/symlink swap
+# fails closed), and registers the value atomically; prints the value id
+```
+
+`--from` accepts `--from SOURCE:KEY`, `--from=SOURCE:KEY`, and
+`--from -- SOURCE:KEY` (for paths beginning with `-`), and is mutually
+exclusive with `--file`/`--mask`/`--kind`/positional values. It enrolls
+the value from the file as it is **now** — if the file changed since
+`discover` ran, enrollment re-reads and re-verifies; nothing is
+persisted between the two commands. Same-file duplicate keys and
+non-enrollable forms (colon-style, dashed keys, `export` lines) are never
+reported as candidates, because they cannot be enrolled.
+
 More examples — value types, mask styles, key patterns — in
 `examples/redact_patterns.json.example` and `examples/custom_literals.json.example`.
 
