@@ -4,7 +4,7 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 
 > Convention: micro-version fixes within the same workstream are consolidated into the latest entry of that wave, not captured per tag.
 
-## [v0.8.0] - 2026-08-22
+## [v0.8.0] - 2026-08-23
 
 Wave C (P4 Self-Sustain, IG D113) — Phase A: `update` (W10), patch heal
 (W11), batteries in `check` (W12), and the cron offering (W6). Binding
