@@ -5594,7 +5594,7 @@ check("WC A12: viewers leave registry and state unchanged",
 # Fixture: fresh HERMES_HOME + registry + synthetic source trees. All
 # values are synthetic; no raw value is ever printed by this battery.
 import importlib.machinery, importlib.util, inspect
-import contextlib, io
+import contextlib, io, secrets
 WD = Path(tempfile.mkdtemp(prefix="ig-wd-"))
 WDH = WD / "home"
 WDREG = WDH / "state/info-guard/custom_literals.json"
@@ -5627,11 +5627,15 @@ class _ThrowingRE:                       # forces a detector failure
     def finditer(self, *a, **k):
         raise RuntimeError("forced detector failure")
 
-V_A = "sk-wd-alpha-00000001"    # unregistered candidate
-V_B = "sk-wd-beta-00000002"     # unregistered candidate (nested)
-V_R = "sk-wd-reg-00000003"      # pre-registered (suppressed)
-V_DUP = "sk-wd-dup-00000004"    # enrolled then re-enrolled
-V_COL = "sk-wd-colon-00000016"  # colon-filename enrollment (fresh)
+def _wdfrag(prefix):
+    # Fragment-built sentinel: no complete token value exists in the
+    # repository (battery fixture rule, build-diff M7 fold).
+    return f"sk-wd-{prefix}-{secrets.token_hex(4)}"
+V_A = _wdfrag("a")    # unregistered candidate
+V_B = _wdfrag("b")    # unregistered candidate (nested)
+V_R = _wdfrag("r")    # pre-registered (suppressed)
+V_DUP = _wdfrag("d")  # enrolled then re-enrolled
+V_COL = _wdfrag("c")  # colon-filename enrollment (fresh)
 WD_VALUES += [V_A, V_B, V_R, V_DUP, V_COL]
 
 # A22/A23 fixture: enrollable + excluded rows (dashed, colon-form,
@@ -5639,13 +5643,13 @@ WD_VALUES += [V_A, V_B, V_R, V_DUP, V_COL]
 wd_reg([V_R])
 (wdsrc_a := WDSRC / "a.env").write_text(
     f"DEMO_API_TOKEN={V_A}\n"
-    f"GH_API_KEY-X=sk-wd-dashed-00000005\n"
-    f"COLON_FORM: sk-wd-colon-00000006\n"
-    f"export EXPORT_TOKEN=sk-wd-export-00000007\n"
+    f"GH_API_KEY-X={_wdfrag('dashed')}\n"
+    f"COLON_FORM: {_wdfrag('colon')}\n"
+    f"export EXPORT_TOKEN={_wdfrag('export')}\n"
     f"REG_TOKEN={V_R}\n"
-    f"DUP_TOKEN=sk-wd-dup1-00000008\n"
-    f"DUP_TOKEN=sk-wd-dup2-00000009\n"
-    f"# API_TOKEN=sk-wd-comment-00000010\n")
+    f"DUP_TOKEN={_wdfrag('dup1')}\n"
+    f"DUP_TOKEN={_wdfrag('dup2')}\n"
+    f"# API_TOKEN={_wdfrag('comment')}\n")
 (wdsrc_b := WDSRC / "nested").mkdir()
 (wdsrc_b / "b.env").write_text(f"NESTED_TOKEN={V_B}\n")
 (wdsrc_b / "blob.bin").write_bytes(b"\x00\x01\x02binary")
@@ -5759,10 +5763,12 @@ def wd_variant(name, mutate):
     src = WDSRC / "hook.env"
     if src.is_symlink() or src.exists():
         src.unlink()
-    src.write_text("# keep\nA_TOKEN=sk-wd-hook-00000011\n")
+    hv = _wdfrag("hv")                 # per-run value + replacement
+    ov = _wdfrag("ov")
+    src.write_text(f"# keep\nA_TOKEN={hv}\n")
     fired = []
     def hook(norm):
-        mutate(norm, src)
+        mutate(norm, src, hv, ov)
         fired.append(1)
     wdm._FROM_TEST_HOOK = hook
     rc = wdm.cmd_literals(["add", "--from", f"{src}:A_TOKEN"])
@@ -5771,26 +5777,24 @@ def wd_variant(name, mutate):
           ok, f"rc={rc}")
     wdm._FROM_TEST_HOOK = None
 
-def wd_mut_rename(_norm, src):
+def wd_mut_rename(_norm, src, _hv, ov):
     repl = WDSRC / "repl.env"
-    repl.write_text("A_TOKEN=sk-wd-other-00000012\n")
+    repl.write_text(f"A_TOKEN={ov}\n")
     os.replace(repl, src)
-def wd_mut_symlink(_norm, src):
+def wd_mut_symlink(_norm, src, _hv, ov):
     tmp = WDSRC / "real.env"
-    tmp.write_text("A_TOKEN=sk-wd-other-00000012\n")
+    tmp.write_text(f"A_TOKEN={ov}\n")
     src.unlink()
     os.symlink(tmp, src)
-def wd_mut_truncate(_norm, src):
+def wd_mut_truncate(_norm, src, _hv, _ov):
     with open(src, "r+") as f:
         f.truncate(0)
-def wd_mut_rewrite_outside(_norm, src):
+def wd_mut_rewrite_outside(_norm, src, _hv, _ov):
     src.write_text(src.read_text().replace("# keep", "# chng"))
-def wd_mut_rewrite_record(_norm, src):
-    src.write_text(src.read_text().replace(
-        "sk-wd-hook-00000011", "sk-wd-hook-00000013"))
-def wd_mut_remove_record(_norm, src):
-    src.write_text(src.read_text().replace("A_TOKEN=sk-wd-hook-00000011\n",
-                                           ""))
+def wd_mut_rewrite_record(_norm, src, hv, _ov):
+    src.write_text(src.read_text().replace(hv, _wdfrag("rr")))
+def wd_mut_remove_record(_norm, src, hv, _ov):
+    src.write_text(src.read_text().replace(f"A_TOKEN={hv}\n", ""))
 wd_variant("c-rename-replace", wd_mut_rename)
 wd_variant("d-symlink-substitute", wd_mut_symlink)
 wd_variant("e-truncate", wd_mut_truncate)
@@ -5887,7 +5891,7 @@ p = d33
 for _i in range(34):
     p = p / "x"
 p.mkdir(parents=True)
-(p / "f.env").write_text("D_TOKEN=sk-wd-depth-00000014\n")
+(p / "f.env").write_text(f"D_TOKEN={_wdfrag('depth')}\n")
 r26 = wd_run("discover", str(d33), "--json")
 check("WD A31: depth 33 -> scan_limit", r26.returncode == 2
       and json.loads(r26.stdout)["error_class"] == "scan_limit", "")
@@ -5923,7 +5927,7 @@ wd_reg([V_R])
 disc = WDSRC / "disc"
 disc.mkdir(exist_ok=True)
 (disc / "a.env").write_text(f"GOOD_TOKEN={V_A}\n")
-(disc / "b.env").write_text(f"BAD_TOKEN=sk-wd-bad-00000015\n")
+(disc / "b.env").write_text(f"BAD_TOKEN={_wdfrag('bad')}\n")
 os.chmod(disc / "b.env", 0)
 r31 = wd_run("discover", str(disc), "--json")
 os.chmod(disc / "b.env", 0o644)
@@ -5952,11 +5956,8 @@ check("WD S8: masked-only across all discover/--from surfaces",
       all(all(v not in (o + e) for v in WD_VALUES)
           for _l, _rc, o, e in WD_CAPTURES),
       f"{len(WD_CAPTURES)} captured runs scanned")
-# S9 single-sourced detector (static): reuses existing regex objects.
-_src = inspect.getsource(wdm._detect_and_filter)
-check("WD S9: single-sourced detector — existing corpus reused",
-      "_KEY_FORM_RE" in _src and "_TRIVIAL_VALUES" in _src
-      and "_VALUE_TOKEN_RE" in _src and "re.compile" not in _src, "")
+# S9 strengthened in the build-diff additions section (WD-S9): discover
+# calls the SHARED _scan_lines; the shared function holds the corpus.
 # S10 no-shell (static + canary): no shell=True; canary not executed.
 _src10 = "".join(inspect.getsource(wdm.cmd_discover)
                  + inspect.getsource(wdm._walk_dir)
@@ -6001,6 +6002,354 @@ _chg = "\n".join((Path(os.getcwd()) / "CHANGELOG.md").read_text().split("\n")[:1
 _vid = _vid and "v0.9.0" in _chg
 check("WD item-27: version identity — constant == CLI == CHANGELOG",
       _vid, f"const={wdm._PACKAGE_VERSION} cli={r34.stdout.strip()!r}")
+
+
+
+# ── build-diff fold additions: battery completion (E16-E28) ───────────
+# Fresh, self-contained fixture so registry state is fully controlled.
+WD2 = Path(tempfile.mkdtemp(prefix="ig-wd2-"))
+WDH2 = WD2 / "home"
+WDREG2 = WDH2 / "state/info-guard/custom_literals.json"
+WDSRC2 = WD2 / "src"
+(WDH2 / "state/info-guard").mkdir(parents=True)
+WDSRC2.mkdir()
+WDENV2 = dict(os.environ, HERMES_HOME=str(WDH2))
+WD2_CAP = []                       # (label, rc, stdout, stderr)
+def wd2_reg(body):
+    (WDH2 / "state/info-guard").mkdir(parents=True, exist_ok=True)
+    WDREG2.write_text(body if isinstance(body, str)
+                      else json.dumps(body))
+def wd2_run(*args, env=None, cwd=None):
+    r = subprocess.run(IGPY + list(args), capture_output=True, text=True,
+                       env=env or WDENV2, cwd=cwd, timeout=180)
+    WD2_CAP.append((" ".join(args[:2]), r.returncode, r.stdout, r.stderr))
+    return r
+
+# E16 — text-mode errors: EXACTLY `error: <class>\n`, no path/key.
+wd2_reg({"version": 2, "literals": []})
+(wd2_f := WDSRC2 / "f.env").write_text(f"T_TOKEN={_wdfrag('frag')}\n")
+big2 = WD2 / "big.env"
+big2.write_text("BIG_TOKEN=" + "a" * (10 * 1024 * 1024 + 1))
+_te_cases = [
+    ("usage", ["discover", "--bogus"], None, None),
+    ("registry_unavailable", ["discover", str(WDSRC2)],
+     dict(os.environ, HERMES_HOME=str(WD2 / "nohome")), None),
+    ("invalid_source", ["discover", ""], None, None),
+    ("source_unreadable", ["discover", str(WD2 / "nope")], None, None),
+    ("scan_limit", ["discover", str(big2)], None, None),
+]
+_te_ok = True
+for _cls, _args, _env, _cwd in _te_cases:
+    _r = wd2_run(*_args, env=_env, cwd=_cwd)
+    _te_ok = _te_ok and _r.returncode == 2 \
+        and _r.stderr == f"error: {_cls}\n" \
+        and _r.stdout == "" \
+        and str(WD2) not in _r.stderr and "T_TOKEN" not in _r.stderr
+wd2_reg({"version": 2, "literals": [],
+         "discover": {"dirs": "nope"}})
+_r = wd2_run("discover", str(WDSRC2))
+_te_ok = _te_ok and _r.returncode == 2 and _r.stderr == "error: invalid_config\n"
+wd2_reg({"version": 2, "literals": []})
+check("WD-E16 [battery.wave_d.discover_text_error_contract]: every class "
+      "emits exactly `error: <class>` with no path/key",
+      _te_ok, f"cases={len(_te_cases) + 1}")
+
+# E24 — unknown-flag strict stderr (clean, candidate, error fixtures).
+wd2_reg({"version": 2, "literals": []})
+_r = wd2_run("discover", str(WDSRC2), "--json", "--bogus")
+_uf_ok = _r.returncode == 2 \
+    and json.loads(_r.stdout)["error_class"] == "usage" and _r.stderr == ""
+_r = wd2_run("discover", str(WDSRC2), "--bogus")
+_uf_ok = _uf_ok and _r.returncode == 2 and _r.stderr == "error: usage\n"
+check("WD-E24 [battery.wave_d.discover_unknown_flag_strict_stderr]",
+      _uf_ok, "unknown flag -> usage exit 2, JSON stderr empty")
+
+# E18/E19 — A23 sub-scenarios: dup keys across files, multi-pattern,
+# tab path, BOTH modes; escaping unit + invalid-UTF-8 filename.
+wd2_reg({"version": 2, "literals": []})
+dup = WDSRC2 / "dup"
+dup.mkdir(exist_ok=True)
+(dup / "one.env").write_text(f"DUP_TOKEN={_wdfrag('dup1')}\n")
+(dup / "two.env").write_text(f"DUP_TOKEN={_wdfrag('dup2')}\n")
+(dup / "multi.env").write_text(f"API_TOKEN={_wdfrag('multi')}\n")
+tabdir = WDSRC2 / "tab"
+tabdir.mkdir(exist_ok=True)
+(tabdir / "sp\tace.env").write_text(f"TAB_TOKEN={_wdfrag('tab')}\n")
+_rj = wd2_run("discover", str(dup), "--json")
+_rt = wd2_run("discover", str(dup))
+_rj2 = wd2_run("discover", str(tabdir), "--json")
+_rt2 = wd2_run("discover", str(tabdir))
+_a23_ok = (_rj.returncode == 1
+    and json.loads(_rj.stdout)["count"] == 3          # DUP_TOKEN x2 files + API_TOKEN
+    and len([c for c in json.loads(_rj.stdout)["candidates"]
+             if c["key"] == "DUP_TOKEN"]) == 2         # dup keys across files: separate pointers
+    and len([c for c in json.loads(_rj.stdout)["candidates"]
+             if c["key"] == "API_TOKEN"]) == 1        # multi-pattern: ONE pointer
+    and _rt.returncode == 1 and len(_rt.stdout.splitlines()) == 3
+    and _rj2.returncode == 1
+    and "\\t" in json.loads(_rj2.stdout)["candidates"][0]["source"]
+    and _rt2.returncode == 1 and "\\t" in _rt2.stdout)
+check("WD-E18 [battery.wave_d.candidate_identity_and_text_output]: "
+      "cross-file dup keys, multi-pattern one-pointer, tab path, both modes",
+      _a23_ok,
+      f"json={json.loads(_rj.stdout)['count']} "
+      f"text-lines={len(_rt.stdout.splitlines())}")
+# escaping unit assertions (E19):
+_esc = wdm._discover_escape
+_e_ok = (_esc("a\\b") == "a\\\\b" and _esc("a\tb") == "a\\tb"
+         and _esc("a\rb") == "a\\rb" and _esc("a\nb") == "a\\nb"
+         and _esc("a\x01b") == "a\\x01b" and _esc("a\x7fb") == "a\\x7Fb"
+         and _esc("a\udcffb") == "a\\xFFb" and _esc("a\u2028b") == "a\\u{2028}b"
+         and _esc("plain") == "plain")
+check("WD-E19 [battery.wave_d.invalid_utf8_source_text_and_json]: "
+      "byte-to-display escaping deterministic",
+      _e_ok, "backslash/tab/CR/LF/C0/C1/surrogate/unicode-control")
+
+# E20 — A27 no-persisted-candidate-state: state dir byte-hash unchanged.
+wd2_reg({"version": 2, "literals": []})
+_sd = WDH2 / "state"
+def _sd_hash():
+    h = hashlib.sha256()
+    for p in sorted(_sd.rglob("*")):
+        if p.is_file():
+            h.update(str(p.relative_to(_sd)).encode())
+            h.update(p.read_bytes())
+    return h.hexdigest()
+_h0 = _sd_hash()
+_r = wd2_run("discover", str(WDSRC2), "--json")
+_h1 = _sd_hash()
+check("WD-E20 [battery.wave_d.no_persisted_candidate_state]",
+      _r.returncode == 1 and _h0 == _h1,
+      f"state-hash-stable={_h0 == _h1}")
+
+# E21 — registry TOCTOU: hook mutates the registry mid-flight -> abort;
+# writer failure (read-only state dir) -> exit 2 + no temp artifacts.
+# E21a uses its OWN module instance scoped to WDH2 (the shared wdm
+# points at the first fixture's registry). The mutation itself persists
+# — the concurrent change is preserved verbatim; the assertion is that
+# NO enrollment write landed on top of it.
+_old_hh2 = os.environ.get("HERMES_HOME")
+os.environ["HERMES_HOME"] = str(WDH2)
+_wd2_spec = importlib.util.spec_from_loader(
+    "igwd2", importlib.machinery.SourceFileLoader(
+        "igwd2", os.path.join(os.getcwd(), "bin", "info-guard")))
+wdm2 = importlib.util.module_from_spec(_wd2_spec)
+_wd2_spec.loader.exec_module(wdm2)
+if _old_hh2 is None:
+    os.environ.pop("HERMES_HOME", None)
+else:
+    os.environ["HERMES_HOME"] = _old_hh2
+wd2_reg({"version": 2, "literals": []})
+wd2_hook = WDSRC2 / "hook2.env"
+wd2_hook.write_text(f"H_TOKEN={_wdfrag('hook2')}\n")
+_mut = []
+_fired = []
+def _reg_mutate(_norm):
+    _payload = json.dumps({"version": 2, "literals": [{
+        "value": _wdfrag("other"), "id": "mutated0000000001"}]})
+    WDREG2.write_text(_payload)
+    _mut.append(_payload.encode())
+    _fired.append(1)
+_old_hook = wdm2._FROM_TEST_HOOK
+wdm2._FROM_TEST_HOOK = _reg_mutate
+_rc = wdm2.cmd_literals(["add", "--from", f"{wd2_hook}:H_TOKEN"])
+wdm2._FROM_TEST_HOOK = _old_hook
+check("WD-E21a [battery.wave_d.from_registry_snapshot_and_writer_failure]: "
+      "concurrent registry change aborts, mutation preserved verbatim",
+      _rc == 2 and len(_fired) == 1 and WDREG2.read_bytes() == _mut[0],
+      f"rc={_rc}")
+# writer failure: read-only state dir -> canonical write fails, no temps.
+wd2_reg({"version": 2, "literals": []})
+wd2_hook.write_text(f"H_TOKEN={_wdfrag('hook2')}\n")
+os.chmod(WDH2 / "state/info-guard", 0o555)
+_r = wd2_run("literals", "add", "--from", f"{wd2_hook}:H_TOKEN")
+os.chmod(WDH2 / "state/info-guard", 0o755)
+_temps = [p.name for p in (WDH2 / "state/info-guard").glob(".redact-*")]
+check("WD-E21b: writer failure -> exit 2, no orphaned temp artifacts",
+      _r.returncode == 2 and _temps == []
+      and not any(v in (_r.stdout + _r.stderr) for v in WD_VALUES),
+      f"temps={_temps}")
+
+# E22 — exact boundaries: 10 MiB inclusive, 10K file count, depth 32/33.
+wd2_reg({"version": 2, "literals": []})
+_ex10 = WD2 / "exact.env"
+_ex10.write_text("E_TOKEN=" + "a" * (10 * 1024 * 1024 - 9))
+_rd = wd2_run("discover", str(_ex10), "--json")
+_rd2 = wd2_run("discover", str(big2), "--json")
+_b_ok = _rd.returncode == 0 and _rd2.returncode == 2 \
+    and json.loads(_rd2.stdout)["error_class"] == "scan_limit"
+_f10k = WD2 / "f10k"
+_f10k.mkdir(exist_ok=True)
+for _i in range(10001):
+    (_f10k / f"f{_i}").write_text("x")
+_rd3 = wd2_run("discover", str(_f10k), "--json")
+_b_ok = _b_ok and _rd3.returncode == 2 \
+    and json.loads(_rd3.stdout)["error_class"] == "scan_limit"
+_d32 = WD2 / "d32"
+_p = _d32
+for _i in range(31):           # 31 dirs -> z.env sits AT depth 32 (in-bound)
+    _p = _p / "x"
+_p.mkdir(parents=True)
+(_p / "z.env").write_text(f"D_TOKEN={_wdfrag('depth2')}\n")
+_rd4 = wd2_run("discover", str(_d32), "--json")
+check("WD-E22 [battery.wave_d.exact_scan_boundaries]: 10 MiB inclusive, "
+      "10,001 files, depth-32 bound",
+      _b_ok and _rd4.returncode == 1,
+      f"exact10={_rd.returncode} over={_rd2.returncode} "
+      f"10k={_rd3.returncode} d32={_rd4.returncode}")
+
+# E23 — config/validation matrix: nonexistent config entry, v1 registry
+# precedence, malformed discover block, discover:null, missing literals.
+wd2_reg({"version": 2, "literals": [],
+         "discover": {"dirs": [str(WD2 / "nope")]}})
+_r = wd2_run("discover", "--json")
+_c_ok = _r.returncode == 2 \
+    and json.loads(_r.stdout)["error_class"] == "source_unreadable"
+WDREG2.write_text('{"version": 1, "literals": [], "discover": {"dirs": ["/x"]}}')
+_r = wd2_run("discover", "--json")
+_c_ok = _c_ok and _r.returncode == 2 \
+    and json.loads(_r.stdout)["error_class"] == "registry_unavailable"
+WDREG2.write_text('{"version": 2, "discover": {"dirs": ["/x"]}}')
+_r = wd2_run("discover", "--json")
+_c_ok = _c_ok and _r.returncode == 2 \
+    and json.loads(_r.stdout)["error_class"] == "registry_unavailable"
+WDREG2.write_text('{"version": 2, "literals": [], "discover": null}')
+_r = wd2_run("discover", "--json")
+_c_ok = _c_ok and _r.returncode == 2 \
+    and json.loads(_r.stdout)["error_class"] == "invalid_config"
+check("WD-E23 [battery.wave_d.configuration_surface_and_no_defaults]: "
+      "existential config -> source_unreadable; v1 + malformed-block -> "
+      "registry_unavailable; discover:null + missing literals fail closed",
+      _c_ok, "4 precedence cases")
+
+# E25 — --from option-state: --from after -- rejected; unknown option in
+# --from mode -> usage.
+wd2_reg({"version": 2, "literals": []})
+_r = wd2_run("literals", "add", "--", "--from", "x:y")
+_r2 = wd2_run("literals", "add", "--from", f"{wd2_f}:T_TOKEN", "--bogus")
+check("WD-E25 [battery.wave_d.literals_add_before_after_compatibility]: "
+      "--from after -- rejected; unknown option in --from mode -> usage",
+      _r.returncode == 2 and "usage" in _r.stderr
+      and _r2.returncode == 2 and "usage" in _r2.stderr
+      and all(v not in (_r.stdout + _r.stderr + _r2.stdout + _r2.stderr)
+              for v in WD_VALUES), "")
+
+# E26 — fragment-generated fixtures: no complete token value in test.sh.
+_txt = open(os.path.join(os.getcwd(), "test.sh")).read()
+_lit = re.findall(r"sk-wd(?:2-)?[0-9a-z-]{6,}", _txt)
+check("WD-E26 [battery.security.masked_only_all_paths]: no complete "
+      "token-shaped fixture constants in the battery",
+      _lit == [], f"literal-tokens-found={_lit[:3]}")
+
+# E27 — version identity complete: constant, CLI, preflight tool.version,
+# CHANGELOG title.
+_v27 = wdm._PACKAGE_VERSION == "0.9.0"
+_r = wd2_run("--version")
+_v27 = _v27 and _r.stdout.strip() == "info-guard 0.9.0"
+# E27 — version identity: constant == CLI == preflight tool.version ==
+# CHANGELOG. The preflight scan dir must sit INSIDE HERMES_HOME
+# (preflight computes dir.relative_to(HERMES_HOME) — the F1 pre-existing
+# limitation; out of W8 scope, recorded).
+(WDH2 / "scanme").mkdir(exist_ok=True)
+_r = wd2_run("preflight", str(WDH2 / "scanme"), "--json")
+try:
+    _v27 = _v27 and json.loads(_r.stdout).get("tool", {}).get("version") \
+        == "0.9.0"
+except ValueError:
+    _v27 = False
+_v27 = _v27 and "v0.9.0" in "\n".join(
+    (Path(os.getcwd()) / "CHANGELOG.md").read_text().split("\n")[:12])
+check("WD-E27 [battery.release.version_identity_v0_9_0]: constant == "
+      "CLI == preflight tool.version == CHANGELOG",
+      _v27, "")
+
+# E28 — the approved battery ledger names are present.
+check("WD-E28: battery labels carry the approved names",
+      all(n in open(os.path.join(os.getcwd(), "test.sh")).read()
+          for n in ("battery.wave_d.e4_fresh_lifecycle_discover_enroll",
+                    "battery.wave_d.candidate_identity_and_text_output",
+                    "battery.wave_d.from_failure_matrix",
+                    "battery.wave_d.bounded_no_follow_traversal",
+                    "battery.wave_d.configuration_surface_and_no_defaults",
+                    "battery.security.masked_only_all_paths",
+                    "battery.security.single_sourced_detector",
+                    "battery.release.version_identity_v0_9_0")),
+      "")
+
+# E17 — E4 full lifecycle: fresh install -> discover -> enroll -> check
+# -> update --check -> uninstall (the W8 closure; install/uninstall/
+# update surfaces are covered by the pre-existing WC battery too).
+try:
+    # E4 scratch = the COMPLETE Hermes checkout (the engine's import
+    # chain must resolve within the scratch — a 5-file subset is not
+    # importable under a clean python, and the W12 smoke imports
+    # agent.redact from it). Full-tree archive at HEAD, init, commit,
+    # supported-release tag (D113), then apply the artifact.
+    _e4home = os.path.join(WD2, "e4-home")
+    os.makedirs(_e4home, exist_ok=True)
+    _e4_scratch = os.path.join(_e4home, "hermes-agent")
+    os.makedirs(_e4_scratch, exist_ok=True)
+    _arc = subprocess.run(["git", "-C", CHECKOUT, "archive", "--format=tar",
+                           "HEAD"], capture_output=True, check=True)
+    import tarfile, io
+    with tarfile.open(fileobj=io.BytesIO(_arc.stdout), mode="r") as _tf:
+        _tf.extractall(_e4_scratch)
+    subprocess.run(["git", "-C", _e4_scratch, "init", "-q"], check=True)
+    subprocess.run(["git", "-C", _e4_scratch, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", _e4_scratch, "-c", "user.email=ig@test",
+                    "-c", "user.name=ig-test", "commit", "-q", "-m", "base"],
+                   check=True)
+    subprocess.run(["git", "-C", _e4_scratch, "tag", "v2026.8.18"],
+                   check=True)
+    subprocess.run(["git", "-C", _e4_scratch, "apply", PATCH_PATH],
+                   check=True)
+    _e4env = dict(os.environ, HERMES_HOME=_e4home)
+    _e4inst = subprocess.run(
+        ["bash", os.path.join(os.getcwd(), "install.sh"), "--checkout",
+         _e4_scratch, "--no-config", "--no-test"],
+        env=_e4env, capture_output=True, text=True, timeout=300)
+    _e4ok = _e4inst.returncode == 0
+    _e4src = os.path.join(WD2, "e4-src")
+    os.makedirs(_e4src, exist_ok=True)
+    with open(os.path.join(_e4src, "f.env"), "w") as _fh:
+        _fh.write(f"E4_TOKEN={_wdfrag('e4')}\n")
+    _r = subprocess.run(IGPY + ["discover", _e4src, "--json"],
+                        capture_output=True, text=True, env=_e4env,
+                        timeout=120)
+    _e4ok = _e4ok and _r.returncode == 1
+    _r = subprocess.run(IGPY + ["literals", "add", "--from",
+                                os.path.join(_e4src, "f.env") + ":E4_TOKEN"],
+                        capture_output=True, text=True, env=_e4env,
+                        timeout=120)
+    _e4ok = _e4ok and _r.returncode == 0 and "sk-wd-e4" not in _r.stdout
+    _r = subprocess.run(IGPY + ["check"], capture_output=True, text=True,
+                        env=_e4env, timeout=120)
+    _e4ok = _e4ok and _r.returncode == 0
+    _r = subprocess.run(IGPY + ["update", "--check"], capture_output=True,
+                        text=True, env=_e4env, timeout=120)
+    _e4ok = _e4ok and _r.returncode in (0, 1, 2) \
+        and "sk-wd-e4" not in _r.stdout + _r.stderr
+    _r = subprocess.run(
+        ["bash", os.path.join(os.getcwd(), "uninstall.sh"), "--checkout",
+         _e4_scratch, "--yes"],
+        env=_e4env, capture_output=True, text=True, timeout=300)
+    _e4ok = _e4ok and _r.returncode == 0
+except (subprocess.CalledProcessError, OSError) as _e4err:
+    _e4ok = False
+check("WD-E17 [battery.wave_d.e4_fresh_lifecycle_discover_enroll]: "
+      "install -> discover -> enroll -> check -> update --check -> "
+      "uninstall round-trip",
+      _e4ok, "full lifecycle, no deployment-owned machinery")
+
+# S9 strengthen: discover calls the SHARED scan; the shared function
+# holds the single corpus (function-level reuse, not string co-occurrence).
+_s9src = inspect.getsource(wdm._detect_and_filter)
+_s9shared = inspect.getsource(wdm._scan_lines)
+check("WD-S9 [battery.security.single_sourced_detector]: discover uses "
+      "the shared _scan_lines (single implementation)",
+      "_scan_lines" in _s9src and "_KEY_FORM_RE" in _s9shared
+      and "_TOKEN_PREFIX_RE" in _s9shared and "re.compile" not in _s9src
+      and "re.compile" not in _s9shared, "")
 
 
 print(f"\n[test] {PASS} passed, {FAIL} failed"

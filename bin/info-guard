@@ -700,16 +700,15 @@ def _displayable_value(value: str) -> bool:
     return v[0].isalnum() and v[-1].isalnum()
 
 
-def _key_scan(path: Path):
-    """Key-shape + token-prefix pass over one file. Returns list of
-    (cls, rule, line_no, value, masked_repr, context). The raw value is
-    returned so the setup wizard can register it — it is NEVER printed."""
+def _scan_lines(lines):
+    """SHARED key-shape + token-prefix pass over already-split text
+    lines — the ONE detector implementation used by both preflight
+    (`_key_scan`) and discover (`_detect_and_filter`), single-sourced
+    per S9/plan step 1.2-1.3 (build-diff MAJ-1 fold). Returns the
+    existing hit tuple shape (cls, rule, line_no, value, masked_repr,
+    context). The raw value is internal only — NEVER printed."""
     hits = []
-    try:
-        text = path.read_text(errors="replace")
-    except OSError:
-        return hits
-    for lineno, line in enumerate(text.splitlines(), 1):
+    for lineno, line in enumerate(lines, 1):
         line = line.rstrip("\n")
         for m in _KEY_FORM_RE.finditer(line):
             key, val = m.group(1), m.group(2)
@@ -731,6 +730,18 @@ def _key_scan(path: Path):
             hits.append(("TOKEN-SHAPE", "known-prefix", lineno, tok,
                          _mask_value(tok), ctx))
     return hits
+
+
+def _key_scan(path: Path):
+    """Key-shape + token-prefix pass over one file. Returns list of
+    (cls, rule, line_no, value, masked_repr, context). The raw value is
+    returned so the setup wizard can register it — it is NEVER printed.
+    File I/O only — the scan itself is the shared _scan_lines."""
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return []
+    return _scan_lines(text.splitlines())
 
 
 def _gitleaks_available() -> bool:
@@ -3384,6 +3395,8 @@ _DISCOVER_ERROR_CLASSES = frozenset((
 _MAX_DEPTH = 32                          # excluding the named root (root = 0)
 _MAX_FILES = 10000                       # global across all roots
 _MAX_FILE_BYTES = 10 * 1024 * 1024       # exactly 10,485,760 bytes in-bound
+# POSIX-only contract: no silent degradation (build-diff MIN-2 fold).
+_O_NOFOLLOW = os.O_NOFOLLOW
 
 
 class _DiscoverError(Exception):
@@ -3421,9 +3434,12 @@ def _load_registry_readonly():
         return None, False, None
     if doc.get("version") != _REGISTRY_VERSION:
         return None, False, None
-    raw = doc.get("literals")
-    if raw is not None and not isinstance(raw, list):
+    if "literals" not in doc or not isinstance(doc["literals"], list):
+        # Strict structure (plan 5.4, build-diff M8 fold): a missing or
+        # mistyped literals field is registry_unavailable, never an
+        # implicit empty registry.
         return None, False, None
+    raw = doc["literals"]
     entries, _n, _need = _normalize_entries(raw or [])
     return entries, True, doc
 
@@ -3440,12 +3456,14 @@ def _discover_envelope(status, candidates, error_class):
 
 
 def _discover_error_exit(error_class, message, json_mode):
-    """Exit-2 failure (plan 2.5/11.7): JSON -> envelope on stdout, stderr
-    EMPTY; text -> value-free stderr diagnostic, stdout empty."""
+    """Exit-2 failure (proposal §3.4 / plan 2.5/11.7): JSON -> envelope on
+    stdout, stderr EMPTY; text -> stderr EXACTLY `error: <class>\\n` with
+    no path/key/content (the message is internal-only, never printed)."""
     if json_mode:
-        print(json.dumps(_discover_envelope("error", [], error_class)))
+        print(json.dumps(_discover_envelope("error", [], error_class),
+                         ensure_ascii=False, indent=2))
         return 2
-    print(f"[info-guard] discover: {message}", file=sys.stderr)
+    print(f"error: {error_class}", file=sys.stderr)
     return 2
 
 
@@ -3456,11 +3474,9 @@ def _discover_validate_config(doc):
     Existential conditions (missing, inaccessible, special, symlink) are
     stage-5 concerns -> source_unreadable, identical to CLI paths.
     Returns the configured dirs list (may be empty)."""
-    if doc is None:
+    if doc is None or "discover" not in doc:
         return []
-    block = doc.get("discover")
-    if block is None:
-        return []
+    block = doc["discover"]
     if not isinstance(block, dict) or "dirs" not in block:
         raise _DiscoverError(
             "invalid_config",
@@ -3495,7 +3511,7 @@ def _open_nofollow(path):
     try:
         for i, p in enumerate(parts):
             final = (i == len(parts) - 1)
-            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            flags = os.O_RDONLY | _O_NOFOLLOW
             if not final:
                 flags |= os.O_DIRECTORY
             else:
@@ -3613,17 +3629,19 @@ def _walk_dir(fd, norm, depth, registry_hashes, out, state):
         try:
             if stat.S_ISDIR(est.st_mode):
                 child = os.open(name, os.O_RDONLY | os.O_DIRECTORY
-                                | getattr(os, "O_NOFOLLOW", 0), dir_fd=fd)
+                                | _O_NOFOLLOW, dir_fd=fd)
             else:
                 child = os.open(name, os.O_RDONLY | os.O_NONBLOCK
-                                | getattr(os, "O_NOFOLLOW", 0), dir_fd=fd)
+                                | _O_NOFOLLOW, dir_fd=fd)
         except OSError as e:
             raise _DiscoverError(
                 "source_unreadable",
                 f"entry unreadable: {child_norm}") from e
         try:
             ost = os.fstat(child)
-            if (ost.st_dev, ost.st_ino) != (est.st_dev, est.st_ino):
+            if ((ost.st_dev, ost.st_ino) != (est.st_dev, est.st_ino)
+                    or stat.S_ISREG(est.st_mode) != stat.S_ISREG(ost.st_mode)
+                    or stat.S_ISDIR(est.st_mode) != stat.S_ISDIR(ost.st_mode)):
                 raise _DiscoverError(
                     "source_unreadable",
                     f"directory-entry race: {child_norm}")  # plan 7.7
@@ -3677,19 +3695,21 @@ def _process_file(fd, norm, st, registry_hashes):
 
 
 def _detect_and_filter(data, norm, registry_hashes):
-    """Shared detect + filter pipeline for one file snapshot."""
+    """Shared detect + filter pipeline for one file snapshot. The scan
+    is the SHARED _scan_lines (single-sourced detector, S9); candidate
+    identity + enrollmentability + registry filtering use the
+    parser-normalized value from the SAME snapshot (non-mutating)."""
     text = data.decode("utf-8", errors="replace")
     lines = text.splitlines()
     hits = []
-    for lineno, line in enumerate(lines, 1):
-        for m in _KEY_FORM_RE.finditer(line):
-            key, val = m.group(1), m.group(2)
-            if val.lower() in _TRIVIAL_VALUES or re.fullmatch(r"\d{1,6}", val):
-                continue
-            if len(val) > 64 and not _VALUE_TOKEN_RE.match(
-                    val.strip().strip('"').strip("'")):
-                continue
-            hits.append((lineno, key, val))
+    for cls, rule, lineno, val, masked, _ctx in _scan_lines(lines):
+        if cls != "KEY-SHAPE":
+            continue            # TOKEN-SHAPE: no key -> never enrollable
+        # The full key (never truncated) is the masked_repr prefix;
+        # keys cannot contain "=" (VALID_KEY_RE), so the partition is
+        # unambiguous.
+        key = masked.partition("=")[0]
+        hits.append((lineno, key, val))
     if not hits:
         return []
     parsed, _saw_c, _saw_v = _parse_env_lines(lines)
@@ -3790,25 +3810,40 @@ def cmd_discover(args):
         except _DiscoverError as e:
             failures.append((os.path.abspath(p), e))
     if failures:
-        failures.sort(key=lambda t: t[0])   # normalized-source-bytes order
+        failures.sort(key=lambda t: os.fsencode(t[0]))
         e = failures[0][1]
         return _discover_error_exit(e.error_class, e.message, json_mode)
     # Stages 6-8 — collect + filter + order (Segment 2 pipeline)
     try:
         candidates = _discover_collect(roots, entries)
+        if json_mode:
+            escaped = [{"key": _discover_escape(c["key"]),
+                        "source": _discover_escape(c["source"]),
+                        "line": c["line"],
+                        "shape_class": _discover_escape(c["shape_class"]),
+                        "matched_pattern": _discover_escape(
+                            c["matched_pattern"])} for c in candidates]
+            print(json.dumps(_discover_envelope(
+                "candidates" if candidates else "clean", escaped, None),
+                ensure_ascii=False, indent=2))
+            return 1 if candidates else 0
+        if candidates:                  # text mode: one escaped line per
+            for c in candidates:        # pointer, five fields in order
+                print("\t".join(_discover_escape(str(c[k])) for k in (
+                    "key", "source", "line",
+                    "shape_class", "matched_pattern")))
+            return 1
+        return 0
     except _DiscoverError as e:
         return _discover_error_exit(e.error_class, e.message, json_mode)
-    if json_mode:
-        print(json.dumps(_discover_envelope(
-            "candidates" if candidates else "clean", candidates, None)))
-        return 1 if candidates else 0
-    if candidates:                      # text mode: one escaped line per
-        for c in candidates:            # pointer, five fields in order
-            print("\t".join(_discover_escape(str(c[k])) for k in (
-                "key", "source", "line",
-                "shape_class", "matched_pattern")))
-        return 1
-    return 0
+    finally:
+        # Root descriptors are retained for the traversal window; close
+        # them on success AND failure (build-diff m1 fold).
+        for _norm, fd, _isd, _st in roots:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 # Deterministic enrollment test hook (plan 14.7 / r3 MAJ-2 / battery 25):
@@ -3839,8 +3874,14 @@ def _lstat_nofollow(path):
             if stat.S_ISLNK(st.st_mode):
                 return None
             if i != len(parts) - 1:
-                nxt = os.open(p, os.O_RDONLY | os.O_DIRECTORY
-                              | getattr(os, "O_NOFOLLOW", 0), dir_fd=cur)
+                try:
+                    nxt = os.open(p, os.O_RDONLY | os.O_DIRECTORY
+                                  | _O_NOFOLLOW, dir_fd=cur)
+                except OSError:
+                    # A component changing type between stat and open
+                    # (or any other walk failure) fails closed — never
+                    # an uncaught exception (build-diff M3 fold).
+                    return None
                 os.close(cur)
                 cur = nxt
         return st
@@ -3889,8 +3930,9 @@ def _literals_add_from(selector, json_mode):
     # once relative to its verified parent; no second path lookup later.
     try:
         fd, st, norm = _open_nofollow(source)
-    except _DiscoverError as e:
-        return fail(e.message)
+    except _DiscoverError:
+        # Value-free: never echo the operator path (build-diff CRIT-1 fold).
+        return fail("source not accessible")
     if not stat.S_ISREG(st.st_mode):
         try:
             os.close(fd)
@@ -3902,13 +3944,32 @@ def _literals_add_from(selector, json_mode):
         # path (single grammar, shared with build/env --check).
         if st.st_size > _MAX_FILE_BYTES:
             return fail("source exceeds 10 MiB")
-        data = os.read(fd, _MAX_FILE_BYTES + 1)
-        if len(data) > _MAX_FILE_BYTES:
-            return fail("source grew past 10 MiB during read")
+        # Complete bounded read loop (build-diff B5 fold): read to EOF,
+        # cap at MAX+1, detect growth beyond the bound and read errors —
+        # the initial snapshot must be complete, never a partial read.
+        chunks = []
+        total = 0
+        while True:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                return fail("source changed during enrollment — aborted")
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_FILE_BYTES:
+                return fail("source exceeds 10 MiB during read")
+            chunks.append(chunk)
+        data = b"".join(chunks)
+        st_post = os.fstat(fd)
+        if len(data) != st.st_size or st_post.st_size != st.st_size:
+            # A pre-read truncation/rewrite or read-time growth must not
+            # become the accepted "initial" snapshot (build-diff M3 fold).
+            return fail("source changed during enrollment — aborted")
         lines = data.decode("utf-8", errors="replace").splitlines()
         parsed, _saw_c, _saw_v = _parse_env_lines(lines)
         if key not in parsed:
-            return fail(f"key '{key}' not found in source")
+            return fail("requested key not found in source")
         # Uniqueness: the parser is a dict (collapse hides duplicates);
         # count occurrences and fail closed on ambiguity (A30/A25).
         kc = 0
@@ -3921,7 +3982,7 @@ def _literals_add_from(selector, json_mode):
             if k == key and VALID_KEY_RE.match(k):
                 kc += 1
         if kc != 1:
-            return fail(f"key '{key}' is ambiguous (duplicate records)")
+            return fail("requested key is ambiguous (duplicate records)")
         value = parsed[key]
         # Value validation mirrors direct add: non-empty, no control
         # chars, no line terminators (fail closed, no write).
@@ -3932,6 +3993,34 @@ def _literals_add_from(selector, json_mode):
         # 14.5 — complete-file fingerprint over the SAME opened snapshot.
         fp = hashlib.sha256(data).hexdigest()
         st_initial = os.fstat(fd)
+        # 14.6/9 — registry preflight: ONE atomic read (bytes) used for
+        # BOTH the eligibility parse and the change snapshot — no
+        # separate parse + snapshot reads (build-diff MAJ-2 fold). The
+        # preflight sits BEFORE the test hook per the plan's step order,
+        # so a harness registry mutation lands in the stale window
+        # between this snapshot and the commit re-check (E21a).
+        try:
+            reg_bytes = CUSTOM_LITERALS.read_bytes()
+        except OSError:
+            return fail("registry unavailable")
+        reg_before = hashlib.sha256(reg_bytes).hexdigest()
+        try:
+            doc = json.loads(reg_bytes)
+        except ValueError:
+            return fail("registry unavailable")
+        if (not isinstance(doc, dict)
+                or doc.get("version") != _REGISTRY_VERSION
+                or "literals" not in doc
+                or not isinstance(doc["literals"], list)):
+            return fail("registry unavailable")
+        entries, _n, _w = _normalize_entries(doc["literals"])
+        vid = None
+        dup_kind = None
+        for item in entries:
+            if isinstance(item, dict) and item.get("value") == value:
+                vid = item.get("id")
+                dup_kind = _entry_kind(item)
+                break
         # 14.7 — deterministic test hook (harness-only DI seam).
         if _FROM_TEST_HOOK is not None:
             _FROM_TEST_HOOK(norm)
@@ -3958,23 +4047,14 @@ def _literals_add_from(selector, json_mode):
         if lst is None or (lst.st_dev, lst.st_ino) != (
                 st_initial.st_dev, st_initial.st_ino):
             return fail("source path replaced during enrollment — aborted")
-        # 14.6/9 — registry preflight: NON-MUTATING snapshot (no lazy
-        # backfill/migration), existing duplicate semantics.
-        entries, ok, doc = _load_registry_readonly()
-        if not ok:
-            return fail(f"{CUSTOM_LITERALS.name} unavailable")
-        reg_before = _registry_snapshot()
-        vid = None
-        dup_kind = None
-        for item in entries:
-            if isinstance(item, dict) and item.get("value") == value:
-                vid = item.get("id")
-                dup_kind = _entry_kind(item)
-                break
-        # 14.11-14.12 — COMMIT boundary: registry unchanged since the
-        # preflight, then the canonical atomic write (migration is
+        # 14.11-14.12 — COMMIT boundary: registry bytes unchanged since
+        # the preflight, then the canonical atomic write (migration is
         # permitted only inside this successful transaction).
-        if _registry_snapshot() != reg_before:
+        try:
+            if hashlib.sha256(CUSTOM_LITERALS.read_bytes()).hexdigest() \
+                    != reg_before:
+                return fail("registry changed concurrently — aborted")
+        except OSError:
             return fail("registry changed concurrently — aborted")
         if vid is not None:
             if dup_kind == _HONEYTOKEN_KIND:
@@ -4118,9 +4198,21 @@ def _literals_add(args):
             file_path = args[i + 1]
             i += 1
         elif not end_opts and a.startswith("--"):
+            if from_selector is not None:
+                # Unknown options in --from mode are usage failures
+                # before any registry/source access (build-diff M2 fold).
+                print("[info-guard] usage: unknown option in --from mode",
+                      file=sys.stderr)
+                return 2
             print(f"[info-guard] Warning: unknown option '{a}'",
                   file=sys.stderr)
         else:
+            if a == "--from":
+                # --from after the ordinary end-of-options marker is
+                # REJECTED, never a direct value (build-diff M2 fold).
+                print("[info-guard] usage: unexpected --from after the "
+                      "'--' end-of-options marker", file=sys.stderr)
+                return 2
             values.append(a)
         i += 1
     if from_selector is not None:
