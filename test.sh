@@ -317,6 +317,10 @@ subprocess.run(["git", "-C", scratch, "add", "-A"], check=True)
 subprocess.run(["git", "-C", scratch, "-c", "user.email=ig@test",
                 "-c", "user.name=ig-test", "commit", "-q", "-m", "base"],
                check=True)
+# hermetic version source for the install.sh version gate (D113): the
+# scratch target must carry a supported-release tag — CI runners have no
+# `hermes` on PATH for the fallback (2026-08-23, v0.8.0 CI exposure).
+subprocess.run(["git", "-C", scratch, "tag", "v2026.8.18"], check=True)
 subprocess.run(["git", "-C", scratch, "apply", PATCH_PATH], check=True)
 tampered_f = os.path.join(scratch, "gateway", "run.py")
 tampered_src = open(tampered_f).read()
@@ -479,6 +483,8 @@ subprocess.run(["git", "-C", scratch4, "add", "-A"], check=True)
 subprocess.run(["git", "-C", scratch4, "-c", "user.email=ig@test",
                 "-c", "user.name=ig-test", "commit", "-q", "-m", "base"],
                check=True)
+# hermetic version source for the install.sh version gate (D113) — see 11a.
+subprocess.run(["git", "-C", scratch4, "tag", "v2026.8.18"], check=True)
 rt_home = os.path.join(tmp, "roundtrip-home")
 env_rt = dict(os.environ)
 env_rt["HERMES_HOME"] = rt_home
