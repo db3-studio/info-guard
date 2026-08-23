@@ -80,6 +80,14 @@ def write(p, obj):
         json.dump(obj, f)
 
 tmp = tempfile.mkdtemp(prefix="info-guard-test-")
+
+# Version-identity anchor (IG D117): read the checked-out _PACKAGE_VERSION
+# once — the preflight header and --version assertions derive from it so the
+# battery never hardcodes a release version again (D116 #2 hermeticity; the
+# v0.8.0 release shipped "0.7.0" and these checks were hardcoded to match
+# the WRONG constant, so they passed green with a stale identity).
+_PKG_VER = re.search(r'_PACKAGE_VERSION = "([^"]+)"',
+                     Path(os.getcwd(), "bin", "info-guard").read_text()).group(1)
 pfile = os.path.join(tmp, "patterns.json")
 
 # ── A: scratch pattern file with synthetic probes ──────────────────────
@@ -666,7 +674,7 @@ pf = subprocess.run(
 pfo = pf.stdout + pf.stderr
 check("preflight: findings exit code 1", pf.returncode == 1,
       f"rc={pf.returncode} out={pfo[-300:]!r}")
-for section in ("Info Guard v0.7.0 — Preflight Security Assessment",
+for section in (f"Info Guard v{_PKG_VER} — Preflight Security Assessment",
                 "STATUS", "EXECUTIVE SUMMARY", "WHAT MATTERS",
                 "CREDENTIAL EXPOSURE BY FAMILY",
                 "EXPOSURE LOCATIONS",
@@ -826,7 +834,7 @@ ver = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "--version"],
     capture_output=True, text=True, timeout=60)
 check("--version prints the package version",
-      ver.returncode == 0 and ver.stdout.strip() == "info-guard 0.7.0",
+      ver.returncode == 0 and ver.stdout.strip() == f"info-guard {_PKG_VER}",
       f"rc={ver.returncode} out={ver.stdout.strip()!r}")
 
 # 12d. detection gaps (v0.3.1): Authorization family + dot-structured
@@ -3896,12 +3904,18 @@ def _wc_target(home, tag="v2026.8.18"):
 
 
 def _wc_install(home, target, extra=()):
-    """The real install.sh against a scratch target (internal-invocation
-    flags: --no-config --no-cron; --no-test keeps the fixture battery out —
-    the engine behavior is this battery's own job)."""
+    """The install.sh from a PINNED fixture pkg against a scratch target
+    (internal-invocation flags: --no-config --no-cron; --no-test keeps the
+    fixture battery out — the engine behavior is this battery's own job).
+    The pkg's constant is pinned to the sim baseline (IG D117 / D116 #2):
+    the manifest version must NEVER come from the real checkout's
+    _PACKAGE_VERSION — the v0.8.0 battery recorded the tree's stale 0.7.0
+    here and stayed green; once the constant moved to 0.8.1 the sim broke
+    (previous_version 0.8.1 where the transaction expects 0.7.0)."""
     env = _wc_env(home)
+    pkg = _wc_pkg()
     return subprocess.run(
-        ["bash", os.path.join(os.getcwd(), "install.sh"), "--checkout",
+        ["bash", str(pkg / "install.sh"), "--checkout",
          str(target), "--no-config", "--no-cron", "--no-test"] + list(extra),
         env=env, capture_output=True, text=True, timeout=600)
 
@@ -3917,6 +3931,14 @@ def _wc_pkg(battery_rc=0, version="0.7.0"):
         dst = pkg / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_text(src.read_text())
+    # Hermetic fixture (IG D117 / D116 #2): pin the copied constant to the
+    # declared <version> — the update simulation must be self-consistent
+    # regardless of the checked-out _PACKAGE_VERSION (the v0.8.0 battery
+    # silently inherited the tree's stale constant and passed green).
+    _ig_pkg = pkg / "bin" / "info-guard"
+    _ig_pkg.write_text(_ig_pkg.read_text().replace(
+        f'_PACKAGE_VERSION = "{_PKG_VER}"',
+        f'_PACKAGE_VERSION = "{version}"', 1))
     stub = "#!/usr/bin/env bash\n" \
            "# WC fixture battery stub (never the real test.sh — the real\n" \
            "# battery runs OUTSIDE the fixture package; this keeps update's\n" \
@@ -3947,8 +3969,12 @@ def _wc_remote(pkg, new_version=None):
         subprocess.run(["git", "-C", str(pkg), "checkout", "-q", "-b",
                         "wc-bump"], check=True)
         ig = pkg / "bin" / "info-guard"
+        # bump whatever constant the fixture currently carries (never a
+        # hardcoded release version — D116 #2 hermeticity, IG D117)
+        _cur = re.search(r'_PACKAGE_VERSION = "([^"]+)"',
+                         ig.read_text()).group(1)
         ig.write_text(ig.read_text().replace(
-            '_PACKAGE_VERSION = "0.7.0"',
+            f'_PACKAGE_VERSION = "{_cur}"',
             f'_PACKAGE_VERSION = "{new_version}"', 1))
         subprocess.run(["git", "-C", str(pkg), "add", "-A"], check=True)
         subprocess.run(["git", "-C", str(pkg), "-c", "user.email=ig@test",

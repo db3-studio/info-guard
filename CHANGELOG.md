@@ -150,6 +150,13 @@ amended by IG D105).
   README ×2, format-spec, CI matrix ref list + all-five→all-six).
 
 ### Fixed
+- **Version-identity defect (IG D117, v0.8.1)** — the v0.8.0 tag shipped
+  `_PACKAGE_VERSION = "0.7.0"` (the bump chain broke at the release step);
+  `--version` and the preflight header printed the wrong version and W10
+  `update --check` always reported an update available (constant 0.7.0 vs
+  v0.8.0 remote). The constant is now bumped to "0.8.1" (identity-only;
+  the code itself is v0.8.0 behaviorally). Release checklist hardened with
+  a pre-tag assertion that `_PACKAGE_VERSION` equals the intended tag.
 - **README path-consistency pass** — every user-facing invocation now uses
   the absolute `~/.info-guard/...` form (works from any cwd; matches the
   canonical install location and the cron example); stale counts removed
