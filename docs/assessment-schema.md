@@ -11,11 +11,11 @@ credential-shaped value set over time against a separate baseline file
 Raw values NEVER enter this object — every value field is masked 2+2 via
 the scanner's mask, or `***`.
 
-**v0.6.0 (Wave A):** schema id unchanged (`info-guard/assessment/v1`);
+**v0.6.0:** schema id unchanged (`info-guard/assessment/v1`);
 every addition is additive per the taxonomy — `value_id` annotation on
-registered KNOWN rows (IG D73), KNOWN-row rules extended for env rows.
+registered KNOWN rows, KNOWN-row rules extended for env rows.
 The complete envelope/versioning doctrine, exit table (0/1/2/3/4, 4
-reserved), and P3 seams live in `docs/format-spec.md` ("Contract
+reserved), and cross-surface seams live in `docs/format-spec.md` ("Contract
 foundation"); the two-part consumer obligations are stated below.
 
 ## Architecture
@@ -152,7 +152,7 @@ means every raw hit is classified into exactly one of:
 | `distinct_values` | the rotate list: distinct credential-shaped values across the scan | value-dedup |
 | `known` | distinct KNOWN `.env` values (v0.5.0 — identity-verified, the new tier) | value-dedup |
 | `known_rows` | distinct KNOWN rows (v0.5.0 — `file:line:value` level; `known ≤ known_rows`, the partition reconciliation) | deduped |
-| `honeytoken` | distinct canary values matched (v0.7.0, IG D103 — a registered `kind: honeytoken` value found at rest = canary-touch; the TOP tier, wins over every class below) | value-dedup |
+| `honeytoken` | distinct canary values matched (v0.7.0 — a registered `kind: honeytoken` value found at rest = canary-touch; the TOP tier, wins over every class below) | value-dedup |
 | `honeytoken_rows` | distinct HONEYTOKEN rows (v0.7.0 — `file:line:value` level; `honeytoken ≤ honeytoken_rows`) | deduped |
 | `key_name_mentions` | everything else that isn't masked — lines that mention a secret-sounding key, including reference/noise rows (code refs `${…}`, paths, markup; future v2 may split a 4th `reference_noise` tier) | `n_key` |
 | `already_masked` | values already `***` in the source (prevention layer working) | `n_mask` |
@@ -183,10 +183,10 @@ activeness); v0.5.0 activates it in place: `true` when ≥1 KNOWN `.env`
 row exists, `null` otherwise. `null` deliberately covers BOTH "KNOWN
 pass disabled" (no usable `.env` sources) and "pass active, no match" —
 the two are not distinguished (documented; the text report's
-disabled line is the human-facing distinction). **Wave A semantics
-(v0.6.0):** `null` = pass disabled or no identity-verified matches;
+disabled line is the human-facing distinction). **v0.6.0 semantics:**
+`null` = pass disabled or no identity-verified matches;
 `true` = ≥1 identity-verified KNOWN value; **`false` is NOT emitted by
-Wave A — no output path produces it, and an unexpected `false` MUST be
+v0.6.0 — no output path produces it, and an unexpected `false` MUST be
 handled as `null` under preserve/report behavior**. It is NOT live
 credential validation. A future validation step may fill
 `{"confirmed_active": n, "confirmed_inactive": n,
@@ -221,7 +221,7 @@ key family or a file/area (e.g. `logs/agent.log`).
 attribute the value to a family; `value_masked` is the scanner's actual 2+2
 mask, never re-formatted.
 
-**KNOWN rows (v0.5.0, IG D57–D62/D70–D75; env-row rules v0.6.0, IG D71/D73):**
+**KNOWN rows (v0.5.0; env-row rules v0.6.0):**
 a KNOWN row is identity-verified — the value matches a current eligible
 `.env` source value. Row rules, enforced across every row-bearing path
 (`top_values[]`, `families.items[]`, `locations[]`, `affected_files[]`):
@@ -231,9 +231,9 @@ a KNOWN row is identity-verified — the value matches a current eligible
   incl. same-line repeats).
 - `known == (type == "KNOWN")` — `type` is the authoritative finding-class
   field; `known` is a derived convenience flag, false for every future tier
-  (e.g. a P3 HONEYTOKEN).
+  (e.g. a HONEYTOKEN row).
 - non-KNOWN rows MUST NOT carry `known`/`source_key` — absent, never null.
-- `value_id` (v0.6.0, IG D73): KNOWN rows carry `value_id` **iff** the
+- `value_id` (v0.6.0): KNOWN rows carry `value_id` **iff** the
   value is registry-registered (lookup at row-build time) — absent, never
   null. The annotation never affects matching or counts (see the consumer
   obligations below).
@@ -244,7 +244,7 @@ a KNOWN row is identity-verified — the value matches a current eligible
   (identity beats shape-guess; the dropped shape row is never counted as
   credential-shaped).
 
-**HONEYTOKEN rows (v0.7.0, IG D103 — the top tier):** a canary row is
+**HONEYTOKEN rows (v0.7.0 — the top tier):** a canary row is
 identity-verified by construction — the value is a registered
 `kind: honeytoken` entry matched exactly in the scan (canary-touch
 detection fact, never "leak"/"confirmed"). Row rules:
@@ -254,7 +254,7 @@ detection fact, never "leak"/"confirmed"). Row rules:
   are registered by construction); `count` = occurrences; `family` is
   `null` (unattributed, the existing nullable contract).
 - `source_key` is present ONLY when the canary is also a live `.env`
-  value (§4.3 O5 — both facts reported; the tier still wins).
+  value (both facts reported; the tier still wins).
 - The HONEYTOKEN tier wins a `file:line:value` row over KNOWN,
   credential-shaped, key-name-mention, and already-masked classes — one
   row per `file:line:value`, never a second tier row. `totals`
@@ -287,14 +287,14 @@ file.
 - `scan.generated` is ISO-8601 UTC; the text renderer reformats for display
   (renderer owns language).
 
-## Consumer obligations (Wave A, v0.6.0)
+## Consumer obligations (v0.6.0)
 
-Schema `info-guard/assessment/v1` is unchanged in v0.6.0 — every Wave A
+Schema `info-guard/assessment/v1` is unchanged in v0.6.0 — every v0.6.0
 addition is additive. The complete envelope/versioning doctrine, nullable
-field list, exit table, and P3 seams live in `docs/format-spec.md`
+field list, exit table, and cross-surface seams live in `docs/format-spec.md`
 ("Contract foundation").
 
-**Two-part forward-compatibility contract (IG D81/D85):**
+**Two-part forward-compatibility contract:**
 
 1. **Syntactic tolerance** — unknown fields, row types, and enum values
    MUST NOT cause parsing failure or be treated as malformed input.
@@ -308,7 +308,7 @@ field list, exit table, and P3 seams live in `docs/format-spec.md`
 `info-guard/<surface>/v<major>[.<minor>]`; never compare the full string
 literally. Unknown major MAY be rejected; unknown minor MUST be accepted.
 
-Unknown-value behavior at Wave A:
+Unknown-value behavior at v0.6.0:
 
 | Field / family | Required behavior |
 |---|---|
@@ -327,7 +327,7 @@ annotation fields set to `null`; any field outside the nullable list
 (`family`, `resolved_values[].value_masked`, `status.confirmed_active`)
 emitted as `null`.
 
-**`value_id` annotation (v0.6.0, IG D73):** read-only, annotation-only
+**`value_id` annotation (v0.6.0):** read-only, annotation-only
 lookup at row-build time — it NEVER affects matching, counts, or
 classification. `value_id` appears on a KNOWN row iff the value is
 registry-registered; absent, never null. Registry membership itself IS a

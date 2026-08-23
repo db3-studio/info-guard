@@ -1,7 +1,7 @@
 # Info Guard — Watch JSON schema (`info-guard/watch/v1`)
 
 The machine-readable result of `info-guard watch` — the **public delta
-result** (proposal-review amendment 1, IG D49). Where
+result**. Where
 [assessment.json](assessment-schema.md) is the preflight point-in-time
 snapshot, watch/v1 is the change report: what differs between the
 baseline snapshot and the current scan, across three tracks — exposure
@@ -9,20 +9,20 @@ baseline snapshot and the current scan, across three tracks — exposure
 state (transitions).
 
 **Status:** shipped with v0.4.0 (2026-08-20); **`exposure.protected_values`
-added v0.4.1 (2026-08-20, IG D51–D56)** — additive only, schema stays
+added v0.4.1 (2026-08-20)** — additive only, schema stays
 `watch/v1`. Independent AI plan review
-amended the row shape pre-build (review MAJ A3): exposure rows carry
+amended the row shape pre-build: exposure rows carry
 `value_masked` (2+2) — **`value_sha256` is FORBIDDEN in this object**
 (the private 0600 baseline keeps sha256; this is the public surface, and
 sha256 of low-entropy values is brute-forceable). **`value_id` added
-v0.4.2 (2026-08-20, IG D64–D69)** — additive opaque registration ids on
+v0.4.2 (2026-08-20)** — additive opaque registration ids on
 protected rows (protected_values + the overlaid new/changed rows), so
 consumers can join an alert to the exact `custom_literals.json` entry.
-**v0.6.0 (Wave A, IG D71/D73):** additive — watch runs the `.env` pass;
+**v0.6.0:** additive — watch runs the `.env` pass;
 env-matched rows gain `source` + `source_key`; `value_id` extends to env
 rows (present iff registry-registered, absent never null); the full
 transition table T1–T8 (incl. T3b detection-loss and T8 config-only) is
-normative; schema stays `watch/v1`. See the Wave A section below.
+normative; schema stays `watch/v1`. See the v0.6.0 section below.
 
 ## Architecture
 
@@ -114,8 +114,7 @@ no `value_id` — unregistered). The `changed_values[]` / `protected_values[]`
 rows show the collision case: the value is in `.env` as `AGH_PIN` AND
 registry-registered — `source: "literal"` wins precedence (P-C), yet
 `source_key` is still present (present iff env-matched, regardless of who
-won precedence), and both rows carry the same `value_id` (one event, one id —
-IG D54).
+won precedence), and both rows carry the same `value_id` (one event, one id).
 
 ## Fields
 
@@ -169,14 +168,14 @@ family name, or `null` for bare tokens (the terminal renders
   Rows carry `count` (now) and `count_before`; the terminal renders
   `+N/-N`. **Informational (exit 0)** — applies to **non-protected**
   changed values; protected rows are overlaid (below).
-- `protected_values` — **(v0.4.1, additive, IG D51–D56)** the
+- `protected_values` — **(v0.4.1, additive)** the
   protected-value overlay: every current-scan value whose exact sha256
   matches a `custom_literals.json` fingerprint (the app's known-value
   registry). Row shape `{value_masked (2+2), type, family, count,
   count_before? (increased/decreased only), delta ∈ {new, increased,
   decreased, unchanged}, value_id (v0.4.2)}` — **never sha256** (same
   surface rule as every exposure row). `new`/`increased` → **exit 1** (or **exit 4** for a `HONEYTOKEN` row —
- canary-touch, IG D103);
+ canary-touch);
  `decreased`/`unchanged` → informational (exit 0). A value absent from
  the scan never appears here — it surfaces via `resolved_values`
  (which **never carries a `value_id`** — a resolved row is not
@@ -192,23 +191,23 @@ family name, or `null` for bare tokens (the terminal renders
  is exact-value and limited to the credential-shaped scan domain (a
  PII-only literal never matches, by design).
 
- **HONEYTOKEN rows (v0.7.0, IG D103):** a canary (`kind: honeytoken`)
+ **HONEYTOKEN rows (v0.7.0):** a canary (`kind: honeytoken`)
  in the scan serializes ONLY here in `protected_values[]` — never in
- `new_values[]`/`changed_values[]`/`resolved_values[]` (one event, IG
- D54). Row shape as above with `type: "HONEYTOKEN"` + `value_id` (the
+ `new_values[]`/`changed_values[]`/`resolved_values[]` (one event).
+ Row shape as above with `type: "HONEYTOKEN"` + `value_id` (the
  canary's registry id — always present, canaries are registered by
  construction). `delta: "new"|"increased"` → **exit 4** (dominates 1);
  baselined-present `delta: "unchanged"` → exit 0; absent → no row
  (absent canaries are absent, never resolved). A canary that is also a
  live `.env` value is still `HONEYTOKEN` and carries `source_key`.
 
- ### `review_list` (v0.7.0, additive — IG D103, W2)
+ ### `review_list` (v0.7.0, additive)
 
  Report-only SUSPICIOUS surface: ALL current-scan gitleaks
  `generic-api-key` rows (the SUSPICIOUS tier), deduped by value with
  `count` = current-scan occurrences. Row shape mirrors `new_values[]`
  (`value_masked` 2+2, `type: "SUSPICIOUS"`, `family`, `count`) — never
- sha256. **Never raises the exit** (D8 discipline: findings listed,
+ sha256. **Never raises the exit** (findings listed,
  never alerted; the deployment may review/alert at its discretion).
  Values represented by a HONEYTOKEN row are EXCLUDED (one event). Not
  delta-filtered, not baseline-filtered — unchanged rows remain present
@@ -223,7 +222,7 @@ family name, or `null` for bare tokens (the terminal renders
  on this flag + the engine state. Present on every watch run; never
  emitted by preflight.
 
-### `value_id` (v0.4.2, additive — IG D64–D69)
+### `value_id` (v0.4.2, additive)
 
 An opaque 16-hex random identifier assigned to each `custom_literals.json`
 entry at registration (registry v2 — `{"version": 2, "literals":
@@ -233,8 +232,8 @@ protected rows only:
 - `exposure.protected_values[]` — every row carries the matched entry's
   `value_id`.
 - `exposure.new_values[]` / `exposure.changed_values[]` — the overlaid
-  protected row carries the **SAME** `value_id` (one event, one id —
-  IG D54); unregistered rows have **no `value_id` key at all** (absent,
+  protected row carries the **SAME** `value_id` (one event, one id);
+  unregistered rows have **no `value_id` key at all** (absent,
   never null).
 
 **Definition:** `value_id` is a stable opaque identifier for a
@@ -251,12 +250,11 @@ consumer's registry lookup is a plain file read; no pepper, no crypto).
 
 **Not a security token, not a leak verdict:** the id proves *which
 registered value matched* — it is not a credential, not a hash of one,
-and watch never claims a leak (D52 vocabulary unchanged). The terminal,
+and watch never claims a leak (leak vocabulary unchanged). The terminal,
 the baseline, error paths, and debug output never carry `value_id`
-(D66 surface rule); raw values and sha256 stay off every surface
-(D49/D56).
+(surface rule); raw values and sha256 stay off every surface.
 
-**Env-row rules (v0.6.0, IG D71/D73):**
+**Env-row rules (v0.6.0):**
 - `value_id` appears on env-matched rows (`new_values[]`,
   `changed_values[]`, `protected_values[]`) **iff** the value is
   registry-registered — **unregistered env rows have no `value_id`**
@@ -265,11 +263,11 @@ the baseline, error paths, and debug output never carry `value_id`
   unchanged — a resolved row is not registry-joinable).
 - On a collision (env-matched AND registered), the overlay row and the
   `protected_values[]` row carry the **same** `value_id` — one event, one
-  id (IG D54); consumers dedup across arrays by `value_id` when present,
+  id; consumers dedup across arrays by `value_id` when present,
   else `value_masked`.
 - IDs are CSPRNG-generated and independent of the value (no hash,
-  truncation, or keyed derivation — IG S1) and locally scoped per
-  installation; Wave A emits no installation identifier.
+  truncation, or keyed derivation) and locally scoped per
+  installation; v0.6.0 emits no installation identifier.
 - `new_families` / `resolved_families` — family-name rollups of the
   above (raw names, sorted, bare-token excluded).
 - `changed_files` — `{file, before, after}` per file whose
@@ -278,7 +276,7 @@ the baseline, error paths, and debug output never carry `value_id`
 
 ### `protection`
 Counts and fingerprints-derived deltas ONLY — **raw literals never
-appear, not even masked** (guidance's explicit don't; IG D45). The
+appear, not even masked** (guidance's explicit don't). The
 baseline stores sha256 fingerprints; diffs are set differences
 (duplicates = one, order-insensitive).
 
@@ -298,9 +296,9 @@ baseline stores sha256 fingerprints; diffs are set differences
 A custom-literal add followed by `build` fires BOTH `custom_literals`
 and `redact_patterns` deltas **by design**: the first confirms the
 hand-edit landed in the source, the second that it landed in the
-enforcement artifact (IG D50 — the duplication is deliberate).
+enforcement artifact (the duplication is deliberate).
 
-**Wording contract (IG D50):** watch reports configuration deltas —
+**Wording contract:** watch reports configuration deltas —
 never effectiveness. "Protection configuration changed" is the only
 claim; whether the change reduced exposure is answered by the next
 preflight.
@@ -308,7 +306,7 @@ preflight.
 ### `engine`
 Transition facts: `state_before`/`state_after` (`active` | `partial` |
 `none`) and `version_before`/`version_after` (null when no install
-manifest). Exit-code contract (IG D47) — transitions that alert:
+manifest). Exit-code contract — transitions that alert:
 
 | Transition / event | Exit |
 |---|---|
@@ -350,7 +348,7 @@ The baseline is not part of this public contract — consumers read
 watch/v1. It lives under `<state>/info-guard/`, which is not in the
 default scan set — Info Guard never scans its own artifacts.
 
-## Wave A (v0.6.0) — `.env` match source and transitions (IG D71/D73/D62)
+## v0.6.0 — `.env` match source and transitions
 
 Watch runs the same `.env` pass as preflight (v0.6.0). The env set is a
 **match source, not tracked state** — classification is per-run; the
@@ -366,7 +364,7 @@ Additive row fields on `new_values[]`, `changed_values[]`,
 
 - `source` — the **precedence winner**: `"env"` (per-run `.env` index) or
   `"literal"` (registry); never `"both"`. **Literal wins (P-C)** — the
-  registry is the authoritative declaration (D52); on a collision both
+  registry is the authoritative declaration; on a collision both
   annotations are still carried, so no information is lost.
 - `source_key` — the env key of the `known-env` match; **present iff an env
   match exists, regardless of who won precedence** — a `source: "literal"`
@@ -379,33 +377,33 @@ Additive row fields on `new_values[]`, `changed_values[]`,
 
 ### Transition table T1–T8
 
-All transitions are per value hash; the D53 counts machine is preserved.
+All transitions are per value hash; the counts machine is preserved.
 
 | # | Transition | Definition | Event / exit |
 |---|---|---|---|
 | T1 | **added** | value not in baseline, detected in scan (any source) | `new_values[]` → **exit 1**; env-matched rows carry `source: "env"` + `source_key` |
-| T2 | **removed** (from scan) | in baseline, absent from current scan | `resolved_values[]` (D46 wording) → exit 0 |
-| T3 | **`.env`-leave** (D62) | value has no env match in the CURRENT run's index | current-run reclassification, **no event, no exit change**: row stays (still in scan), carries no `source_key`/env classification → shape (if unregistered) or `literal` (if registered — registry membership is unaffected by `.env` removal). If it also left the scan → T2. Per-run hashing → no `--reset` needed on `.env` edits |
-| T3b | **detection loss** | `.env`-leave of a value detectable ONLY via the env pass (no shape qualification, unregistered) — still in scan, but no longer detectable by any pass | `resolved_values[]` with the D46 wording applied literally — reads as remediation, but the cause is loss of detection capability, not removal of exposure → exit 0 |
+| T2 | **removed** (from scan) | in baseline, absent from current scan | `resolved_values[]` (resolved-value wording) → exit 0 |
+| T3 | **`.env`-leave** | value has no env match in the CURRENT run's index | current-run reclassification, **no event, no exit change**: row stays (still in scan), carries no `source_key`/env classification → shape (if unregistered) or `literal` (if registered — registry membership is unaffected by `.env` removal). If it also left the scan → T2. Per-run hashing → no `--reset` needed on `.env` edits |
+| T3b | **detection loss** | `.env`-leave of a value detectable ONLY via the env pass (no shape qualification, unregistered) — still in scan, but no longer detectable by any pass | `resolved_values[]` with the resolved-value wording applied literally — reads as remediation, but the cause is loss of detection capability, not removal of exposure → exit 0 |
 | T4 | **replaced** (same key, new value) | env key K: old value absent from the current index, new value present | old value → T3 current-run path (T4 emits no event for the old value); new value → T1 if detected in scan (exit 1). If the replacing value is ALSO registry-registered → T1 row carrying both `source_key` + `value_id` |
 | T5 | **duplicated** | same value under 2+ env keys, or new scan locations | 2+ keys → ONE row, `source_key` = alphabetically-first key; new locations → count increase → `increased` → **exit 1** |
 | T6 | **moved** | value moves files, total count unchanged | `unchanged` → exit 0 |
 | T7 | **increased / decreased** | count change vs baseline | increased → **exit 1**; decreased → exit 0 |
 | T8 | **config-only** | registry-membership change with unchanged scan state — e.g. self-fill registers an already-baselined value; count/scan presence unchanged | `protected_values[]` appearance with `delta: "unchanged"`; **no `new_values[]` row, no exit raise (exit 0)** — the value was already at rest and already in the scan; registration changes only its classification/overlay membership |
 
-**Collision / overlay (D54 one-event rule):** a value that is env-matched
-AND registered appears once in `protected_values[]` (delta per D53) and
+**Collision / overlay (one-event rule):** a value that is env-matched
+AND registered appears once in `protected_values[]` (delta per the counts machine) and
 once in the overlay (`new_values[]`/`changed_values[]`) — same `value_id`
 on both, ONE event; `pm_alarm` (delta new/increased) → exit 1 unchanged.
 "One row, never two" means one row per array — consumers dedup across
 arrays by `value_id` when present, else `value_masked`.
 
-**`.env`-leave wording (D62/D46, informational, exit 0):** "No longer
+**`.env`-leave wording (informational, exit 0):** "No longer
 detected in the current scan scope. This does not confirm that the
 credential is dead or revoked." T3 itself emits no event — the wording
 applies to T2/T3b `resolved_values[]` rows.
 
-### Watch exit contract (Wave A)
+### Watch exit contract (v0.6.0)
 
 Usage or operational failure → **2**; else ANY of `new_values`, increased
 exposure count (T5/T7), engine degradation, new/increased protected alarm
@@ -416,7 +414,7 @@ preflight-only (P-F). Exit 4 is reserved and never emitted. JSON emission:
 `--json` stdout stays pure JSON on 0/1; on an operational failure (exit 2)
 the delta object is still emitted with the engine state carried in
 `engine.state_after` — the exit code, not the absence of JSON, is the
-operational signal (v0.5.1 IG D94 behavior retained). Full doctrine:
+operational signal (v0.5.1 behavior retained). Full doctrine:
 `docs/format-spec.md` ("Contract foundation").
 
 ### Mandatory first-run upgrade re-baseline (v0.5.x → v0.6.0)
@@ -432,7 +430,7 @@ unchanged — the population change is the semantic change.
 
 ## Consumer obligations (v0.6.0)
 
-Two-part forward-compatibility contract (IG D81/D85), mandatory for
+Two-part forward-compatibility contract, mandatory for
 watch/v1 consumers:
 
 1. **Syntactic tolerance** — unknown fields, row types, and enum values
@@ -447,7 +445,7 @@ watch/v1 consumers:
 `info-guard/<surface>/v<major>[.<minor>]`; never compare the full string
 literally. Unknown major MAY be rejected; unknown minor MUST be accepted.
 
-Unknown-value behavior at Wave A:
+Unknown-value behavior at v0.6.0:
 
 | Field / family | Required behavior |
 |---|---|
@@ -460,6 +458,6 @@ Unknown-value behavior at Wave A:
 
 Additive-only evolution is the producer side of the same contract — no
 field is removed, retyped, made required, or semantically redefined
-without a major bump and the D75 packaging rule. P3 seams S1–S4 (value_id
+without a major bump and the packaged-contract-change rule. Cross-surface seams (value_id
 monomorphism, tier-enum growth, exit-4 reservation, additive-only schema
 evolution) are declared in `docs/format-spec.md`.

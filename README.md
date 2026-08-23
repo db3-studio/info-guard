@@ -95,7 +95,7 @@ it is reported as a **KNOWN** (identity-verified) row, marked
 `KNOWN (your .env values) — N in M files`. This makes the preflight
 claim literal: it really does check whether `.env` values are showing
 up in sessions, logs, and cron output — no registration, no config.
-**v0.6.0 (Wave A): the same env pass now powers `watch`** — `.env`
+**v0.6.0: the same env pass now powers `watch`** — `.env`
 values matched in a watch scan become env rows (`source: "env"`,
 `source_key`) under the T1–T8 transition table — **and `setup`**, which
 can register discovered `.env` values in one group step (see below).

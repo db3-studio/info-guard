@@ -2,14 +2,13 @@
 
 All notable changes to Info Guard are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
-> Convention: micro-version fixes within the same workstream are consolidated into the latest entry of that wave, not captured per tag.
+> Convention: micro-version fixes within the same workstream are consolidated into the latest entry of that release, not captured per tag.
 
 ## [v0.8.0] - 2026-08-23
 
-Wave C (P4 Self-Sustain, IG D113) — Phase A: `update` (W10), patch heal
-(W11), batteries in `check` (W12), and the cron offering (W6). Binding
-contract: `proposals/self-sustain.md` v1.6 (workspace). Phase B (viewers)
-ships in the same v0.8.0 release.
+Self-maintenance: `update` (check/apply/rollback), patch heal
+(`check --heal`), a seven-check masking smoke and the sandboxed battery in
+`check`, the cron-install offering, and masked viewers (`pipe`/`view`/`env`).
 
 ### Added
 - **`info-guard update [--check] [--json] [--rollback]`** — updates the
@@ -49,7 +48,7 @@ ships in the same v0.8.0 release.
 - **Stale-cron probe in `check`** — read-only warning when a managed line
   points at a missing or version-stale binary (warning is exit 0 — not a
   health verdict; documented limitation).
-- **`info-guard pipe`** (Phase B, W13) — masks any stdin stream against
+- **`info-guard pipe`** — masks any stdin stream against
   the registry. **Fail-closed:** a missing/unreadable pattern file exits
   2 with `masking: unavailable (no pattern file — run install.sh +
   build)` and emits nothing (no passthrough); an empty registry is
@@ -57,7 +56,7 @@ ships in the same v0.8.0 release.
   exact literals honor per-entry `mask` style and the file's default
   head/tail/floor; `key_patterns` values are masked in `KEY=value`,
   `KEY: value`, and JSON forms.
-- **`info-guard view <surface> <arg>`** (Phase B, W13) — masked viewers
+- **`info-guard view <surface> <arg>`** — masked viewers
   for `systemd-unit <name>` (system then `--user` fallback),
   `docker-env <container>`, `compose-config <path>`, and `file <path>`.
   Child processes are invoked by argument vector only (never a shell
@@ -65,7 +64,7 @@ ships in the same v0.8.0 release.
   forwarded raw — fixed value-free diagnostics (`source: not found` /
   `source: failed` / `masking: unavailable`) carry no child output and
   never echo the operator's argument.
-- **`info-guard env [FILE] [--check|--keys]`** (Phase B, W13) — keys +
+- **`info-guard env [FILE] [--check|--keys]`** — keys +
   lengths only, never values (`KEY = <N chars>`, code-point counts;
   blank lines preserved; comments and malformed lines dropped).
   `--check` is a **non-executing** grammar validation sharing `build`'s
@@ -93,15 +92,13 @@ ships in the same v0.8.0 release.
   (unrelated entries untouched).
 
 ### Fixed
-- (Phase A surfaces carry the preflight/watch 0–4 ladder untouched; the
+- (The preflight/watch 0–4 ladder is untouched; the
   update/heal/cron contracts are additive.)
 
 
 ## [v0.7.0] - 2026-08-22
 
-Wave B (P3, IG D103) — honeytokens + exit 4 normative + `review_list`
-(W2). Binding contract: `proposals/honeytokens.md` (workspace, v1.4,
-amended by IG D105).
+Honeytokens, normative exit 4, and `review_list`.
 
 ### Added
 - **Honeytoken plant** — `literals add --kind honeytoken [VALUE]`:
@@ -128,31 +125,30 @@ amended by IG D105).
   explicit value); unknown kinds → normal literal + one escaped warning
   per load; dedup stays by value; hand-edit transitions supported.
 - **README onboarding overhaul** — canonical install location
-  `~/.info-guard` (IG D102), defaults table, download → preflight →
-  install → build step renumbering, example-report placement (fresh-user
-  finding G1–G4).
+  `~/.info-guard`, defaults table, download → preflight →
+  install → build step renumbering, example-report placement.
 
 ### Changed
 - Exit ladder in `docs/format-spec.md`: 4 is now normative (was
   reserved); the watch reduction gains watch-side 4; consumer obligations
   updated (codes > 4 remain unexpected).
-- Honeytoken watch deltas: `decreased` is now NORMATIVE (IG D105) — a
+- Honeytoken watch deltas: `decreased` is now NORMATIVE — a
   still-present baselined canary with fewer occurrences serializes
   `delta: "decreased"` + `count_before`, exit 0 (informational; matches
   the general protected-value contract).
 - `literals list` shows `kind` for honeytokens (2+2 masked display —
   the `mask: full` directive is redaction-surface-only, never a CLI
   rendering directive).
-- **Hermes supported range bumped to v0.20.5 (2026.8.19)** — D266 compat
-  review (FIX-STAGED 2026-08-22): the version-tolerant patch applies
+- **Hermes supported range bumped to v0.20.5 (2026.8.19)** — the
+  version-tolerant patch applies
   cleanly across all six release tags + origin/main (6/6 matrix); fix is
   the tested-range claim in the four sites (`_SUPPORTED_MAX`,
   README ×2, format-spec, CI matrix ref list + all-five→all-six).
 
 ### Fixed
-- **Version-identity defect (IG D117, v0.8.1)** — the v0.8.0 tag shipped
+- **Version-identity defect (v0.8.1)** — the v0.8.0 tag shipped
   `_PACKAGE_VERSION = "0.7.0"` (the bump chain broke at the release step);
-  `--version` and the preflight header printed the wrong version and W10
+  `--version` and the preflight header printed the wrong version and
   `update --check` always reported an update available (constant 0.7.0 vs
   v0.8.0 remote). The constant is now bumped to "0.8.1" (identity-only;
   the code itself is v0.8.0 behaviorally). Release checklist hardened with
@@ -167,11 +163,11 @@ amended by IG D105).
 
 ## [v0.6.1] - 2026-08-21
 
-Audit-response patch release (external audit, 2026-08-21 — findings
-S1–S3; the audit material itself stays private).
+Audit-response patch release (external audit, 2026-08-21; the audit
+material itself stays private).
 
 ### Fixed
-- **`uninstall.sh` engine-integrity check (S2)** — now uses the same
+- **`uninstall.sh` engine-integrity check** — now uses the same
   5-marker check as `install.sh` and `check`: a partial install (e.g. a
   half-reverted `hermes update`) is refused loudly instead of reporting
   "nothing to reverse" and leaving 4 files patched behind. Regression
@@ -179,17 +175,17 @@ S1–S3; the audit material itself stays private).
   on main: install→uninstall round-trip, drifted-5/5 fail-loud,
   idempotent re-run, state-dir move/`--keep-state`, 3-way marker-list
   consistency).
-- **`install.sh` manifest version extraction (S3)** — dropped the
+- **`install.sh` manifest version extraction** — dropped the
   GNU-only `grep -oP`; BSD grep (macOS) previously recorded
   `"version": "unknown"` in `install.json`.
-- **README `literals add` example (S1)** — `--file` is now the documented
+- **README `literals add` example** — `--file` is now the documented
   default with a warning on the argv form (shell-history / process-list
   exposure).
 
 ## [v0.6.0] - 2026-08-21
 
 ### Added
-- **Watch `.env` integration** (IG D71 lifted, Wave A): watch and setup
+- **Watch `.env` integration** (v0.6.0): watch and setup
   now run the KNOWN exact-value pass — env-matched values join the
   watch population regardless of shape class, with additive
   `source` / `source_key` / `value_id` annotations on watch rows
@@ -209,9 +205,9 @@ S1–S3; the audit material itself stays private).
   (major = compatibility generation, minor = additive), two-part
   consumer contract (syntactic tolerance + semantic preserve/report of
   security-significant unknown values), schema-string parsing rule,
-  complete nullable-field list, P3 seams S1–S4, and `literals --json`
+  complete nullable-field list, cross-surface seams, and `literals --json`
   now carries the `info-guard/literals/v1` envelope.
-- **Exit-code ladder** (IG D83) — preflight: 0 clean / 1 credential-
+- **Exit-code ladder** — preflight: 0 clean / 1 credential-
   shaped / 2 usage or operational / **3 KNOWN present (dominates)**;
   exit 4 reserved for honeytoken-grade escalation (never emitted).
   Watch: 2 on operational failure (engine unavailable / scan failure),
@@ -219,7 +215,7 @@ S1–S3; the audit material itself stays private).
 - **Mandatory first-run upgrade re-baseline** — the first v0.6.0 watch
   run against a v0.5.x baseline must re-baseline (`watch --reset`);
   previously-excluded env-matched values would otherwise false-alarm as
-  `new_values` (IG D93 CRIT-1).
+  `new_values`.
 
 ### Changed
 - Preflight known-only runs exit **3** (was 1 under the v0.5.0
@@ -228,21 +224,20 @@ S1–S3; the audit material itself stays private).
 
 ## [v0.5.1] - 2026-08-21
 
-### Fixed (IG D94)
+### Fixed
 - **Preflight no longer reports clean on a degraded run.** When the
   gitleaks engine is unavailable (or an internal scan failure occurs),
   preflight exits **2 (operational failure)** instead of 0 — a partially
   degraded scan never masquerades as a clean bill of health, and a failed
   scan is never misreported as "findings" (exit 1). JSON output is
   unchanged and still carries `engine.installed`. Exit-code docs updated
-  (format-spec); the severity ladder in a later wave adopts this widened
+  (format-spec); the severity ladder in a later release adopts this widened
   exit-2 semantics unchanged.
 
 ## [v0.5.0] - 2026-08-20
 
 ### Added
-- **KNOWN tier — `.env` exact-value detection** (IG D57–D62/D70–D75;
-  Luna pilot: 3 proposal rounds + 3 plan rounds, all folded). Preflight
+- **KNOWN tier — `.env` exact-value detection**. Preflight
   now checks whether values currently in your own `.env` files appear in
   sessions, logs, or cron output — the zero-config differentiator, no
   registration, no config:
@@ -266,9 +261,9 @@ S1–S3; the audit material itself stays private).
   3. **`status.confirmed_active` activated in place** — `true` when ≥1
      KNOWN row, `null` otherwise (null = pass disabled OR active with
      no matches — documented). No `false` state in v0.5.0.
-  4. **Exit-code extension (single predicate, D75)** — preflight exits
+  4. **Exit-code extension (single predicate)** — preflight exits
      `1` iff `known > 0 OR credential_shaped > 0` (documented extension;
-     the 0/1/2/3 severity ladder is deferred to a later wave as one
+     the 0/1/2/3 severity ladder is deferred to a later release as one
      packaged contract change).
   5. **Non-disclosure hard boundary** — the pass never puts raw values
      in logs, exceptions, tracebacks or diagnostics (sanitized adapter,
@@ -288,20 +283,17 @@ S1–S3; the audit material itself stays private).
 ## [v0.4.2] - 2026-08-20
 
 ### Added
-- **Opaque alert identity (`value_id`)** (house feature request → external
-  report review APPROVE with amendments → independent plan review GO WITH
-  AMENDMENTS; IG D64–D69) — consumers can now join a watch alert to the
+- **Opaque alert identity (`value_id`)** — consumers can now join a watch alert to the
   exact registered value:
   1. **`value_id` on watch JSON** — `exposure.protected_values[]` rows
      carry the matched registry entry's opaque 16-hex id, and the
      overlaid `new_values[]`/`changed_values[]` row carries the **same**
-     id (one event, one id — IG D54). Unregistered rows have no
+     id (one event, one id). Unregistered rows have no
      `value_id` key; `resolved_values` rows never carry one. The
-     terminal, baseline, and error paths never show ids (surface rule
-     IG D66). `value_id` is a **registration identity** — same persisted
+     terminal, baseline, and error paths never show ids (surface rule).
+     `value_id` is a **registration identity** — same persisted
      registry entry → same id across runs/rebuilds/reorder; delete +
-     re-add = new id. Not a security token, not a leak verdict (D52
-     unchanged).
+     re-add = new id. Not a security token, not a leak verdict.
   2. **Registry v2** — `custom_literals.json` gains a `version` marker
      and an `id` field on each entry, assigned by the app through a
      single canonical loader (`_load_registry()` — one reader for
@@ -319,7 +311,7 @@ S1–S3; the audit material itself stays private).
      in the invocation; `--file` = line-delimited bulk) and `literals
      list [--json]` (id + masked value, sorted by value). Every mutation
      goes through the canonical loader/writer — no second
-     implementation. D55 rules: `--help` → usage exit 0; unknown flags
+     implementation. CLI rules: `--help` → usage exit 0; unknown flags
      → verbatim warning + continue; usage errors → exit 2.
   4. **Battery +31 (177 → 208)** — migration idempotence, entry-id
      stability across reorder, duplicate repair/preservation, 0600
@@ -340,9 +332,7 @@ S1–S3; the audit material itself stays private).
 ## [v0.4.1] - 2026-08-20
 
 ### Added
-- **`watch` protected-value matching** (home-consumer feedback
-  `v0.4.0-feedback.txt` → proposal review GO with amendments; independent
-  plan review; IG D51–D56):
+- **`watch` protected-value matching**:
   1. **Registry matching** — scan values whose exact sha256 matches a
      `custom_literals.json` entry (the app's known-value registry) are
      classified as **protected values** and reported in a new
@@ -419,7 +409,7 @@ S1–S3; the audit material itself stays private).
 ## [v0.3.1] - 2026-08-19
 
 ### Fixed
-- **Detection gaps (external review approved 2026-08-19, one wave):**
+- **Detection gaps (external review approved 2026-08-19, one release):**
   1. **`Authorization` headers are now key-shape findings** — `auth\b`
      never matched "Authorization" (no word boundary), so every
      `Authorization: ***` / `Authorization: Bearer …` line was silently
@@ -493,7 +483,7 @@ S1–S3; the audit material itself stays private).
 ## [v0.2.8] - 2026-08-19
 
 ### Changed
-- External review wave 2 (3 points — the friend's review of the
+- External review round 2 (3 points — the friend's review of the
   v0.2.4–v0.2.7 demo report); all three confirmed against the demo fixture
   and fixed:
   1. **One counting semantics everywhere.** "Credential-shaped candidate"
@@ -536,7 +526,7 @@ S1–S3; the audit material itself stays private).
 - No charts (owner decision 08-19) — totals are the fact; a visual chart stays
   a renderer-only add later (the assessment object carries the counts).
 
-### Refinements (v0.2.5, same wave — owner review of the shipped report)
+### Refinements (v0.2.5, same release — owner review of the shipped report)
 - **Engine line** in the header: install state + installed version (new
   `state/info-guard/install.json` manifest written by install.sh) — or
   NOT INSTALLED for the decide step.
@@ -554,7 +544,7 @@ S1–S3; the audit material itself stays private).
 - Fixed: literal `<br>` rendering between the exec-summary card lines in the
   styled PDF renderer; "1 occurrences" pluralization in redaction notes.
 
-### Refinements (v0.2.6, same wave — second owner review)
+### Refinements (v0.2.6, same release — second owner review)
 - **WHY AM I SEEING THIS removed** — redundant with the merged table's
   status column (the facts stay in the assessment object).
 - **Appendix renumbering**: the finding ledger is now **APPENDIX A** in the
@@ -568,7 +558,7 @@ S1–S3; the audit material itself stays private).
   properly; the EXECUTIVE SUMMARY cards get inline SVG icon badges (red/
   orange circles, key, shield) instead of plain dots.
 
-### Refinements (v0.2.7, same wave — third owner review)
+### Refinements (v0.2.7, same release — third owner review)
 - **EXECUTIVE SUMMARY cards**: SVG pictograms reverted to distinct color
   dots (the PDF font stack lacks emoji glyphs, so dots are the reliable
   badge) — red / orange / blue / green per card.

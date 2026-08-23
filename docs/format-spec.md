@@ -138,7 +138,7 @@ is that anything able to write that path controls redaction. If that is
 unacceptable in your threat model, keep the registry under your own
 `$HERMES_HOME` and enforce the permissions there.
 
-## Custom literals (the PII workflow) — registry v2 (v0.4.2, IG D64–D69)
+## Custom literals (the PII workflow) — registry v2 (v0.4.2)
 
 `<state>/custom_literals.json` — hand-edited, survives rebuilds, masking only
 (never part of detection). Registry v2 shape:
@@ -159,7 +159,7 @@ note). This is the `value_id` that watch/v1 JSON carries on protected
 rows — the consumer's join key into this file (see
 `docs/watch-schema.md`).
 
-**`kind`** (v0.7.0, IG D103 — honeytoken wave): optional per-entry
+**`kind`** (v0.7.0): optional per-entry
 metadata. Absent = a normal literal (never serialized as
 `"kind": "literal"`); `"kind": "honeytoken"` marks a **canary** — a
 value that must never legitimately appear at rest; any exact scan match
@@ -167,9 +167,9 @@ is a canary-touch (tier `HONEYTOKEN`, exit 4; see §Canary-touch
 contract). Unknown `kind` values are treated as normal literals with
 one stderr warning per load/invocation (never a crash, never an
 escalation). `kind` does NOT participate in deduplication (dedup stays
-by value, IG D64) and does not affect matching. literal ↔ honeytoken
+by value) and does not affect matching. literal ↔ honeytoken
 transitions are hand-edits (per-entry metadata; next run reclassifies);
-removal + re-add = fresh `value_id` (IG D65).
+removal + re-add = fresh `value_id`.
 
 **File contract (add-only):** the app may normalize the file to add
 ids, but it NEVER strips anything — unknown entry fields (e.g. `mask`,
@@ -182,7 +182,7 @@ still read a v2 file with `kind` present: the unknown field is
 preserved verbatim and the value matches as a normal literal (never a
 crash, never a canary-touch).
 
-**The sanctioned add path is the CLI** (v0.4.2, IG D69 — every mutation
+**The sanctioned add path is the CLI** (v0.4.2 — every mutation
 goes through the same canonical loader/writer):
 
 ```
@@ -197,8 +197,8 @@ the existing id (no new entry); `--mask` applies to every value in the
 invocation (last flag wins); `--file` reads line-delimited values
 (blank lines and `#` comments skipped); explicit registration accepts
 any non-empty string (no 8-char floor — short/PIN-class values are
-legal; `setup`'s floor is unchanged). **`--kind honeytoken`** (v0.7.0,
-IG D103): plants a canary — with no VALUE, generates `ht-` + 24 CSPRNG
+legal; `setup`'s floor is unchanged). **`--kind honeytoken`** (v0.7.0):
+plants a canary — with no VALUE, generates `ht-` + 24 CSPRNG
 hex chars; with a VALUE, registers that exact value (no prefix
 enforced; explicit values are never echoed in full). Rejects `--file`,
 `--mask` (mask is forced `full`), control characters, line terminators,
@@ -216,7 +216,7 @@ unknown id → exit 0 with `no entry with id <id>` on stderr and
 one-time migration write when the registry is stale — a read command
 that normalizes once; `--json` output stays pure (all chatter on
 stderr). Exit codes: 0 success, 1 unreadable registry (no write), 2
-usage. D55 rules apply (`--help` → usage exit 0 anywhere; unknown
+usage. CLI rules apply (`--help` → usage exit 0 anywhere; unknown
 `--*` flags → verbatim warning + continue).
 
 Hand-editing still works: edit the file, then `info-guard build` — live
@@ -260,7 +260,7 @@ report is never a second implementation.
   3. **Engine state** — transitions between `active` / `partial` /
      `none` with explicit blocks (installed / restored / degraded /
      removed).
-  4. **Protected values (v0.4.1, IG D51–D56)** — scan values whose
+  4. **Protected values (v0.4.1)** — scan values whose
      exact sha256 matches a `custom_literals.json` entry (the app's
      known-value registry — NOT the house `known_secrets.json`, which is
      HMAC-peppered leak_scan state and stays out of the public product).
@@ -287,7 +287,7 @@ report is never a second implementation.
   config-only / resolved / **non-protected** changed = 0 · usage = 2.
   `partial` is never ambiguous — degraded protection alerts exactly like
   removal (matches `check`).
-- **CLI contract (v0.4.1, IG D55):** every subcommand accepts
+- **CLI contract (v0.4.1):** every subcommand accepts
   `-h`/`--help` → prints its usage line, exit 0. Unknown `--*` flags are
   tolerated (preflight precedent) but never silent: stderr
   `Warning: unknown option '<flag>'` (flag echoed verbatim), then the run
@@ -420,7 +420,7 @@ known-env:<KEY>` (alphabetically first key across sources),
 `.env` sources are excluded from matching (canonical path + inode
 identity — the pass never reports its own input). All other detectors
 are untouched. The pass is **preflight-only** in v0.5.0 — `watch` and
-`setup` do not run it. **v0.6.0 (Wave A, IG D71): `watch` and `setup` run
+`setup` do not run it. **v0.6.0: `watch` and `setup` run
 the same env pass** (watch rows gain `source`/`source_key` annotations and
 the T1–T8 transitions; setup self-fills KNOWN candidates — see the
 Contract foundation section).
@@ -450,20 +450,20 @@ are ok** — the text report then emits exactly one line:
 `KNOWN pass: no .env sources — disabled`. Source state never affects
 exit status.
 
-**Vocabulary (D60):** KNOWN rows "match a current eligible `.env` value;
+**Vocabulary:** KNOWN rows "match a current eligible `.env` value;
 review whether it is still live" — never "leak", never "confirmed".
 `status.confirmed_active` is `true` when ≥1 KNOWN row, `null` otherwise
 (null = pass disabled OR pass active with no matches — deliberately not
 distinguished in v0.5.0).
 
 **Exit codes (v0.5.0 — documented extension):** `0` = clean, **`1` iff
-`known > 0 OR credential_shaped > 0`**, `2` = usage error. **v0.5.1 (IG D94):**
+`known > 0 OR credential_shaped > 0`**, `2` = usage error. **v0.5.1:**
 `2` widens to usage **or operational** — a degraded preflight run (gitleaks
 engine unavailable, or an internal scan failure) exits **2, never 0 and never
 1**; the assessment JSON continues to carry `engine.installed` so consumers
 can distinguish the cause. The severity
 ladder (0 clean / 1 shape / 2 usage / 3 KNOWN, KNOWN dominates) was
-deferred to a later wave (D75) and **shipped in v0.6.0 (Wave A) as ONE
+deferred to a later release and **shipped in v0.6.0 as ONE
 packaged contract change** (format-spec + CHANGELOG + release notes +
 consumer tests together), adopting this widened `2` unchanged.
 
@@ -483,19 +483,19 @@ already-masked.
 Exit codes: **0 = clean**, **1 = findings** (any KNOWN `.env` value OR any
 credential-shaped value — single-predicate extension, v0.5.0; previously
 credential-shaped only),
-**2 = usage or operational error** (v0.5.1, IG D94 — the operational
+**2 = usage or operational error** (v0.5.1 — the operational
 sub-case: gitleaks engine unavailable or an internal scan failure; preflight
 exits 2, never 0). gitleaks is optional: without it the scan runs the
 key-shape pass only and says so. The severity ladder (0/1/2/3 with KNOWN
-dominating) **shipped in v0.6.0 (Wave A)** as one packaged contract
+dominating) **shipped in v0.6.0** as one packaged contract
 change — see the Contract foundation section.
 
-## Contract foundation (Wave A, v0.6.0)
+## Contract foundation (v0.6.0)
 
 Normative contract for every public JSON surface, shipped as ONE packaged
-contract change (IG D75 as amended by D83: docs + CHANGELOG + release notes
-+ consumer-facing tests together). P3+ builds on the declared seams (S1–S4)
-and may not reinterpret anything below (IG D82).
+contract change (docs + CHANGELOG + release notes
++ consumer-facing tests together). Later releases build on the declared seams
+and may not reinterpret anything below.
 
 ### Envelope doctrine
 
@@ -511,12 +511,12 @@ Every **public** machine-readable surface is an envelope:
 Exempt from the envelope doctrine:
 
 - `custom_literals.json` — user-owned local configuration (trusted 0600
-  state, hand-editable, raw values by design — IG D64 posture).
+  state, hand-editable, raw values by design).
 - `watch-baseline.json` — internal state; versioned independently, not part
   of the envelope doctrine unless explicitly promoted to a public contract.
-- The exit-code table — **documentation-only in Wave A**; its
-  machine-readable JSON form is descoped (no Wave A consumer; publish the
-  JSON surface in the wave that first has a consumer for it, plausibly P3
+- The exit-code table — **documentation-only in v0.6.0**; its
+  machine-readable JSON form is descoped (no v0.6.0 consumer; publish the
+  JSON surface in the release that first has a consumer for it, plausibly
   when exit 4 becomes normative). No standalone `exit-codes` JSON file or
   endpoint is published.
 
@@ -525,24 +525,24 @@ Exempt from the envelope doctrine:
 - **Major = compatibility generation; minor = optional additive revision.**
 - Same-major consumers MUST tolerate additive revisions.
 - Producers do not bump the minor merely because additive fields were
-  added — a wave performs additive work under its current major; creating
+  added — a release performs additive work under its current major; creating
   `v1.1` just to advertise additions is prohibited (the additive contract +
   consumer obligations already cover it).
-- Minor-bump timing is producer policy per wave, announced in the release
+- Minor-bump timing is producer policy per release, announced in the release
   notes; consumers MUST NOT depend on bump frequency or timing.
 - Breaking = requiredness change, type change, identity change, field
   removal, semantic change.
 - CLI exit-code semantics are versioned **independently** of JSON schemas:
   changing an exit code's meaning is a CLI contract change requiring the
-  D75 packaging rule — it is NOT automatically a JSON schema major bump.
+  packaged-contract-change rule — it is NOT automatically a JSON schema major bump.
 
-Wave A keeps `info-guard/assessment/v1`, `info-guard/watch/v1`, and
-`info-guard/literals/v1` — identifiers unchanged; every Wave A field
+v0.6.0 keeps `info-guard/assessment/v1`, `info-guard/watch/v1`, and
+`info-guard/literals/v1` — identifiers unchanged; every v0.6.0 field
 addition is additive per the taxonomy below.
 
 ### Additive/breaking taxonomy
 
-| Additive (no major bump) | Breaking (major bump + D75 packaging) |
+| Additive (no major bump) | Breaking (major bump + packaged-contract-change rule) |
 |---|---|
 | new object field | changing the meaning of an existing field |
 | new optional metadata | changing required/optional status |
@@ -568,7 +568,7 @@ not advice.
    - the unknown discriminator value (e.g. an unknown `type` string),
    - the row through its normal findings/reporting path.
 
-Unknown-value behavior at Wave A:
+Unknown-value behavior at v0.6.0:
 
 | Field / family | Required behavior |
 |---|---|
@@ -617,7 +617,7 @@ Any field not listed is non-nullable by contract. `status.confirmed_active`:
 
 - `null` — pass disabled or no identity-verified matches
 - `true` — at least one identity-verified KNOWN value
-- `false` — NOT emitted by Wave A; an unexpected `false` MUST be handled as
+- `false` — NOT emitted by v0.6.0; an unexpected `false` MUST be handled as
   `null` under preserve/report behavior
 
 ### Exit contract (0/1/2/3/4)
@@ -628,9 +628,9 @@ Any field not listed is non-nullable by contract. `status.confirmed_active`:
 | 1 | credential-shaped findings or watch delta alarm | preflight and watch |
 | 2 | usage or operational error | all commands |
 | 3 | identity-verified KNOWN value present; dominates | preflight only |
-| 4 | **honeytoken-grade escalation (NORMATIVE since v0.7.0, IG D103)** — a registered canary value was found at rest (canary-touch detection fact) | preflight and watch |
+| 4 | **honeytoken-grade escalation (NORMATIVE since v0.7.0)** — a registered canary value was found at rest (canary-touch detection fact) | preflight and watch |
 
-**Preflight reduction (v0.7.0 — 4 normative, IG D103):**
+**Preflight reduction (v0.7.0 — 4 normative):**
 
 1. Usage or operational failure → `2` (never overridden — an incomplete
    scan asserts no complete verdict; independently detected facts MAY
@@ -640,7 +640,7 @@ Any field not listed is non-nullable by contract. `status.confirmed_active`:
 4. Otherwise, credential-shaped findings → `1`.
 5. Otherwise → `0`.
 
-**Watch reduction (v0.7.0 — watch-side 4 normative, IG D103):**
+**Watch reduction (v0.7.0 — watch-side 4 normative):**
 
 1. Usage or operational failure → `2` (same partial-row doctrine).
 2. Otherwise, honeytoken new/increased (canary-touch) → `4` (dominates 1).
@@ -661,18 +661,18 @@ never raise the exit.
 - **Exit `2` (operational failure): the assessment IS still emitted in
   `--json` mode — stdout stays pure JSON carrying the engine state
   (`tool.installed` / `tool.engine_state` / `scan.gitleaks_ok`), advisory to
-  stderr; v0.5.1 (IG D94) behavior retained unchanged.** The exit code, not
+  stderr; v0.5.1 behavior retained unchanged.** The exit code, not
   the absence of JSON, is the operational signal.
 - Exit codes `> 4` and unknown nonzero codes: consumers MUST treat them as
   unexpected failures, capture diagnostics, and assign no fixed semantics.
 
-### Canary-touch contract (v0.7.0, IG D103)
+### Canary-touch contract (v0.7.0)
 
 A **honeytoken** is a registry entry with `"kind": "honeytoken"` planted via
 the sanctioned `literals add --kind honeytoken` path (a canary value is
 `ht-` + 24 CSPRNG hex chars when generated; explicit values allowed). The
 value must never legitimately appear at rest — any exact match in the scan
-is a **canary-touch detection fact** (never "leak"/"confirmed", D52/D60).
+is a **canary-touch detection fact** (never "leak"/"confirmed").
 
 - **Detection:** registry-exact value pass (independent of gitleaks) on
   preflight AND watch. Tier `HONEYTOKEN` wins over every existing class
@@ -681,30 +681,30 @@ is a **canary-touch detection fact** (never "leak"/"confirmed", D52/D60).
   `HONEYTOKEN` and carries `source_key` + `value_id`.
 - **Escalation:** exit `4` on preflight presence; exit `4` on watch
   new/increased. A baselined canary (`delta: "unchanged"`) never raises the
-  exit (value-level appearance semantics, D30/D53).
+  exit (value-level appearance semantics).
 - **Partial-result doctrine:** when the engine is unavailable/degraded, exit
   `2` is authoritative; independently detected HONEYTOKEN rows MAY still be
   serialized in the JSON (partial rows are never a complete assessment).
 - **Lifecycle:** sticky — a touched canary keeps matching until removed
-  (`literals remove <id>`) or replanted (fresh `value_id`, D65). No
+  (`literals remove <id>`) or replanted (fresh `value_id`). No
   auto-deactivation (silent mutation, invariant 5).
 - **Scan boundary:** default scan dirs never include the product state dir;
   explicitly-specified dirs are operator-chosen targets (a canary match
   there is a genuine finding).
 
-### P3 seams (S1–S4)
+### Cross-surface seams
 
 | Seam | Contract |
 |---|---|
-| S1 `value_id` identity monomorphism | `value_id` is the ONLY cross-surface identity mechanism. Same persisted registry entry retains the same ID across runs, rebuilds, reorders, and self-fill merges; an ID is assigned exactly once and persisted; delete + re-add produces a fresh ID, never reused; IDs are locally scoped to one installation (Wave A emits no installation identifier); IDs are CSPRNG-generated and independent of the value — no hash, truncation, or keyed derivation. Wave B (v0.7.0): canary identity = the registry entry id; replant = fresh id (D65) |
-| S2 tier-enum growth | unknown tiers are not fatal to Wave A code; consumers preserve/report unknown security-significant tiers. **Wave B (v0.7.0): `HONEYTOKEN` tier ADDED (additive, IG D85); old consumers preserve/report the row, never drop it** |
-| S3 exit-4 reservation | **FULFILLED by Wave B (v0.7.0, IG D103):** exit 4 is now normative and emitted on canary-touch (preflight + watch); the reservation wording is superseded |
-| S4 additive-only schema evolution | all Wave A output additions are optional and additive; no field is removed, retyped, made required, or semantically redefined. Wave B additions are additive: registry `kind`, tier `HONEYTOKEN`, watch `review_list` + `review_list_complete`; honeytoken rows carry `known: false` per the shipped derived-flag contract |
+| `value_id` identity monomorphism | `value_id` is the ONLY cross-surface identity mechanism. Same persisted registry entry retains the same ID across runs, rebuilds, reorders, and self-fill merges; an ID is assigned exactly once and persisted; delete + re-add produces a fresh ID, never reused; IDs are locally scoped to one installation (v0.6.0 emits no installation identifier); IDs are CSPRNG-generated and independent of the value — no hash, truncation, or keyed derivation. v0.7.0: canary identity = the registry entry id; replant = fresh id |
+| tier-enum growth | unknown tiers are not fatal to v0.6.0 code; consumers preserve/report unknown security-significant tiers. **v0.7.0: `HONEYTOKEN` tier ADDED (additive); old consumers preserve/report the row, never drop it** |
+| exit-4 reservation | **FULFILLED by v0.7.0:** exit 4 is now normative and emitted on canary-touch (preflight + watch); the reservation wording is superseded |
+| additive-only schema evolution | all v0.6.0 output additions are optional and additive; no field is removed, retyped, made required, or semantically redefined. v0.7.0 additions are additive: registry `kind`, tier `HONEYTOKEN`, watch `review_list` + `review_list_complete`; honeytoken rows carry `known: false` per the shipped derived-flag contract |
 
 ### Watch source and transition contracts (T1–T8)
 
 The `.env` set is a **match source, not tracked state** — classification is
-per-run (per-run hashing, IG D62); the baseline keeps
+per-run (per-run hashing); the baseline keeps
 `{value_sha256, type, family, count, first_seen}` only, with no `source`
 field. All transitions below are per value hash. `family` for env-matched
 rows is derived from the match rule's key name and IS persisted in baseline
@@ -715,7 +715,7 @@ classification.
 |---|---|---|---|
 | T1 | **added** | value not in baseline, detected in scan (any source) | `new_values[]` → **exit 1**; env-matched rows carry `source: "env"` + `source_key` |
 | T2 | **removed** (from scan) | in baseline, absent from current scan | `resolved_values[]` → exit 0 |
-| T3 | **`.env`-leave** (D62) | value has no env match in the CURRENT run's index (the baseline stores no source — no historical `.env`-match claim is made) | current-run reclassification, **no event, no exit change**: row stays (still in scan), carries no `source_key`/env classification → shape (if unregistered) or `literal` (if registered — registry membership is unaffected by `.env` removal). If it also left the scan → T2. Per-run hashing → no `--reset` needed on `.env` edits |
+| T3 | **`.env`-leave** | value has no env match in the CURRENT run's index (the baseline stores no source — no historical `.env`-match claim is made) | current-run reclassification, **no event, no exit change**: row stays (still in scan), carries no `source_key`/env classification → shape (if unregistered) or `literal` (if registered — registry membership is unaffected by `.env` removal). If it also left the scan → T2. Per-run hashing → no `--reset` needed on `.env` edits |
 | T3b | **detection loss** | `.env`-leave of a value detectable ONLY via the env pass (no shape qualification, unregistered) — still in scan, but no longer detectable by any pass | `resolved_values[]` with the D46 wording applied literally — reads as remediation, but the cause is loss of detection capability, not removal of exposure → exit 0 |
 | T4 | **replaced** (same key, new value) | env key K: old value absent from the current index, new value present | old value → T3 current-run path (T4 emits no event for the old value); new value → T1 if detected in scan (exit 1 — the alert is "new value at rest"). If the replacing value is ALSO registry-registered → T1 row carrying both `source_key` + `value_id` |
 | T5 | **duplicated** | same value under 2+ env keys, or new scan locations | 2+ keys → ONE row, `source_key` = alphabetically-first key (v0.5.0 A11 semantics); new locations → count increase → `increased` → **exit 1** |
@@ -725,20 +725,20 @@ classification.
 
 **Precedence (P-C):** `source` = the precedence winner — `env` or `literal`,
 never "both". **Literal wins**: the registry is the authoritative
-declaration (D52); `source_key` + `value_id` are still both carried when a
+declaration; `source_key` + `value_id` are still both carried when a
 collision exists, so no information is lost. `source_key` is present iff an
 env match exists **regardless of who won precedence** — a `source:
 "literal"` row may still carry `source_key`; consumers must not read
 `source == "literal"` as "no .env match".
 
-**Collision / overlay (D54 one-event rule):** a value that is env-matched
-AND registered appears once in `protected_values[]` (delta per D53) and
+**Collision / overlay (one-event rule):** a value that is env-matched
+AND registered appears once in `protected_values[]` (delta per the counts machine) and
 once in the overlay (`new_values[]`/`changed_values[]`) — same `value_id`
 on both, ONE event; `pm_alarm` (delta new/increased) → exit 1. "One row,
 never two" means one row per array — consumers dedup across arrays by
 `value_id` when present, else `value_masked`.
 
-**`.env`-leave wording (D62/D46, informational, exit 0):** "No longer
+**`.env`-leave wording (informational, exit 0):** "No longer
 detected in the current scan scope. This does not confirm that the
 credential is dead or revoked."
 
@@ -777,8 +777,8 @@ N known .env value(s) found in the scanned files — register as protected liter
   error messages; nothing is written before the confirmation phase
   completes; the reject path writes nothing.
 - Writes go through the canonical registry path (load → dedup → normalize →
-  atomic write 0600 — IG D69); merge-only, never clobber; duplicates
-  collapse by value, first entry's id wins (D64); `id` assigned at write
+  atomic write 0600); merge-only, never clobber; duplicates
+  collapse by value, first entry's id wins; `id` assigned at write
   time. A failed atomic write leaves the ORIGINAL registry intact — no
   partial registration, no data loss.
 - Abort/decline (EOF / invalid input / interruption before confirmation) →
@@ -787,7 +787,7 @@ N known .env value(s) found in the scanned files — register as protected liter
   cron/output) — registering literals cannot seed a self-detection loop
   (the registry file never becomes a location hit).
 - Self-fill sources are the `.env` set only (the same sources `build`
-  uses); other inventory sources are out of Wave A scope.
+  uses); other inventory sources are out of v0.6.0 scope.
 
 ### `literals --json` envelope
 
@@ -821,12 +821,11 @@ baseline is correct and runs are quiet. The pre-rebaseline alarm is
 expected and documented; the baseline file schema itself is unchanged (no
 baseline schema bump — the population change is the semantic change).
 
-## Wave C Phase A — `update`, `check --heal`/`--battery`, and cron (v0.8.0)
+## v0.8.0 — `update`, `check --heal`/`--battery`, and cron
 
 The preflight/watch 0–4 ladder is **untouched**; `check` keeps its 0/1/2
 meanings (0 healthy · 1 completed broken verdict · 2 usage OR operational).
-This section adds only the declared new contracts (proposal
-`self-sustain.md` v1.6, IG D113).
+This section adds only the declared new contracts.
 
 ### `info-guard update` — surface and exit table
 
@@ -940,7 +939,7 @@ output, go to stderr):
   the battery never recursively invokes `check --battery`. Exit: 0 all
   green · 1 battery verdict broken · 2 operational.
 
-### W6 cron — `install.sh --cron [SCHEDULE]` / `--no-cron`
+### Cron — `install.sh --cron [SCHEDULE]` / `--no-cron`
 
 - Opt-in only: `--cron` installs one managed line running the package's
   `check` on the default `0 6 * * *` unless SCHEDULE is given. When neither
@@ -989,7 +988,7 @@ restore the engine. `check`'s supported-range floor remains the
 enforcement guard.
 
 
-## Wave C Phase B — W13 masked viewers (v0.8.0)
+## v0.8.0 — masked viewers
 
 The three viewer commands (`pipe`, `view`, `env`) implement the
 sanctioned no-dump doctrine: **prefer masked viewers over raw dumps —
@@ -1016,7 +1015,7 @@ nothing in the product (no detection, no registration, no state).
    category and product exit 2.
 4. **Separate source and masking failures** — see the diagnostics table.
    Neither failure path emits the captured source bytes.
-5. **D55 rules:** `--help`/`-h` anywhere prints the command's usage and
+5. **CLI rules:** `--help`/`-h` anywhere prints the command's usage and
    exits 0 (no source is read on the help path); an unknown `--*` flag
    prints only the fixed `warning: unknown option` and exits 2 (the
    option text and its value are NEVER echoed — a `--bad=<registered
@@ -1070,8 +1069,8 @@ info-guard view file <path>
 | `compose-config` | `docker compose -f <path> config` (`-f`, path, and `config` are separate argv elements) | rendered compose configuration, masked before emission | stderr matching `no such file|not found` → `source: not found`; tool missing → `source: not found`; any other nonzero → `source: failed` |
 | `file` | explicit path opened as a path value (no child process) | file content, masked before emission; no wrapper label is added | path does not exist → `source: not found`; unreadable → `source: failed` |
 
-The absence-pattern lists above are the single byte-level source (plan
-r1 MAJ-4 fold): the pattern is matched INTERNALLY to select the
+The absence-pattern lists above are the single byte-level source: the
+pattern is matched INTERNALLY to select the
 category and is never emitted. Child stdout from a failed attempt is
 discarded (a failed system attempt's stdout is never emitted when the
 user fallback succeeds). A source that was read successfully but cannot
