@@ -109,6 +109,7 @@ This is the redaction layer only. The full stack — secret inventory,
 leak detection, rotation, watchdogs — is documented in docs/full-stack.md.
 """
 import contextlib
+import errno
 import fcntl
 import hashlib
 import json
@@ -116,6 +117,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -148,6 +150,7 @@ _SUBCOMMAND_USAGE = {
     "pipe": "info-guard pipe    Mask stdin against the registry (fail-closed: missing matcher -> exit 2, no passthrough)",
     "view": "info-guard view <surface> <arg>   Masked viewer: systemd-unit <name> | docker-env <container> | compose-config <path> | file <path>",
     "env": "info-guard env [FILE] [--check|--keys]   Keys + lengths only (never values); --check = non-executing grammar validation; --keys = bare sorted unique keys",
+    "discover": "info-guard discover [PATH ...] [--json]   Enumerate unregistered secrets from named source paths (read-only, pointer-only; enroll via `literals add --from`)",
 }
 
 VALID_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -3365,6 +3368,265 @@ def _honeytoken_id_map():
     return out
 
 
+# ── Wave D (W8) — discover ────────────────────────────────────────────
+# D51 AMENDED (D123): operator-named source dirs only; pointer-only,
+# read-only; `literals add --from` is the sole enrollment bridge.
+
+_DISCOVER_ERROR_CLASSES = frozenset((
+    "usage", "registry_unavailable", "invalid_config",
+    "invalid_source", "source_unreadable", "scan_limit", "detector_error",
+))
+
+
+class _DiscoverError(Exception):
+    """Value-free discover failure; error_class in _DISCOVER_ERROR_CLASSES."""
+
+    def __init__(self, error_class, message):
+        super().__init__(message)
+        self.error_class = error_class
+        self.message = message
+
+
+def _load_registry_readonly():
+    """Non-mutating canonical registry load (plan 5.2/5.3, A28/A32(d)).
+
+    The canonical _load_registry() MAY WRITE (lazy id backfill, version
+    migration, dup-id repair). Discovery and --from pre-commit reads must
+    never write. Deliberate divergences from the canonical loader:
+      - ABSENT file -> (None, False, None): for discovery the registry
+        document is also the discover.dirs config surface (A32(d)).
+      - version != 2 (missing/older/newer) -> (None, False, None):
+        migration is never performed by discovery; unsupported versions
+        fail closed (A28).
+      - `literals` present but not a list -> (None, False, None):
+        strict structure (plan 5.4), unlike the canonical coercion.
+      - same-version entries are normalized IN MEMORY only; the
+        normalizer's need_write flag is ignored — nothing is persisted.
+    Returns (entries_or_None, ok, doc)."""
+    if not CUSTOM_LITERALS.exists():
+        return None, False, None
+    try:
+        doc = json.loads(CUSTOM_LITERALS.read_text())
+    except (OSError, ValueError):
+        return None, False, None
+    if not isinstance(doc, dict):
+        return None, False, None
+    if doc.get("version") != _REGISTRY_VERSION:
+        return None, False, None
+    raw = doc.get("literals")
+    if raw is not None and not isinstance(raw, list):
+        return None, False, None
+    entries, _n, _need = _normalize_entries(raw or [])
+    return entries, True, doc
+
+
+def _discover_envelope(status, candidates, error_class):
+    """info-guard/discover/v1 envelope (proposal §3.3, A21/A22)."""
+    return {
+        "schema": "info-guard/discover/v1",
+        "status": status,               # clean | candidates | error
+        "count": len(candidates or []),
+        "candidates": candidates or [],
+        "error_class": error_class,     # null unless status == "error"
+    }
+
+
+def _discover_error_exit(error_class, message, json_mode):
+    """Exit-2 failure (plan 2.5/11.7): JSON -> envelope on stdout, stderr
+    EMPTY; text -> value-free stderr diagnostic, stdout empty."""
+    if json_mode:
+        print(json.dumps(_discover_envelope("error", [], error_class)))
+        return 2
+    print(f"[info-guard] discover: {message}", file=sys.stderr)
+    return 2
+
+
+def _discover_validate_config(doc):
+    """Stage 3 — discover.dirs structural validation (plan 6.2, r3 MAJ-1).
+
+    STRUCTURAL ONLY: wrong type/shape/empty/NUL -> invalid_config.
+    Existential conditions (missing, inaccessible, special, symlink) are
+    stage-5 concerns -> source_unreadable, identical to CLI paths.
+    Returns the configured dirs list (may be empty)."""
+    if doc is None:
+        return []
+    block = doc.get("discover")
+    if block is None:
+        return []
+    if not isinstance(block, dict) or "dirs" not in block:
+        raise _DiscoverError(
+            "invalid_config",
+            "discover.dirs must be an object with a dirs list")
+    dirs = block["dirs"]
+    if not isinstance(dirs, list):
+        raise _DiscoverError(
+            "invalid_config",
+            "discover.dirs must be a list of path strings")
+    out = []
+    for i, d in enumerate(dirs):
+        if not isinstance(d, str) or d == "" or "\x00" in d:
+            raise _DiscoverError(
+                "invalid_config",
+                f"discover.dirs[{i}] must be a non-empty path string")
+        out.append(d)
+    return out
+
+
+def _open_nofollow(path):
+    """Open `path` no-follow at EVERY component via dir_fd-relative opens
+    (plan 7.1-7.3, anchored traversal). A symlink anywhere -> ELOOP ->
+    source_unreadable. Returns (fd, stat_result, normalized_abs).
+    The fd is the anchored object; callers retain it (plan 4.5)."""
+    norm = os.path.abspath(path)        # lexical, no symlink resolution
+    parts = [p for p in norm.split(os.sep) if p]
+    try:
+        cur = os.open(os.sep, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as e:
+        raise _DiscoverError(
+            "source_unreadable", f"source not accessible: {norm}") from e
+    try:
+        for i, p in enumerate(parts):
+            final = (i == len(parts) - 1)
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            if not final:
+                flags |= os.O_DIRECTORY
+            else:
+                # O_NONBLOCK: a FIFO final component must not block the
+                # open; classification rejects special files after fstat.
+                flags |= os.O_NONBLOCK
+            try:
+                nxt = os.open(p, flags, dir_fd=cur)
+            except OSError as e:
+                if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise _DiscoverError(
+                        "source_unreadable",
+                        f"symlink or non-directory component: {norm}") from e
+                if e.errno in (errno.ENOENT, errno.EACCES,
+                               errno.ENAMETOOLONG):
+                    raise _DiscoverError(
+                        "source_unreadable",
+                        f"source not accessible: {norm}") from e
+                raise _DiscoverError(
+                    "source_unreadable",
+                    f"source unreadable: {norm}") from e
+            os.close(cur)
+            cur = nxt
+        return cur, os.fstat(cur), norm
+    except BaseException:
+        try:
+            os.close(cur)
+        except OSError:
+            pass
+        raise
+
+
+def _discover_open_root(path):
+    """Stage 5 — validate one selected root, anchored no-follow.
+    Returns (norm, fd, is_dir, st). Empty/NUL -> invalid_source;
+    missing/unreadable/symlink/special -> source_unreadable."""
+    if path == "" or "\x00" in path:
+        raise _DiscoverError("invalid_source", "invalid source path")
+    fd, st, norm = _open_nofollow(path)
+    if stat.S_ISREG(st.st_mode):
+        return norm, fd, False, st
+    if stat.S_ISDIR(st.st_mode):
+        return norm, fd, True, st
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    raise _DiscoverError(
+        "source_unreadable", f"special-file source rejected: {norm}")
+
+
+def _discover_collect(roots, entries):
+    """Stages 6-8 — traversal -> detection -> enrollmentability filter ->
+    registry filtering -> ordering. Segment 1 placeholder: empty
+    directory roots scan clean; any traversable content raises
+    detector_error until the Segment 2 pipeline lands. Never writes;
+    never closes the retained root fds."""
+    for norm, fd, is_dir, _st in roots:
+        if is_dir:
+            with os.scandir(fd) as it:
+                has_content = any(True for _ in it)
+            if has_content:
+                raise _DiscoverError(
+                    "detector_error",
+                    f"traversal pending (build segment 2): {norm}")
+        else:
+            raise _DiscoverError(
+                "detector_error",
+                f"named-file scan pending (build segment 2): {norm}")
+    return []
+
+
+def cmd_discover(args):
+    """info-guard discover [PATH ...] [--json] — Wave D W8.
+
+    Operator-named sources -> unregistered candidates (pointers only) ->
+    enroll via `literals add --from`. Read-only; never writes the
+    registry. Exits: 0 clean / 1 candidates / 2 error (proposal §3)."""
+    json_mode = False
+    paths = []
+    end_of_opts = False
+    for a in args:
+        if not end_of_opts and a == "--":
+            end_of_opts = True
+        elif not end_of_opts and a == "--json":
+            json_mode = True
+        elif not end_of_opts and a.startswith("--"):
+            # Documented deviation (plan 2.3/2.5): unknown flags are
+            # usage errors, not warning-and-continue.
+            return _discover_error_exit(
+                "usage", f"unknown option '{a}'", json_mode)
+        else:
+            paths.append(a)
+    # Stage 2 — non-mutating registry load (plan 4.2)
+    entries, ok, doc = _load_registry_readonly()
+    if not ok:
+        return _discover_error_exit(
+            "registry_unavailable",
+            f"{CUSTOM_LITERALS.name} unavailable for discovery", json_mode)
+    # Stage 3 — discover.dirs structural validation (plan 6.2)
+    try:
+        configured = _discover_validate_config(doc)
+    except _DiscoverError as e:
+        return _discover_error_exit(e.error_class, e.message, json_mode)
+    # Stage 4 — selection: CLI paths override config (plan 6.5)
+    selected = paths if paths else configured
+    if not selected:
+        return _discover_error_exit(
+            "usage",
+            "no sources: pass PATH... or configure discover.dirs", json_mode)
+    # Stage 5 — validate ALL roots before traversing any (plan 4.5)
+    roots, failures = [], []
+    for p in selected:
+        try:
+            roots.append(_discover_open_root(p))
+        except _DiscoverError as e:
+            failures.append((os.path.abspath(p), e))
+    if failures:
+        failures.sort(key=lambda t: t[0])   # normalized-source-bytes order
+        e = failures[0][1]
+        return _discover_error_exit(e.error_class, e.message, json_mode)
+    # Stages 6-8 — collect + filter + order (Segment 2 pipeline)
+    try:
+        candidates = _discover_collect(roots, entries)
+    except _DiscoverError as e:
+        return _discover_error_exit(e.error_class, e.message, json_mode)
+    if json_mode:
+        print(json.dumps(_discover_envelope(
+            "candidates" if candidates else "clean", candidates, None)))
+        return 1 if candidates else 0
+    if candidates:                      # text mode (Segment 2 escaping)
+        for c in candidates:
+            print("\t".join(c[k] for k in (
+                "key", "source", "line",
+                "shape_class", "matched_pattern")))
+        return 1
+    return 0
+
+
 def cmd_literals(args):
     """literals subcommand group (v0.4.2, IG D69): add/list registry
     entries. Every mutation goes through the canonical _load_registry()
@@ -5390,6 +5652,8 @@ def main(argv):
         return cmd_view(rest)
     if cmd == "env":
         return cmd_env(rest)
+    if cmd == "discover":
+        return cmd_discover(rest)
     if cmd == "literals":
         return cmd_literals(rest)
     print(f"[info-guard] unknown command: {cmd} (try `info-guard --help`)")
