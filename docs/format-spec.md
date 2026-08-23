@@ -1252,3 +1252,20 @@ Output:
   with no rewrite
 - any failure: empty stdout, value-free stderr, exit 2 (no JSON error
   envelope — the existing literals convention)
+
+## Consumer obligations — discover JSON (v0.9.0)
+
+Consumers of the `info-guard/discover/v1` envelope must:
+
+1. **Tolerate unknown fields** — additive fields may appear in any
+   object; unknown fields must never break parsing.
+2. **Tolerate additive candidate fields** — candidate pointers carry
+   exactly five fields today (`key`, `source`, `line`, `shape_class`,
+   `matched_pattern`); future releases may add fields. Consumers must
+   not reject candidates for unknown fields.
+3. **Preserve and report unknown `status` values** — a status other
+   than `clean`/`candidates`/`error` must never be silently treated as
+   `clean`; forward it as received.
+4. **Preserve and report unknown `error_class` values** — an unknown
+   class must never be silently mapped to a known one; forward it as
+   received.

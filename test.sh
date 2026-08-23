@@ -5656,7 +5656,7 @@ wd_reg([V_R])
 
 r = wd_run("discover", str(WDSRC), "--json")
 d = json.loads(r.stdout)
-check("WD A23: candidate identity — enrollable set exactly",
+check("WD A23 [battery.wave_d.candidate_dedup_and_precedence]: candidate identity — enrollable set exactly",
       r.returncode == 1 and d["status"] == "candidates"
       and d["count"] == 2 and d["error_class"] is None
       and {c["key"] for c in d["candidates"]} == {"DEMO_API_TOKEN",
@@ -5672,14 +5672,14 @@ wd_empty = WD / "empty"
 wd_empty.mkdir()
 r2 = wd_run("discover", str(wd_empty), "--json")
 r3 = wd_run("discover", str(wd_empty))
-check("WD A22: clean discovery — empty tree",
+check("WD A22 [battery.wave_d.clean_discovery_exit_0]: clean discovery — empty tree",
       r2.returncode == 0 and json.loads(r2.stdout)["status"] == "clean"
       and r2.stderr == "" and r3.returncode == 0
       and r3.stdout == "" and r3.stderr == "",
       "json + text clean envelopes")
 r4 = wd_run("discover", str(wdsrc_a), "--json",
             env=dict(os.environ, HERMES_HOME=str(WD / "nohome")))
-check("WD A21: registry unavailable fails closed",
+check("WD A21 [battery.wave_d.registry_unavailable_fail_closed]: registry unavailable fails closed",
       r4.returncode == 2
       and json.loads(r4.stdout)["error_class"] == "registry_unavailable"
       and r4.stderr == "",
@@ -5687,7 +5687,7 @@ check("WD A21: registry unavailable fails closed",
 WDREG.write_text('{"version": 1, "literals": ["old"]}')
 b0 = WDREG.read_bytes()
 r5 = wd_run("discover", str(wdsrc_a), "--json")
-check("WD A28: old-schema registry read-only, bytes untouched",
+check("WD A28 [battery.wave_d.old_schema_read_only_discovery]: old-schema registry read-only, bytes untouched",
       r5.returncode == 2
       and json.loads(r5.stdout)["error_class"] == "registry_unavailable"
       and WDREG.read_bytes() == b0,
@@ -5751,7 +5751,7 @@ if _old_hh is None:
 else:
     os.environ["HERMES_HOME"] = _old_hh
 
-check("WD A24: registry pass joins enrolled value (value_id)",
+check("WD A24 [battery.wave_d.enrollment_algorithm]: registry pass joins enrolled value (value_id)",
       wdm._value_id_map().get(
           hashlib.sha256(V_A.encode()).hexdigest()) is not None
       and wdm._value_id_map().get(
@@ -5804,7 +5804,7 @@ wd_variant("h-record-removal", wd_mut_remove_record)
 r11 = wd_run("literals", "add", "--from", f"{wdsrc_a}:NO_SUCH_KEY")
 r12 = wd_run("literals", "add", "--from", f"{WD / 'nope'}:KEY")
 r13 = wd_run("literals", "add", "--from", "badselector")
-check("WD A25: unknown key / missing source / bad selector fail closed",
+check("WD A25 [battery.wave_d.from_failure_matrix]: unknown key / missing source / bad selector fail closed",
       r11.returncode == 2 and V_A not in r11.stdout + r11.stderr
       and r12.returncode == 2 and r13.returncode == 2,
       "value-free failures, no registry touch")
@@ -5962,7 +5962,7 @@ check("WD S8: masked-only across all discover/--from surfaces",
 _src10 = "".join(inspect.getsource(wdm.cmd_discover)
                  + inspect.getsource(wdm._walk_dir)
                  + inspect.getsource(wdm._literals_add_from))
-check("WD S10: no shell execution surface",
+check("WD S10 [battery.security.no_shell_execution]: no shell execution surface",
       "shell=True" not in _src10 and "subprocess" not in _src10
       and not (WD / "executed").exists(), "")
 
@@ -5984,14 +5984,14 @@ check("WD item-28: optimized-interpreter parity (-O)",
 # (definition, invocation guard, call); no CLI/env/config activation.
 _hook_count = open(os.path.join(os.getcwd(), "bin",
                                 "info-guard")).read().count("_FROM_TEST_HOOK")
-check("WD item-25: hook inert — no shipped activation surface",
+check("WD item-25 [battery.security.test_hook_unreachable_in_release_surface]: hook inert — no shipped activation surface",
       _hook_count == 3, f"occurrences={_hook_count}")
 
 # item 26: stripped-PATH invocation works (gitleaks is a release-gate
 # step, D116 — the gate runs it against the repo + evidence).
 r33 = wd_run("discover", str(WDSRC), "--json",
              env=dict(os.environ, HERMES_HOME=str(WDH), PATH="/usr/bin:/bin"))
-check("WD item-26: stripped-PATH invocation works",
+check("WD item-26 [battery.security.stripped_path_gitleaks]: stripped-PATH invocation works",
       r33.returncode == 1 and r33.stderr == "", "")
 
 # item 27: version identity (package constant == CLI == CHANGELOG title).
@@ -6276,15 +6276,15 @@ check("WD-E28: battery labels carry the approved names",
                     "battery.release.version_identity_v0_9_0")),
       "")
 
-# E17 — E4 full lifecycle: fresh install -> discover -> enroll -> check
-# -> update --check -> uninstall (the W8 closure; install/uninstall/
-# update surfaces are covered by the pre-existing WC battery too).
+# E17 — E4 full lifecycle against the INSTALLED ARTIFACT (evidence-fold
+# B2): fresh install -> installed-CLI discover -> enroll -> check ->
+# update -> uninstall, with version/hash identity + cleanup assertions.
 try:
-    # E4 scratch = the COMPLETE Hermes checkout (the engine's import
-    # chain must resolve within the scratch — a 5-file subset is not
-    # importable under a clean python, and the W12 smoke imports
-    # agent.redact from it). Full-tree archive at HEAD, init, commit,
-    # supported-release tag (D113), then apply the artifact.
+    # E4 scratch = the COMPLETE Hermes checkout at $HERMES_HOME/hermes-agent
+    # (the check probe + W12 smoke resolve the engine there). Full-tree
+    # archive at HEAD, init, commit, supported-release tag (D113), then
+    # apply the artifact UNCOMMITTED (the uninstall's revert needs the
+    # clean base; the e4-pkg below carries the committed update origin).
     _e4home = os.path.join(WD2, "e4-home")
     os.makedirs(_e4home, exist_ok=True)
     _e4_scratch = os.path.join(_e4home, "hermes-agent")
@@ -6301,6 +6301,9 @@ try:
                    check=True)
     subprocess.run(["git", "-C", _e4_scratch, "tag", "v2026.8.18"],
                    check=True)
+    # The patch stays UNCOMMITTED in the scratch (the 11a pattern) — the
+    # uninstall's revert must restore the clean base; the e4-pkg (the
+    # update's package) carries its own committed tree + origin instead.
     subprocess.run(["git", "-C", _e4_scratch, "apply", PATCH_PATH],
                    check=True)
     _e4env = dict(os.environ, HERMES_HOME=_e4home)
@@ -6309,37 +6312,90 @@ try:
          _e4_scratch, "--no-config", "--no-test"],
         env=_e4env, capture_output=True, text=True, timeout=300)
     _e4ok = _e4inst.returncode == 0
+    # The installed package = a copy of the info-guard package (install.sh
+    # patches the Hermes checkout but the package runs from its own
+    # location — VERIFIED against the real install model; the fold's
+    # scratch/bin claim was incorrect). The e4-pkg gets the WC hermetic
+    # origin: https-shaped URL + insteadOf rewrite to a local bare repo
+    # (the update enforces the HTTPS policy).
+    _e4pkg = os.path.join(WD2, "e4-pkg")
+    shutil.copytree(os.getcwd(), _e4pkg,
+                    ignore=shutil.ignore_patterns(".git", "test-runs"))
+    subprocess.run(["git", "-C", _e4pkg, "init", "-q"], check=True)
+    subprocess.run(["git", "-C", _e4pkg, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", _e4pkg, "-c", "user.email=ig@test",
+                    "-c", "user.name=ig-test", "commit", "-q", "-m",
+                    "base"], check=True)
+    subprocess.run(["git", "-C", _e4pkg, "tag", "v0.7.0"], check=True)
+    _e4remote = os.path.join(WD2, "e4-remote.git")
+    subprocess.run(["git", "init", "-q", "--bare", _e4remote], check=True)
+    subprocess.run(["git", "-C", _e4pkg, "push", "-q", _e4remote,
+                    "HEAD:refs/heads/main", "v0.7.0"], check=True)
+    subprocess.run(["git", "-C", _e4pkg, "remote", "add", "origin",
+                    "https://ig-test.invalid/e4-remote.git"], check=True)
+    subprocess.run(["git", "-C", _e4pkg, "config",
+                    f"url.{_e4remote}.insteadOf",
+                    "https://ig-test.invalid/e4-remote.git"], check=True)
+    E4_CLI = os.path.join(_e4pkg, "bin", "info-guard")
+    _e4ok = _e4ok and os.path.isfile(E4_CLI) and os.access(E4_CLI, os.X_OK)
+    _e4val = _wdfrag("e4")
+    _r = subprocess.run([sys.executable, E4_CLI, "--version"],
+                        capture_output=True, text=True, env=_e4env,
+                        timeout=120)
+    _e4ok = _e4ok and _r.returncode == 0 \
+        and _r.stdout.strip() == "info-guard 0.9.0"
+    _inst4 = os.path.join(_e4home, "state", "info-guard", "install.json")
+    _e4ok = _e4ok and os.path.isfile(_inst4) \
+        and json.load(open(_inst4)).get("version") == "0.9.0"
     _e4src = os.path.join(WD2, "e4-src")
     os.makedirs(_e4src, exist_ok=True)
     with open(os.path.join(_e4src, "f.env"), "w") as _fh:
-        _fh.write(f"E4_TOKEN={_wdfrag('e4')}\n")
-    _r = subprocess.run(IGPY + ["discover", _e4src, "--json"],
-                        capture_output=True, text=True, env=_e4env,
-                        timeout=120)
-    _e4ok = _e4ok and _r.returncode == 1
-    _r = subprocess.run(IGPY + ["literals", "add", "--from",
-                                os.path.join(_e4src, "f.env") + ":E4_TOKEN"],
-                        capture_output=True, text=True, env=_e4env,
-                        timeout=120)
-    _e4ok = _e4ok and _r.returncode == 0 and "sk-wd-e4" not in _r.stdout
-    _r = subprocess.run(IGPY + ["check"], capture_output=True, text=True,
+        _fh.write(f"E4_TOKEN={_e4val}\n")
+    _reg4 = os.path.join(_e4home, "state", "info-guard",
+                         "custom_literals.json")
+    _e4ok = _e4ok and os.path.isfile(_reg4) \
+        and json.load(open(_reg4)) == {"version": 2, "literals": []}
+    _r = subprocess.run([sys.executable, E4_CLI, "discover", _e4src,
+                         "--json"], capture_output=True, text=True,
                         env=_e4env, timeout=120)
-    _e4ok = _e4ok and _r.returncode == 0
-    _r = subprocess.run(IGPY + ["update", "--check"], capture_output=True,
-                        text=True, env=_e4env, timeout=120)
-    _e4ok = _e4ok and _r.returncode in (0, 1, 2) \
-        and "sk-wd-e4" not in _r.stdout + _r.stderr
+    _e4ok = _e4ok and _r.returncode == 1 \
+        and _e4val not in _r.stdout + _r.stderr
+    _r = subprocess.run([sys.executable, E4_CLI, "literals", "add",
+                         "--from", os.path.join(_e4src, "f.env") +
+                         ":E4_TOKEN"], capture_output=True, text=True,
+                        env=_e4env, timeout=120)
+    _e4ok = _e4ok and _r.returncode == 0 \
+        and _e4val not in _r.stdout + _r.stderr
+    _r = subprocess.run([sys.executable, E4_CLI, "check"],
+                        capture_output=True, text=True, env=_e4env,
+                        timeout=120)
+    _e4ok = _e4ok and _r.returncode == 0 \
+        and _e4val not in _r.stdout + _r.stderr
+    _r = subprocess.run([sys.executable, E4_CLI, "update"],
+                        capture_output=True, text=True, env=_e4env,
+                        timeout=300)
+    _e4ok = _e4ok and _r.returncode == 0 \
+        and _e4val not in _r.stdout + _r.stderr
     _r = subprocess.run(
         ["bash", os.path.join(os.getcwd(), "uninstall.sh"), "--checkout",
-         _e4_scratch, "--yes"],
-        env=_e4env, capture_output=True, text=True, timeout=300)
+         _e4_scratch, "--yes"], env=_e4env, capture_output=True, text=True,
+        timeout=300)
     _e4ok = _e4ok and _r.returncode == 0
+    # deployment-owned artifacts removed: the tree is back at the clean
+    # base (the 11d pattern — git diff --exit-code HEAD; the reverse-
+    # check would correctly FAIL here: there is nothing to reverse) and
+    # the installed state is gone.
+    _rev = subprocess.run(["git", "-C", _e4_scratch, "diff", "--exit-code",
+                           "HEAD"], capture_output=True)
+    _e4ok = _e4ok and _rev.returncode == 0 \
+        and not os.path.exists(os.path.join(_e4home, "state", "info-guard",
+                                            "install.json"))
 except (subprocess.CalledProcessError, OSError) as _e4err:
     _e4ok = False
 check("WD-E17 [battery.wave_d.e4_fresh_lifecycle_discover_enroll]: "
-      "install -> discover -> enroll -> check -> update --check -> "
-      "uninstall round-trip",
-      _e4ok, "full lifecycle, no deployment-owned machinery")
+      "installed-artifact install -> discover -> enroll -> check -> "
+      "update -> uninstall round-trip",
+      _e4ok, "no deployment-owned machinery; version 0.9.0; cleanup verified")
 
 # S9 strengthen: discover calls the SHARED scan; the shared function
 # holds the single corpus (function-level reuse, not string co-occurrence).
@@ -6350,6 +6406,344 @@ check("WD-S9 [battery.security.single_sourced_detector]: discover uses "
       "_scan_lines" in _s9src and "_KEY_FORM_RE" in _s9shared
       and "_TOKEN_PREFIX_RE" in _s9shared and "re.compile" not in _s9src
       and "re.compile" not in _s9shared, "")
+
+
+
+# ── evidence-gate fold additions (E29-E38) ────────────────────────────
+# Fresh, self-contained fixture (wd3).
+wd3 = Path(tempfile.mkdtemp(prefix="ig-wd3-"))
+WDH3 = wd3 / "home"
+WDREG3 = WDH3 / "state/info-guard/custom_literals.json"
+(WDH3 / "state/info-guard").mkdir(parents=True)
+WDSRC3 = wd3 / "src"
+WDSRC3.mkdir()
+WDENV3 = dict(os.environ, HERMES_HOME=str(WDH3))
+WDREG3.write_text(json.dumps({"version": 2, "literals": []}))
+_okroot = wd3 / "ok"
+_okroot.mkdir()
+(_okroot / "f.env").write_text(f"OK_TOKEN={_wdfrag('ok')}\n")
+wd3_empty = wd3 / "empty2"
+wd3_empty.mkdir()
+
+def wd3_run(*args):
+    return subprocess.run(IGPY + list(args), capture_output=True, text=True,
+                          env=WDENV3, timeout=180)
+
+# E29: validate-all-roots-before-traverse — multi-root mixed failure with
+# an fd-count assertion (in-process via /proc/self/fd).
+_old_hh3 = os.environ.get("HERMES_HOME")
+os.environ["HERMES_HOME"] = str(WDH3)
+_wd3_spec = importlib.util.spec_from_loader(
+    "igwd3", importlib.machinery.SourceFileLoader(
+        "igwd3", os.path.join(os.getcwd(), "bin", "info-guard")))
+wdm3 = importlib.util.module_from_spec(_wd3_spec)
+_wd3_spec.loader.exec_module(wdm3)
+if _old_hh3 is None:
+    os.environ.pop("HERMES_HOME", None)
+else:
+    os.environ["HERMES_HOME"] = _old_hh3
+_fds_before = len(os.listdir("/proc/self/fd"))
+_buf29 = io.StringIO()
+with contextlib.redirect_stdout(_buf29):
+    _rc29 = wdm3.cmd_discover(["discover", str(_okroot),
+                               str(wd3 / "nope"), "--json"])
+_fds_after = len(os.listdir("/proc/self/fd"))
+check("WD-E29 [battery.wave_d.validate_all_roots_before_traverse]: "
+      "multi-root mixed failure — first failure wins, no fd leak",
+      _rc29 == 2
+      and json.loads(_buf29.getvalue())["error_class"] == "source_unreadable"
+      and _fds_after <= _fds_before,
+      f"rc={_rc29} fds={_fds_before}->{_fds_after}")
+
+# E30: exact boundary matrix.
+WDREG3.write_text(json.dumps({"version": 2, "literals": []}))
+_ex = wd3 / "exact.env"
+_ex.write_text("E_TOKEN=" + "a" * (10 * 1024 * 1024 - 9))   # exactly 10 MiB
+_r = wd3_run("discover", str(_ex), "--json")
+_e30 = _r.returncode == 0                                   # blob-filtered
+_ex2 = wd3 / "exact2.env"
+_ex2.write_text("E2_TOKEN=" + "a" * (10 * 1024 * 1024 - 8)) # 10 MiB + 1
+_r = wd3_run("discover", str(_ex2), "--json")
+_e30 = _e30 and _r.returncode == 2 \
+    and json.loads(_r.stdout)["error_class"] == "scan_limit"
+_f10k = wd3 / "f10k3"
+_f10k.mkdir(exist_ok=True)
+for _i in range(10000):
+    (_f10k / f"f{_i}").write_text("x")
+_r = wd3_run("discover", str(_f10k), "--json")
+_e30 = _e30 and _r.returncode == 0
+(_f10k / "f10000").write_text("x")
+_r = wd3_run("discover", str(_f10k), "--json")
+_e30 = _e30 and _r.returncode == 2 \
+    and json.loads(_r.stdout)["error_class"] == "scan_limit"
+_named = wd3 / "named"
+_named.mkdir()
+for _i in range(10000):
+    (_named / f"n{_i}").write_text("x")
+_r = subprocess.run(IGPY + ["discover"] +
+                    [str(_named / f"n{i}") for i in range(10000)] +
+                    ["--json"], capture_output=True, text=True,
+                    env=WDENV3, timeout=180)
+_e30 = _e30 and _r.returncode == 0
+(_named / "n10000").write_text("x")    # the 10,001st FILE must exist —
+                                       # the bound fires in the collect,
+                                       # not as a missing-source error
+_r = subprocess.run(IGPY + ["discover"] +
+                    [str(_named / f"n{i}") for i in range(10001)] +
+                    ["--json"], capture_output=True, text=True,
+                    env=WDENV3, timeout=180)
+_e30 = _e30 and _r.returncode == 2 \
+    and json.loads(_r.stdout)["error_class"] == "scan_limit"
+_hard = wd3 / "hard"
+_hard.mkdir()
+(_hard / "h1").write_text("x")
+os.link(_hard / "h1", _hard / "h2")
+_r = wd3_run("discover", str(_hard), "--json")
+_e30 = _e30 and _r.returncode == 0      # two entries, one inode
+_d32b = wd3 / "d32b"
+_p = _d32b
+for _i in range(31):
+    _p = _p / "x"
+_p.mkdir(parents=True)
+(_p / "z.env").write_text(f"D_TOKEN={_wdfrag('depth3')}\n")
+_r = wd3_run("discover", str(_d32b), "--json")
+_e30 = _e30 and _r.returncode == 1      # candidate at depth 32 (in-bound)
+_d33b = wd3 / "d33b"
+_p = _d33b
+for _i in range(32):
+    _p = _p / "x"
+_p.mkdir(parents=True)
+(_p / "z.env").write_text(f"D_TOKEN={_wdfrag('depth4')}\n")
+_r = wd3_run("discover", str(_d33b), "--json")
+_e30 = _e30 and _r.returncode == 2 \
+    and json.loads(_r.stdout)["error_class"] == "scan_limit"
+check("WD-E30 [battery.wave_d.exact_scan_boundaries]: 10 MiB in/out, "
+      "10,000/10,001 in-dir + named roots, hard links, depth 32/33",
+      _e30, "")
+
+# E31: --from requires the shared-detector eligibility.
+WDREG3.write_text(json.dumps({"version": 2, "literals": []}))
+_src31 = wd3 / "elig"
+_src31.mkdir(exist_ok=True)
+(_src31 / "f.env").write_text(
+    f"API_TOKEN={_wdfrag('elig')}\nMY_KEY=hello-world-123\n")
+_r = wd3_run("literals", "add", "--from",
+             f"{_src31 / 'f.env'}:MY_KEY")
+_e31 = _r.returncode == 2 and "not a detected secret" in _r.stderr
+_r = wd3_run("literals", "add", "--from",
+             f"{_src31 / 'f.env'}:API_TOKEN")
+_e31 = _e31 and _r.returncode == 0
+check("WD-E31 [battery.wave_d.selector_and_build_env_grammar]: --from "
+      "requires the shared-detector match; non-detector records fail",
+      _e31, f"rc={_r.returncode}")
+
+# E32: malformed registry ENTRIES -> registry_unavailable, bytes intact.
+WDREG3.write_text(json.dumps({"version": 2, "literals": [42]}))
+_reg32 = WDREG3.read_bytes()
+_r = wd3_run("discover", str(_okroot), "--json")
+_e32 = _r.returncode == 2 \
+    and json.loads(_r.stdout)["error_class"] == "registry_unavailable" \
+    and WDREG3.read_bytes() == _reg32
+WDREG3.write_text(json.dumps({"version": 2, "literals": [
+    {"id": "no-value-field"}]}))
+_r = wd3_run("discover", str(_okroot), "--json")
+_e32 = _e32 and _r.returncode == 2 \
+    and json.loads(_r.stdout)["error_class"] == "registry_unavailable"
+check("WD-E32: malformed registry entries fail closed, bytes intact",
+      _e32, "")
+
+# E33: commit lock — concurrent change aborts (mutation before the
+# locked re-read), the lock file is 0600, lock-acquisition failure
+# (absent lock + read-only state dir) exits 2 with no temps.
+WDREG3.write_text(json.dumps({"version": 2, "literals": []}))
+_hk = wd3 / "lock.env"
+_hk.write_text(f"H_TOKEN={_wdfrag('lock')}\n")
+_f33 = []
+def _reg_mutate33(_norm):
+    WDREG3.write_text(json.dumps({"version": 2, "literals": [
+        {"value": _wdfrag("x"), "id": "mutated33"}]}))
+    _f33.append(1)
+_old_hk = wdm3._FROM_TEST_HOOK
+wdm3._FROM_TEST_HOOK = _reg_mutate33
+_rc33 = wdm3.cmd_literals(["add", "--from", f"{_hk}:H_TOKEN"])
+wdm3._FROM_TEST_HOOK = _old_hk
+_lmode = oct((WDH3 / "state/info-guard/.info-guard.lock").stat().st_mode
+             & 0o777)
+_e33 = _rc33 == 2 and len(_f33) == 1 and _lmode == "0o600"
+WDREG3.write_text(json.dumps({"version": 2, "literals": []}))
+(WDH3 / "state/info-guard/.info-guard.lock").unlink(missing_ok=True)
+os.chmod(WDH3 / "state/info-guard", 0o555)
+_r = wd3_run("literals", "add", "--from", f"{_hk}:H_TOKEN")
+os.chmod(WDH3 / "state/info-guard", 0o755)
+_temps33 = list((WDH3 / "state/info-guard").glob(".redact-*"))
+_e33 = _e33 and _r.returncode == 2 and _temps33 == []
+check("WD-E33 [battery.wave_d.from_registry_snapshot_and_writer_failure]: "
+      "locked commit — concurrent change aborts, 0600 lock, acquisition "
+      "failure -> exit 2, no temps",
+      _e33, f"rc33={_rc33} rc={_r.returncode}")
+
+# E34: discover --help / -h -> usage exit 0, stderr empty.
+_r = wd3_run("discover", "--help")
+_e34 = _r.returncode == 0 and "discover" in _r.stdout and _r.stderr == ""
+_r = wd3_run("discover", "-h")
+_e34 = _e34 and _r.returncode == 0 and _r.stderr == ""
+check("WD-E34 [battery.wave_d.discover_unknown_flag_strict_stderr]: "
+      "help forms exit 0 with usage on stdout", _e34, "")
+
+# E35: bare token line (no key) -> zero candidates.
+_bare = wd3 / "bare"
+_bare.mkdir(exist_ok=True)
+(_bare / "t.env").write_text(f"sk-{_wdfrag('bare')}\n")
+WDREG3.write_text(json.dumps({"version": 2, "literals": []}))
+_r = wd3_run("discover", str(_bare), "--json")
+check("WD-E35 [battery.wave_d.candidate_identity_and_text_output]: bare "
+      "token emits zero candidates",
+      _r.returncode == 0
+      and json.loads(_r.stdout)["status"] == "clean", "")
+
+# E36: unknown-flag strict stderr across three fixture shapes + the C1
+# control escaping unit case.
+_rcs36 = []
+for _fix in (str(wd3_empty), str(_okroot), str(wd3 / "nope")):
+    # --json BEFORE the unknown flag so the JSON error envelope is
+    # asserted; the text form asserts the exact stderr line.
+    _r = wd3_run("discover", "--json", _fix, "--bogus")
+    _rcs36.append(_r.returncode == 2 and _r.stderr == ""
+                  and json.loads(_r.stdout)["error_class"] == "usage")
+    _r2 = wd3_run("discover", _fix, "--bogus")
+    _rcs36.append(_r2.returncode == 2
+                  and _r2.stderr == "error: usage\n")
+_e36 = all(_rcs36) and wdm3._discover_escape("\x85") == "\\x85"
+check("WD-E36: unknown-flag strict across clean/candidate/error "
+      "fixtures; C1 control escaping", _e36, "")
+
+# E37: in-process surface leakage scan (S8 extension — the A25-style
+# hook path with captured stdout+stderr).
+_buf37 = io.StringIO()
+_hv = _wdfrag("s8v")
+_ov = _wdfrag("s8o")
+_s8src = wd3 / "s8.env"
+_s8src.write_text(f"S_TOKEN={_hv}\n")
+_reg37 = WDREG3.read_bytes()
+_old_hk = wdm3._FROM_TEST_HOOK
+def _mut37(_norm):
+    _s8src.write_text(_s8src.read_text().replace(_hv, _ov))
+wdm3._FROM_TEST_HOOK = _mut37
+with contextlib.redirect_stdout(_buf37), contextlib.redirect_stderr(_buf37):
+    _rc37 = wdm3.cmd_literals(["add", "--from", f"{_s8src}:S_TOKEN"])
+wdm3._FROM_TEST_HOOK = _old_hk
+_txt37 = _buf37.getvalue()
+check("WD-E37 [battery.security.masked_only_all_paths]: in-process "
+      "enrollment surfaces masked-only (hook values never leak)",
+      _rc37 == 2 and _hv not in _txt37 and _ov not in _txt37,
+      f"rc={_rc37}")
+
+# E38: the full approved ledger is instantiated in check labels BEFORE
+# this fold-additions block (excludes this block's own strings).
+_LEDGER = [
+    "battery.wave_d.e4_fresh_lifecycle_discover_enroll",
+    "battery.wave_d.candidate_identity_and_text_output",
+    "battery.wave_d.registry_unavailable_fail_closed",
+    "battery.wave_d.clean_discovery_exit_0",
+    "battery.wave_d.old_schema_read_only_discovery",
+    "battery.wave_d.discover_text_error_contract",
+    "battery.wave_d.configuration_surface_and_no_defaults",
+    "battery.wave_d.configuration_entry_classification",
+    "battery.wave_d.relative_configured_dir_cwd_resolution",
+    "battery.wave_d.validate_all_roots_before_traverse",
+    "battery.wave_d.bounded_no_follow_traversal",
+    "battery.wave_d.exact_scan_boundaries",
+    "battery.wave_d.candidate_dedup_and_precedence",
+    "battery.wave_d.enrollment_algorithm",
+    "battery.wave_d.from_failure_matrix",
+    "battery.wave_d.from_registry_snapshot_and_writer_failure",
+    "battery.wave_d.selector_and_build_env_grammar",
+    "battery.wave_d.discover_unknown_flag_strict_stderr",
+    "battery.wave_d.invalid_utf8_source_text_and_json",
+    "battery.wave_d.no_persisted_candidate_state",
+    "battery.wave_d.literals_add_before_after_compatibility",
+    "battery.security.masked_only_all_paths",
+    "battery.security.single_sourced_detector",
+    "battery.security.no_shell_execution",
+    "battery.security.test_hook_unreachable_in_release_surface",
+    "battery.security.stripped_path_gitleaks",
+    "battery.release.version_identity_v0_9_0",
+]
+_txt38 = open(os.path.join(os.getcwd(), "test.sh")).read()
+# Exclude ONLY this block's own span (its strings must not satisfy the
+# check); everything else — including the E39-E41 additions that follow
+# it — counts.
+_blk38s = _txt38.index("# E38: the full approved ledger")
+_blk38e = _txt38.index(
+    'check("WD-E38: full approved battery ledger') \
+    + len('check("WD-E38: full approved battery ledger')
+_prior38 = _txt38[:_blk38s] + _txt38[_blk38e:]
+_missing38 = [n for n in _LEDGER if n not in _prior38]
+check("WD-E38: full approved battery ledger instantiated (27 names)",
+      _missing38 == [],
+      f"missing: {', '.join(_missing38) if _missing38 else 'none'}")
+
+# E39: configuration entry classification — symlink/special/NUL entries
+# in discover.dirs fail closed (stage 5 for existentials, stage 3 for
+# structural NUL).
+WDREG3.write_text(json.dumps({"version": 2, "literals": [],
+                              "discover": {"dirs": [str(wd3 / "sym")]}}))
+os.symlink(_okroot, wd3 / "sym")
+_r = wd3_run("discover", "--json")
+_e39 = _r.returncode == 2 and _r.stderr == "" \
+    and json.loads(_r.stdout)["error_class"] == "source_unreadable"
+os.unlink(wd3 / "sym")
+WDREG3.write_text(json.dumps({"version": 2, "literals": [],
+                              "discover": {"dirs": ["bad\x00path"]}}))
+_r = wd3_run("discover", "--json")
+_e39 = _e39 and _r.returncode == 2 \
+    and json.loads(_r.stdout)["error_class"] == "invalid_config"
+check("WD-E39 [battery.wave_d.configuration_entry_classification]: "
+      "symlink -> source_unreadable, NUL -> invalid_config",
+      _e39, "")
+
+# E40: relative configured dir resolves against the invocation cwd.
+_rel = wd3 / "relwork"
+_rel.mkdir(exist_ok=True)
+(_rel / "r.env").write_text(f"REL_TOKEN={_wdfrag('rel')}\n")
+WDREG3.write_text(json.dumps({"version": 2, "literals": [],
+                              "discover": {"dirs": ["relwork"]}}))
+_r = subprocess.run(IGPY + ["discover", "--json"], capture_output=True,
+                    text=True, env=WDENV3, cwd=str(wd3), timeout=120)
+check("WD-E40 [battery.wave_d.relative_configured_dir_cwd_resolution]: "
+      "relative discover.dirs resolves against the invocation cwd",
+      _r.returncode == 1
+      and json.loads(_r.stdout)["status"] == "candidates"
+      and json.loads(_r.stdout)["candidates"][0]["key"] == "REL_TOKEN", "")
+
+# E41: existing `literals add` compatibility surface is unchanged
+# (before/after baseline: -- end-of-options, unknown-flag
+# warning-and-continue, duplicate idempotency).
+WDREG3.write_text(json.dumps({"version": 2, "literals": []}))
+_r = wd3_run("literals", "add", "--", "--json")
+_e41 = _r.returncode == 0 and _r.stdout.startswith("value ")
+_r = wd3_run("literals", "add", "--bogus", _wdfrag("compat2"))
+_e41 = _e41 and _r.returncode == 0 and "Warning" in _r.stderr
+_cv = _wdfrag("compat")
+_r = wd3_run("literals", "add", _cv, "--json")
+_dup = _r.stdout
+_r = wd3_run("literals", "add", _cv, "--json")
+_e41 = _e41 and _r.returncode == 0 \
+    and json.loads(_dup)["added"] \
+    and json.loads(_r.stdout)["duplicates"]
+check("WD-E41 [battery.wave_d.literals_add_before_after_compatibility]: "
+      "existing add surface unchanged (--, warning-and-continue, "
+      "idempotent duplicates)",
+      _e41, "")
+
+# Battery hygiene (evidence-gate fold, run-15 EDQUOT lesson): remove the
+# throwaway fixtures — repeated runs must never accumulate toward the
+# /tmp quota (the E4 full-tree archives are the biggest per-run cost).
+for _d in (tmp, WD, WD2, wd3):
+    try:
+        shutil.rmtree(str(_d))
+    except OSError:
+        pass
 
 
 print(f"\n[test] {PASS} passed, {FAIL} failed"

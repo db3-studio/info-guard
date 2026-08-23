@@ -115,6 +115,7 @@ import hashlib
 import json
 import os
 import re
+import resource
 import secrets
 import shutil
 import stat
@@ -3439,6 +3440,14 @@ def _load_registry_readonly():
         # mistyped literals field is registry_unavailable, never an
         # implicit empty registry.
         return None, False, None
+    for item in doc["literals"]:
+        # Per-entry strictness (evidence-fold A5): each entry must be a
+        # string OR a dict with a string value; anything else is a
+        # structurally invalid registry -> registry_unavailable.
+        if not (isinstance(item, str)
+                or (isinstance(item, dict)
+                    and isinstance(item.get("value"), str))):
+            return None, False, None
     raw = doc["literals"]
     entries, _n, _need = _normalize_entries(raw or [])
     return entries, True, doc
@@ -3530,6 +3539,14 @@ def _open_nofollow(path):
                     raise _DiscoverError(
                         "source_unreadable",
                         f"source not accessible: {norm}") from e
+                if e.errno in (errno.EMFILE, errno.ENFILE):
+                    # Descriptor exhaustion at the root-validation stage
+                    # IS the file-count bound being hit (evidence-fold
+                    # E30): a named-root storm beyond the soft limit
+                    # maps to scan_limit, not a source error.
+                    raise _DiscoverError(
+                        "scan_limit",
+                        "too many open descriptors (file-count bound)") from e
                 raise _DiscoverError(
                     "source_unreadable",
                     f"source unreadable: {norm}") from e
@@ -3613,7 +3630,9 @@ def _walk_dir(fd, norm, depth, registry_hashes, out, state):
         raise _DiscoverError(
             "source_unreadable", f"directory unreadable: {norm}") from e
     for name in names:
-        child_norm = f"{norm}/{name}"
+        # Separator-aware canonical join (evidence-fold A8): a root of
+        # "/" must not produce "//" children.
+        child_norm = os.path.join(norm, name)
         try:
             est = os.stat(name, dir_fd=fd, follow_symlinks=False)
         except OSError as e:
@@ -3649,6 +3668,13 @@ def _walk_dir(fd, norm, depth, registry_hashes, out, state):
                 _walk_dir(child, child_norm, depth + 1,
                           registry_hashes, out, state)
             elif stat.S_ISREG(ost.st_mode):
+                # The depth bound applies to CONTENT: a file inside a
+                # depth-32 dir sits at depth 33 -> scan_limit
+                # (evidence-fold E30; the dir-entry check alone missed
+                # files in the deepest in-bound dir).
+                if depth + 1 > _MAX_DEPTH:
+                    raise _DiscoverError(
+                        "scan_limit", "scan depth exceeds 32")
                 state["files"] += 1      # hard links: once per entry (7.5)
                 if state["files"] > _MAX_FILES:
                     raise _DiscoverError(
@@ -3674,16 +3700,32 @@ def _process_file(fd, norm, st, registry_hashes):
     if st.st_size > _MAX_FILE_BYTES:
         raise _DiscoverError(
             "scan_limit", f"file exceeds 10 MiB: {norm}")
-    try:
-        data = os.read(fd, _MAX_FILE_BYTES + 1)
-    except OSError as e:
+    # Complete bounded read loop (evidence-fold A2): read to EOF, cap at
+    # MAX+1, detect growth beyond the bound and read errors; post-read
+    # fstat must match the pre-read size AND identity — a file that
+    # grows/shrinks/replaces after the initial stat fails closed.
+    chunks = []
+    total = 0
+    while True:
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError as e:
+            raise _DiscoverError(
+                "source_unreadable", f"unreadable: {norm}") from e
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _MAX_FILE_BYTES:
+            raise _DiscoverError(
+                "scan_limit", f"file grew past 10 MiB: {norm}")
+        chunks.append(chunk)
+    data = b"".join(chunks)
+    st_post = os.fstat(fd)
+    if (len(data) != st.st_size or st_post.st_size != st.st_size
+            or (st_post.st_dev, st_post.st_ino)
+            != (st.st_dev, st.st_ino)):
         raise _DiscoverError(
-            "source_unreadable", f"file unreadable: {norm}") from e
-    if len(data) > _MAX_FILE_BYTES:
-        raise _DiscoverError(
-            "scan_limit", f"file grew past 10 MiB during read: {norm}")
-    if b"\x00" in data:
-        return []                        # binary (incl. UTF-16) — skip
+            "source_unreadable", f"file changed during scan: {norm}")
     try:
         return _detect_and_filter(data, norm, registry_hashes)
     except _DiscoverError:
@@ -3769,7 +3811,19 @@ def cmd_discover(args):
 
     Operator-named sources -> unregistered candidates (pointers only) ->
     enroll via `literals add --from`. Read-only; never writes the
-    registry. Exits: 0 clean / 1 candidates / 2 error (proposal §3)."""
+    registry; exits: 0 clean / 1 candidates / 2 error (proposal §3)."""
+    # The documented 10,000-file bound (plan 7.10) requires more open
+    # descriptors than the platform soft limit provides for the
+    # named-file-roots case (evidence-fold E30) — raise the soft limit
+    # up to the hard limit (margin 256 for the process's base fds),
+    # best-effort.
+    try:
+        _soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if _soft < _MAX_FILES + 256:
+            resource.setrlimit(resource.RLIMIT_NOFILE,
+                               (min(_MAX_FILES + 256, _hard), _hard))
+    except (ValueError, OSError):
+        pass
     json_mode = False
     paths = []
     end_of_opts = False
@@ -3802,19 +3856,22 @@ def cmd_discover(args):
         return _discover_error_exit(
             "usage",
             "no sources: pass PATH... or configure discover.dirs", json_mode)
-    # Stage 5 — validate ALL roots before traversing any (plan 4.5)
+    # Stage 5 — validate ALL roots before traversing any (plan 4.5).
+    # The outer try/finally (evidence-fold A1) closes every retained root
+    # descriptor on EVERY path — including a later-root validation
+    # failure, which previously bypassed the cleanup.
     roots, failures = [], []
-    for p in selected:
-        try:
-            roots.append(_discover_open_root(p))
-        except _DiscoverError as e:
-            failures.append((os.path.abspath(p), e))
-    if failures:
-        failures.sort(key=lambda t: os.fsencode(t[0]))
-        e = failures[0][1]
-        return _discover_error_exit(e.error_class, e.message, json_mode)
-    # Stages 6-8 — collect + filter + order (Segment 2 pipeline)
     try:
+        for p in selected:
+            try:
+                roots.append(_discover_open_root(p))
+            except _DiscoverError as e:
+                failures.append((os.path.abspath(p), e))
+        if failures:
+            failures.sort(key=lambda t: os.fsencode(t[0]))
+            e = failures[0][1]
+            return _discover_error_exit(e.error_class, e.message, json_mode)
+        # Stages 6-8 — collect + filter + order (Segment 2 pipeline)
         candidates = _discover_collect(roots, entries)
         if json_mode:
             escaped = [{"key": _discover_escape(c["key"]),
@@ -3890,18 +3947,6 @@ def _lstat_nofollow(path):
             os.close(cur)
         except OSError:
             pass
-
-
-def _registry_snapshot():
-    """Registry identity snapshot for concurrent-change detection
-    (plan 5.3/5.6): byte hash + stat identity. None if unreadable."""
-    try:
-        b = CUSTOM_LITERALS.read_bytes()
-        st = CUSTOM_LITERALS.stat()
-    except OSError:
-        return None
-    return (hashlib.sha256(b).hexdigest(), st.st_dev, st.st_ino,
-            st.st_size, st.st_mtime_ns)
 
 
 def _literals_add_from(selector, json_mode):
@@ -3990,6 +4035,14 @@ def _literals_add_from(selector, json_mode):
                                     for c in value):
             return fail("source value is empty or contains control "
                         "characters or line terminators")
+        # Evidence-fold A4: enrollment requires the SHARED-detector
+        # eligibility — exactly one KEY-SHAPE match for the requested
+        # key on the same snapshot (candidate set = enrollable set; a
+        # parser-valid non-detector record must fail closed).
+        elig = [h for h in _scan_lines(lines)
+                if h[0] == "KEY-SHAPE" and h[4].partition("=")[0] == key]
+        if len(elig) != 1:
+            return fail("requested key is not a detected secret")
         # 14.5 — complete-file fingerprint over the SAME opened snapshot.
         fp = hashlib.sha256(data).hexdigest()
         st_initial = os.fstat(fd)
@@ -4001,9 +4054,12 @@ def _literals_add_from(selector, json_mode):
         # between this snapshot and the commit re-check (E21a).
         try:
             reg_bytes = CUSTOM_LITERALS.read_bytes()
+            reg_st = CUSTOM_LITERALS.stat()
         except OSError:
             return fail("registry unavailable")
-        reg_before = hashlib.sha256(reg_bytes).hexdigest()
+        reg_before = (hashlib.sha256(reg_bytes).hexdigest(),
+                      reg_st.st_dev, reg_st.st_ino, reg_st.st_size,
+                      reg_st.st_mtime_ns)
         try:
             doc = json.loads(reg_bytes)
         except ValueError:
@@ -4013,6 +4069,13 @@ def _literals_add_from(selector, json_mode):
                 or "literals" not in doc
                 or not isinstance(doc["literals"], list)):
             return fail("registry unavailable")
+        for item in doc["literals"]:
+            # Per-entry strictness (evidence-fold A5), matching the
+            # readonly validator.
+            if not (isinstance(item, str)
+                    or (isinstance(item, dict)
+                        and isinstance(item.get("value"), str))):
+                return fail("registry unavailable")
         entries, _n, _w = _normalize_entries(doc["literals"])
         vid = None
         dup_kind = None
@@ -4025,9 +4088,14 @@ def _literals_add_from(selector, json_mode):
         if _FROM_TEST_HOOK is not None:
             _FROM_TEST_HOOK(norm)
         # 14.8 — revalidate the OPENED HANDLE: re-read + re-stat + re-hash.
-        os.lseek(fd, 0, os.SEEK_SET)
-        data2 = os.read(fd, _MAX_FILE_BYTES + 1)
-        st_now = os.fstat(fd)
+        # Every operational read path maps to the generic value-free
+        # failure (evidence-fold A6).
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            data2 = os.read(fd, _MAX_FILE_BYTES + 1)
+            st_now = os.fstat(fd)
+        except OSError:
+            return fail("source changed during enrollment — aborted")
         if ((st_now.st_dev, st_now.st_ino)
                 != (st_initial.st_dev, st_initial.st_ino)
                 or st_now.st_size != st_initial.st_size
@@ -4047,52 +4115,76 @@ def _literals_add_from(selector, json_mode):
         if lst is None or (lst.st_dev, lst.st_ino) != (
                 st_initial.st_dev, st_initial.st_ino):
             return fail("source path replaced during enrollment — aborted")
-        # 14.11-14.12 — COMMIT boundary: registry bytes unchanged since
-        # the preflight, then the canonical atomic write (migration is
-        # permitted only inside this successful transaction).
+        # 14.11-14.12 — COMMIT boundary (evidence-fold A3): a canonical
+        # LOCKED transaction — acquire the exclusive writer lock, re-read
+        # bytes AND identity under the lock, require both to match the
+        # preflight snapshot, then the canonical atomic write. The lock
+        # closes the compare-then-write window.
+        lock_path = STATE_DIR / ".info-guard.lock"
         try:
-            if hashlib.sha256(CUSTOM_LITERALS.read_bytes()).hexdigest() \
-                    != reg_before:
-                return fail("registry changed concurrently — aborted")
+            lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         except OSError:
-            return fail("registry changed concurrently — aborted")
-        if vid is not None:
-            if dup_kind == _HONEYTOKEN_KIND:
-                # A normal literal cannot be enrolled over a canary
-                # (no-silent-mutation, mirrors direct add).
-                return fail("value already registered as a honeytoken")
-            # Idempotent duplicate success: existing id, no rewrite
-            # (the dup-add precedent).
+            return fail("cannot write registry — unchanged "
+                        "(permissions? disk?)")
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                cur_bytes = CUSTOM_LITERALS.read_bytes()
+                cur_st = CUSTOM_LITERALS.stat()
+            except OSError:
+                return fail("registry changed concurrently — aborted")
+            if (hashlib.sha256(cur_bytes).hexdigest() != reg_before[0]
+                    or (cur_st.st_dev, cur_st.st_ino)
+                    != (reg_before[1], reg_before[2])):
+                return fail("registry changed concurrently — aborted")
+            if vid is not None:
+                if dup_kind == _HONEYTOKEN_KIND:
+                    # A normal literal cannot be enrolled over a canary
+                    # (no-silent-mutation, mirrors direct add).
+                    return fail("value already registered as a honeytoken")
+                # Idempotent duplicate success: existing id, no rewrite
+                # (the dup-add precedent).
+                if json_mode:
+                    print(json.dumps({"added": [], "duplicates": [
+                        {"value_masked": _mask_value(value), "id": vid}]},
+                        indent=2))
+                else:
+                    print(f"value {vid}")
+                return 0
+            entries2, _n, _w = _normalize_entries(
+                entries + [{"value": value}])
+            out = dict(doc) if isinstance(doc, dict) else {}
+            out["version"] = 2
+            out["literals"] = entries2
+            try:
+                STATE_DIR.mkdir(parents=True, exist_ok=True)
+                _atomic_write_json(CUSTOM_LITERALS, out)
+            except OSError:
+                # Canonical write failure: exit 2, loud, registry
+                # unchanged (Wave A A2/MAJ-5); temp artifacts are
+                # cleaned by the writer.
+                return fail("cannot write registry — unchanged "
+                            "(permissions? disk?)")
+            for item in entries2:
+                if isinstance(item, dict) and item.get("value") == value:
+                    vid = item.get("id")
+                    break
             if json_mode:
-                print(json.dumps({"added": [], "duplicates": [
-                    {"value_masked": _mask_value(value), "id": vid}]},
-                    indent=2))
+                print(json.dumps({"added": [
+                    {"value_masked": _mask_value(value), "id": vid}],
+                    "duplicates": []}, indent=2))
             else:
                 print(f"value {vid}")
             return 0
-        entries2, _n, _w = _normalize_entries(entries + [{"value": value}])
-        out = dict(doc) if isinstance(doc, dict) else {}
-        out["version"] = 2
-        out["literals"] = entries2
-        try:
-            STATE_DIR.mkdir(parents=True, exist_ok=True)
-            _atomic_write_json(CUSTOM_LITERALS, out)
-        except OSError:
-            # Canonical write failure: exit 2, loud, registry unchanged
-            # (Wave A A2/MAJ-5); temp artifacts are cleaned by the writer.
-            return fail("cannot write registry — unchanged (permissions? "
-                        "disk?)")
-        for item in entries2:
-            if isinstance(item, dict) and item.get("value") == value:
-                vid = item.get("id")
-                break
-        if json_mode:
-            print(json.dumps({"added": [
-                {"value_masked": _mask_value(value), "id": vid}],
-                "duplicates": []}, indent=2))
-        else:
-            print(f"value {vid}")
-        return 0
+        finally:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
     finally:
         try:
             os.close(fd)
