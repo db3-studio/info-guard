@@ -147,6 +147,7 @@ _SUBCOMMAND_USAGE = {
     "check": "info-guard check [--heal] [--battery]   Health check / schedulable watchdog (fast smoke by default; --heal repairs the engine; --battery runs the full sandboxed battery)",
     "update": "info-guard update [--check] [--json] [--rollback]   Update the package from the configured origin (run BEFORE `hermes update` — D42 ordering contract)",
     "literals": "info-guard literals add VALUE... [--mask STYLE] [--file FILE] [--json]   Register custom literals (ids assigned)\n"
+                "info-guard literals add --from SOURCE:KEY [--json]   Enroll ONE source value by key (sole enrollment bridge; re-reads live, fails closed)\n"
                 "info-guard literals list [--json]   List registered literals (id + masked value)",
     "pipe": "info-guard pipe    Mask stdin against the registry (fail-closed: missing matcher -> exit 2, no passthrough)",
     "view": "info-guard view <surface> <arg>   Masked viewer: systemd-unit <name> | docker-env <container> | compose-config <path> | file <path>",
@@ -3798,6 +3799,215 @@ def cmd_discover(args):
     return 0
 
 
+# Deterministic enrollment test hook (plan 14.7 / r3 MAJ-2 / battery 25):
+# an INTERNAL dependency-injection seam set ONLY by the acceptance
+# harness (test.sh imports the module and assigns it). NEVER reachable
+# via CLI flag, environment variable, configuration, or any public entry
+# point. The harness hook receives the normalized source path and
+# performs the A25(c)-(h) mutation between the initial snapshot and the
+# final revalidation — product correctness never depends on timing.
+_FROM_TEST_HOOK = None
+
+
+def _lstat_nofollow(path):
+    """No-follow lstat of every path component (plan 14.10). Returns the
+    final stat or None on any symlink/missing/inaccessible component."""
+    norm = os.path.abspath(path)
+    parts = [p for p in norm.split(os.sep) if p]
+    try:
+        cur = os.open(os.sep, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return None
+    try:
+        for i, p in enumerate(parts):
+            try:
+                st = os.stat(p, dir_fd=cur, follow_symlinks=False)
+            except OSError:
+                return None
+            if stat.S_ISLNK(st.st_mode):
+                return None
+            if i != len(parts) - 1:
+                nxt = os.open(p, os.O_RDONLY | os.O_DIRECTORY
+                              | getattr(os, "O_NOFOLLOW", 0), dir_fd=cur)
+                os.close(cur)
+                cur = nxt
+        return st
+    finally:
+        try:
+            os.close(cur)
+        except OSError:
+            pass
+
+
+def _registry_snapshot():
+    """Registry identity snapshot for concurrent-change detection
+    (plan 5.3/5.6): byte hash + stat identity. None if unreadable."""
+    try:
+        b = CUSTOM_LITERALS.read_bytes()
+        st = CUSTOM_LITERALS.stat()
+    except OSError:
+        return None
+    return (hashlib.sha256(b).hexdigest(), st.st_dev, st.st_ino,
+            st.st_size, st.st_mtime_ns)
+
+
+def _literals_add_from(selector, json_mode):
+    """literals add --from SOURCE:KEY — the SOLE enrollment bridge
+    (D51 AMENDED / D123). 12-step single-open TOCTOU-hardened algorithm
+    (plan 14.1-14.12, proposal §3.5): anchored no-follow open, parse from
+    the handle, complete-file fingerprint, deterministic harness hook,
+    handle + fingerprint + record revalidation, original-path (dev, ino)
+    binding, non-mutating registry preflight with stale detection,
+    canonical atomic commit. Failures: value-free stderr + exit 2 (no
+    JSON error envelope — the existing literals convention). Success:
+    text -> existing id-only form; --json -> {"added", "duplicates"}."""
+    def fail(msg):
+        print(f"[info-guard] --from: {msg}", file=sys.stderr)
+        return 2
+
+    # Selector grammar (plan 12.4): split at the LAST colon; the suffix
+    # is the key and must match the verified parser key grammar; the
+    # prefix is the POSIX source path and may contain colons.
+    if ":" not in selector:
+        return fail("invalid --from selector")
+    source, key = selector.rsplit(":", 1)
+    if not source or not key or not VALID_KEY_RE.match(key):
+        return fail("invalid --from selector")
+    # 14.1-14.3 — anchored no-follow open of the final source, exactly
+    # once relative to its verified parent; no second path lookup later.
+    try:
+        fd, st, norm = _open_nofollow(source)
+    except _DiscoverError as e:
+        return fail(e.message)
+    if not stat.S_ISREG(st.st_mode):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return fail("source is not a regular file")
+    try:
+        # 14.4 — parse the opened handle via the existing parser/match
+        # path (single grammar, shared with build/env --check).
+        if st.st_size > _MAX_FILE_BYTES:
+            return fail("source exceeds 10 MiB")
+        data = os.read(fd, _MAX_FILE_BYTES + 1)
+        if len(data) > _MAX_FILE_BYTES:
+            return fail("source grew past 10 MiB during read")
+        lines = data.decode("utf-8", errors="replace").splitlines()
+        parsed, _saw_c, _saw_v = _parse_env_lines(lines)
+        if key not in parsed:
+            return fail(f"key '{key}' not found in source")
+        # Uniqueness: the parser is a dict (collapse hides duplicates);
+        # count occurrences and fail closed on ambiguity (A30/A25).
+        kc = 0
+        for line in lines:
+            s = line.strip()
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            k, _, _vv = s.partition("=")
+            k = k.strip().strip('"').strip("'")
+            if k == key and VALID_KEY_RE.match(k):
+                kc += 1
+        if kc != 1:
+            return fail(f"key '{key}' is ambiguous (duplicate records)")
+        value = parsed[key]
+        # Value validation mirrors direct add: non-empty, no control
+        # chars, no line terminators (fail closed, no write).
+        if not value.strip() or any(ord(c) < 32 or ord(c) == 127
+                                    for c in value):
+            return fail("source value is empty or contains control "
+                        "characters or line terminators")
+        # 14.5 — complete-file fingerprint over the SAME opened snapshot.
+        fp = hashlib.sha256(data).hexdigest()
+        st_initial = os.fstat(fd)
+        # 14.7 — deterministic test hook (harness-only DI seam).
+        if _FROM_TEST_HOOK is not None:
+            _FROM_TEST_HOOK(norm)
+        # 14.8 — revalidate the OPENED HANDLE: re-read + re-stat + re-hash.
+        os.lseek(fd, 0, os.SEEK_SET)
+        data2 = os.read(fd, _MAX_FILE_BYTES + 1)
+        st_now = os.fstat(fd)
+        if ((st_now.st_dev, st_now.st_ino)
+                != (st_initial.st_dev, st_initial.st_ino)
+                or st_now.st_size != st_initial.st_size
+                or hashlib.sha256(data2).hexdigest() != fp):
+            return fail("source changed during enrollment — aborted")
+        # 14.9 — reparse the revalidated content: the requested record
+        # must remain present, unique, parser-equivalent, same value.
+        lines2 = data2.decode("utf-8", errors="replace").splitlines()
+        parsed2, _s2, _v2 = _parse_env_lines(lines2)
+        if key not in parsed2 or parsed2[key] != value:
+            return fail("source record changed during enrollment — aborted")
+        # 14.10 — original-path binding: no-follow lstat of every
+        # component; the original path must still BE the opened handle
+        # (rename/symlink substitution fails closed even though the fd
+        # itself is unchanged).
+        lst = _lstat_nofollow(source)
+        if lst is None or (lst.st_dev, lst.st_ino) != (
+                st_initial.st_dev, st_initial.st_ino):
+            return fail("source path replaced during enrollment — aborted")
+        # 14.6/9 — registry preflight: NON-MUTATING snapshot (no lazy
+        # backfill/migration), existing duplicate semantics.
+        entries, ok, doc = _load_registry_readonly()
+        if not ok:
+            return fail(f"{CUSTOM_LITERALS.name} unavailable")
+        reg_before = _registry_snapshot()
+        vid = None
+        dup_kind = None
+        for item in entries:
+            if isinstance(item, dict) and item.get("value") == value:
+                vid = item.get("id")
+                dup_kind = _entry_kind(item)
+                break
+        # 14.11-14.12 — COMMIT boundary: registry unchanged since the
+        # preflight, then the canonical atomic write (migration is
+        # permitted only inside this successful transaction).
+        if _registry_snapshot() != reg_before:
+            return fail("registry changed concurrently — aborted")
+        if vid is not None:
+            if dup_kind == _HONEYTOKEN_KIND:
+                # A normal literal cannot be enrolled over a canary
+                # (no-silent-mutation, mirrors direct add).
+                return fail("value already registered as a honeytoken")
+            # Idempotent duplicate success: existing id, no rewrite
+            # (the dup-add precedent).
+            if json_mode:
+                print(json.dumps({"added": [], "duplicates": [
+                    {"value_masked": _mask_value(value), "id": vid}]},
+                    indent=2))
+            else:
+                print(f"value {vid}")
+            return 0
+        entries2, _n, _w = _normalize_entries(entries + [{"value": value}])
+        out = dict(doc) if isinstance(doc, dict) else {}
+        out["version"] = 2
+        out["literals"] = entries2
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            _atomic_write_json(CUSTOM_LITERALS, out)
+        except OSError:
+            # Canonical write failure: exit 2, loud, registry unchanged
+            # (Wave A A2/MAJ-5); temp artifacts are cleaned by the writer.
+            return fail("cannot write registry — unchanged (permissions? "
+                        "disk?)")
+        for item in entries2:
+            if isinstance(item, dict) and item.get("value") == value:
+                vid = item.get("id")
+                break
+        if json_mode:
+            print(json.dumps({"added": [
+                {"value_masked": _mask_value(value), "id": vid}],
+                "duplicates": []}, indent=2))
+        else:
+            print(f"value {vid}")
+        return 0
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def cmd_literals(args):
     """literals subcommand group (v0.4.2, IG D69): add/list registry
     entries. Every mutation goes through the canonical _load_registry()
@@ -3823,12 +4033,54 @@ def cmd_literals(args):
 
 def _literals_add(args):
     json_mode, mask, file_path, kind, values = False, None, None, None, []
+    from_selector, end_opts = None, False
     i = 0
     while i < len(args):
         a = args[i]
-        if a == "--json":
+        if not end_opts and a == "--from":
+            if from_selector is not None:
+                print("[info-guard] usage: --from may only be given once",
+                      file=sys.stderr)
+                return 2
+            if i + 1 >= len(args):
+                print("[info-guard] usage: --from SOURCE:KEY required",
+                      file=sys.stderr)
+                return 2
+            nxt = args[i + 1]
+            if nxt == "--":
+                # --from -- SOURCE:KEY — the marker consumes the next
+                # token as selector DATA (plan 12.1-12.3, v3 restore).
+                if i + 2 >= len(args):
+                    print("[info-guard] usage: --from SOURCE:KEY required "
+                          "(nothing after '--')", file=sys.stderr)
+                    return 2
+                from_selector = args[i + 2]
+                i += 2
+            elif nxt.startswith("-"):
+                # Unmarked separate-form selector with a leading-dash
+                # source: requires --from= or --from -- (plan 12.2).
+                print("[info-guard] usage: --from leading-dash sources "
+                      "require --from=SOURCE:KEY or --from -- SOURCE:KEY",
+                      file=sys.stderr)
+                return 2
+            else:
+                from_selector = nxt
+                i += 1
+        elif not end_opts and a.startswith("--from="):
+            if from_selector is not None:
+                print("[info-guard] usage: --from may only be given once",
+                      file=sys.stderr)
+                return 2
+            from_selector = a[len("--from="):]
+            if not from_selector:
+                print("[info-guard] usage: --from SOURCE:KEY required",
+                      file=sys.stderr)
+                return 2
+        elif not end_opts and a == "--":
+            end_opts = True
+        elif not end_opts and a == "--json":
             json_mode = True
-        elif a == "--kind":
+        elif not end_opts and a == "--kind":
             if i + 1 >= len(args):
                 print("[info-guard] usage: --kind KIND required "
                       "(only 'honeytoken' is supported)", file=sys.stderr)
@@ -3839,26 +4091,46 @@ def _literals_add(args):
                 return 2
             kind = args[i + 1]  # validated below (r1 MAJ-1: exact domain)
             i += 1
-        elif a == "--mask":
+        elif not end_opts and a == "--mask":
             if i + 1 >= len(args):
                 print("[info-guard] usage: --mask STYLE required",
                       file=sys.stderr)
                 return 2
             mask = args[i + 1]  # applies to every value; last wins (MIN-4)
             i += 1
-        elif a == "--file":
+        elif not end_opts and a == "--file":
             if i + 1 >= len(args):
                 print("[info-guard] usage: --file FILE required",
                       file=sys.stderr)
                 return 2
             file_path = args[i + 1]
             i += 1
-        elif a.startswith("--"):
+        elif not end_opts and a.startswith("--"):
             print(f"[info-guard] Warning: unknown option '{a}'",
                   file=sys.stderr)
         else:
             values.append(a)
         i += 1
+    if from_selector is not None:
+        # Mutual exclusion (plan 12.3): --from is a distinct enrollment
+        # mode — no positional values, no --file/--mask/--kind.
+        if values:
+            print("[info-guard] usage: --from cannot be combined with "
+                  "VALUE arguments", file=sys.stderr)
+            return 2
+        if file_path:
+            print("[info-guard] usage: --from cannot be combined with "
+                  "--file", file=sys.stderr)
+            return 2
+        if mask is not None:
+            print("[info-guard] usage: --from cannot be combined with "
+                  "--mask", file=sys.stderr)
+            return 2
+        if kind is not None:
+            print("[info-guard] usage: --from cannot be combined with "
+                  "--kind", file=sys.stderr)
+            return 2
+        return _literals_add_from(from_selector, json_mode)
     if kind is not None and kind != "honeytoken":
         # r1 MAJ-1: `--kind` accepts exactly `honeytoken`; any other
         # value, missing value, or repeated flag is usage exit 2 with no
