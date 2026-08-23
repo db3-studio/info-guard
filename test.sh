@@ -6603,11 +6603,18 @@ check("battery.wave_d.from_registry_snapshot_and_writer_failure: "
       "failure -> exit 2, no temps",
       _e33, f"rc33={_rc33} rc={_r.returncode}")
 
-# E34: discover --help / -h -> usage exit 0, stderr empty.
+# E34: discover --help / -h -> usage exit 0, stderr empty; the
+# JSON-qualified forms too (evidence r3 n2).
 _r = wd3_run("discover", "--help")
 _e34 = _r.returncode == 0 and "discover" in _r.stdout and _r.stderr == ""
 _r = wd3_run("discover", "-h")
 _e34 = _e34 and _r.returncode == 0 and _r.stderr == ""
+_r = wd3_run("discover", "--help", "--json")
+_e34 = _e34 and _r.returncode == 0 and _r.stderr == "" \
+    and "discover" in _r.stdout
+_r = wd3_run("discover", "-h", "--json")
+_e34 = _e34 and _r.returncode == 0 and _r.stderr == "" \
+    and "discover" in _r.stdout
 check("battery.wave_d.discover_unknown_flag_strict_stderr: "
       "help forms exit 0 with usage on stdout", _e34, "")
 
@@ -6634,6 +6641,11 @@ for _fix in (str(wd3_empty), str(_okroot), str(wd3 / "nope")):
     _r2 = wd3_run("discover", _fix, "--bogus")
     _rcs36.append(_r2.returncode == 2
                   and _r2.stderr == "error: usage\n")
+# Evidence r3 m1: the error MODE is argv-order-independent — the unknown
+# flag BEFORE --json still yields the JSON envelope.
+_r = wd3_run("discover", str(_okroot), "--bogus", "--json")
+_rcs36.append(_r.returncode == 2 and _r.stderr == ""
+              and json.loads(_r.stdout)["error_class"] == "usage")
 _e36 = all(_rcs36) and wdm3._discover_escape("\x85") == "\\x85"
 check("battery.wave_d.discover_unknown_flag_strict_stderr: unknown-flag strict across clean/candidate/error "
       "fixtures; C1 control escaping", _e36, "")
@@ -6791,6 +6803,12 @@ _r = wd3_run("literals", "add", "--from",
 _e44 = _e44 and _r.returncode == 0
 _r = wd3_run("literals", "add", "--from", f"{_ag / 'f.env'}:DB_TOKEN")
 _e44 = _e44 and _r.returncode == 2
+# Evidence r3 m2: the --from mode is argv-order-independent — an unknown
+# flag BEFORE --from is still a hard usage error (plan 12.3).
+_r = wd3_run("literals", "add", "--bogus", "--from",
+             f"{_ag / 'f.env'}:API_TOKEN")
+_e44 = _e44 and _r.returncode == 2 \
+    and "unknown option in --from mode" in _r.stderr
 check("battery.wave_d.selector_and_build_env_grammar: detector/parser "
       "value agreement — quoted + comment agree, double record fails "
       "closed", _e44, f"rc={_r.returncode}")
@@ -6911,11 +6929,18 @@ _missing49 = [n for n in _LEDGER
               if not any(l.startswith(n) for l in EXECUTED_LABELS)]
 _informal49 = [l for l in EXECUTED_LABELS
                if l.startswith("WD ") or l.startswith("WD-")]
-check("battery ledger: all 30 canonical names executed exactly-once "
-      "(no informal labels)",
+_multi49 = [n for n in _LEDGER
+            if sum(1 for l in EXECUTED_LABELS if l.startswith(n)) > 1]
+# Evidence r3 M1: the label claims what the check verifies — presence of
+# every canonical name + no informal labels; sub-case splits sharing a
+# canonical name are reported (informational), not merged.
+check("battery ledger: all 30 canonical names executed (no informal "
+      "labels)",
       _missing49 == [] and _informal49 == [],
       f"missing: {', '.join(_missing49) if _missing49 else 'none'}; "
-      f"informal: {', '.join(_informal49) if _informal49 else 'none'}")
+      f"informal: {', '.join(_informal49) if _informal49 else 'none'}; "
+      f"multi-executed (sub-case splits): "
+      f"{', '.join(_multi49) if _multi49 else 'none'}")
 
 # Battery hygiene (evidence-gate fold, run-15 EDQUOT lesson): remove the
 # throwaway fixtures — repeated runs must never accumulate toward the

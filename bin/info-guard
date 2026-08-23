@@ -3837,7 +3837,15 @@ def cmd_discover(args):
                                (min(_MAX_FILES + 256, _hard), _hard))
     except (ValueError, OSError):
         pass
+    # Evidence r3 m1: the error MODE must not depend on the argv order —
+    # pre-scan for --json (respecting the `--` end-of-options boundary)
+    # so `discover PATH --bogus --json` still yields the JSON envelope.
     json_mode = False
+    for _a in args:
+        if _a == "--":
+            break
+        if _a == "--json":
+            json_mode = True
     paths = []
     end_of_opts = False
     for a in args:
@@ -4179,7 +4187,9 @@ def _literals_add_from(selector, json_mode):
                 return fail("registry changed concurrently — aborted")
             if (hashlib.sha256(cur_bytes).hexdigest() != reg_before[0]
                     or (cur_st.st_dev, cur_st.st_ino)
-                    != (reg_before[1], reg_before[2])):
+                    != (reg_before[1], reg_before[2])
+                    or cur_st.st_size != reg_before[3]
+                    or cur_st.st_mtime_ns != reg_before[4]):
                 return fail("registry changed concurrently — aborted")
             if vid is not None:
                 if dup_kind == _HONEYTOKEN_KIND:
@@ -4262,6 +4272,16 @@ def cmd_literals(args):
 def _literals_add(args):
     json_mode, mask, file_path, kind, values = False, None, None, None, []
     from_selector, end_opts = None, False
+    # Evidence r3 m2: "--from mode" must not depend on where --from
+    # appears in the argv — a pre-scan establishes the mode (any --from
+    # before the `--` end-of-options boundary makes unknown options hard
+    # usage errors, plan 12.3).
+    _from_requested = False
+    for _a in args:
+        if _a == "--":
+            break
+        if _a == "--from" or _a.startswith("--from="):
+            _from_requested = True
     i = 0
     while i < len(args):
         a = args[i]
@@ -4334,9 +4354,10 @@ def _literals_add(args):
             file_path = args[i + 1]
             i += 1
         elif not end_opts and a.startswith("--"):
-            if from_selector is not None:
+            if from_selector is not None or _from_requested:
                 # Unknown options in --from mode are usage failures
-                # before any registry/source access (build-diff M2 fold).
+                # before any registry/source access (build-diff M2 fold;
+                # evidence r3 m2: mode is argv-order-independent).
                 print("[info-guard] usage: unknown option in --from mode",
                       file=sys.stderr)
                 return 2
