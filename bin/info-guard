@@ -3441,13 +3441,19 @@ def _load_registry_readonly():
         # implicit empty registry.
         return None, False, None
     for item in doc["literals"]:
-        # Per-entry strictness (evidence-fold A5): each entry must be a
-        # string OR a dict with a string value; anything else is a
-        # structurally invalid registry -> registry_unavailable.
-        if not (isinstance(item, str)
-                or (isinstance(item, dict)
-                    and isinstance(item.get("value"), str))):
+        # Per-entry strictness (evidence-fold A5 + r2 G14): each entry
+        # must be a string OR a dict with a string value, and any
+        # recognized optional field (id/kind/mask) must be a string when
+        # present; anything else -> registry_unavailable.
+        if isinstance(item, str):
+            continue
+        if not isinstance(item, dict):
             return None, False, None
+        if not isinstance(item.get("value"), str):
+            return None, False, None
+        for _opt in ("id", "kind", "mask"):
+            if _opt in item and not isinstance(item[_opt], str):
+                return None, False, None
     raw = doc["literals"]
     entries, _n, _need = _normalize_entries(raw or [])
     return entries, True, doc
@@ -3539,11 +3545,11 @@ def _open_nofollow(path):
                     raise _DiscoverError(
                         "source_unreadable",
                         f"source not accessible: {norm}") from e
-                if e.errno in (errno.EMFILE, errno.ENFILE):
-                    # Descriptor exhaustion at the root-validation stage
-                    # IS the file-count bound being hit (evidence-fold
-                    # E30): a named-root storm beyond the soft limit
-                    # maps to scan_limit, not a source error.
+                if e.errno in (errno.EMFILE,):
+                    # Per-process descriptor exhaustion at the
+                    # root-validation stage IS the file-count bound being
+                    # hit (evidence-fold E30; evidence r2 NIT-1: ENFILE
+                    # is system-wide and stays source_unreadable).
                     raise _DiscoverError(
                         "scan_limit",
                         "too many open descriptors (file-count bound)") from e
@@ -3689,6 +3695,24 @@ def _walk_dir(fd, norm, depth, registry_hashes, out, state):
                 pass
 
 
+def _read_bounded(fd, limit):
+    """Complete bounded read (evidence r2 F1): read to EOF, cap at
+    limit+1, raise scan_limit-class on growth beyond the bound.
+    Returns (data, post_read_stat). OSError propagates to the caller's
+    mapping."""
+    chunks = []
+    total = 0
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise _DiscoverError("scan_limit", "file grew past the bound")
+        chunks.append(chunk)
+    return b"".join(chunks), os.fstat(fd)
+
+
 def _process_file(fd, norm, st, registry_hashes):
     """Detect + filter one regular file through the OPENED fd (the
     anchored object; no path re-lookup). Size bound applies BEFORE
@@ -3700,27 +3724,16 @@ def _process_file(fd, norm, st, registry_hashes):
     if st.st_size > _MAX_FILE_BYTES:
         raise _DiscoverError(
             "scan_limit", f"file exceeds 10 MiB: {norm}")
-    # Complete bounded read loop (evidence-fold A2): read to EOF, cap at
-    # MAX+1, detect growth beyond the bound and read errors; post-read
-    # fstat must match the pre-read size AND identity — a file that
-    # grows/shrinks/replaces after the initial stat fails closed.
-    chunks = []
-    total = 0
-    while True:
-        try:
-            chunk = os.read(fd, 65536)
-        except OSError as e:
-            raise _DiscoverError(
-                "source_unreadable", f"unreadable: {norm}") from e
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > _MAX_FILE_BYTES:
-            raise _DiscoverError(
-                "scan_limit", f"file grew past 10 MiB: {norm}")
-        chunks.append(chunk)
-    data = b"".join(chunks)
-    st_post = os.fstat(fd)
+    # Complete bounded read via the shared helper (evidence r2 F1): read
+    # to EOF capped at MAX+1 — growth PAST the bound during the read
+    # raises scan_limit; read errors map to source_unreadable; the
+    # post-read fstat size/identity checks catch shrink + inode
+    # replacement mid-read (A25-h grade).
+    try:
+        data, st_post = _read_bounded(fd, _MAX_FILE_BYTES)
+    except OSError as e:
+        raise _DiscoverError(
+            "source_unreadable", f"unreadable: {norm}") from e
     if (len(data) != st.st_size or st_post.st_size != st.st_size
             or (st_post.st_dev, st_post.st_ino)
             != (st.st_dev, st.st_ino)):
@@ -3992,21 +4005,12 @@ def _literals_add_from(selector, json_mode):
         # Complete bounded read loop (build-diff B5 fold): read to EOF,
         # cap at MAX+1, detect growth beyond the bound and read errors —
         # the initial snapshot must be complete, never a partial read.
-        chunks = []
-        total = 0
-        while True:
-            try:
-                chunk = os.read(fd, 65536)
-            except OSError:
-                return fail("source changed during enrollment — aborted")
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > _MAX_FILE_BYTES:
-                return fail("source exceeds 10 MiB during read")
-            chunks.append(chunk)
-        data = b"".join(chunks)
-        st_post = os.fstat(fd)
+        try:
+            data, st_post = _read_bounded(fd, _MAX_FILE_BYTES)
+        except _DiscoverError:
+            return fail("source exceeds 10 MiB during read")
+        except OSError:
+            return fail("source changed during enrollment — aborted")
         if len(data) != st.st_size or st_post.st_size != st.st_size:
             # A pre-read truncation/rewrite or read-time growth must not
             # become the accepted "initial" snapshot (build-diff M3 fold).
@@ -4043,6 +4047,20 @@ def _literals_add_from(selector, json_mode):
                 if h[0] == "KEY-SHAPE" and h[4].partition("=")[0] == key]
         if len(elig) != 1:
             return fail("requested key is not a detected secret")
+        # Evidence r2 (Luna M4 + DS MAJ-3): the detector hit's value must
+        # AGREE with the parser-normalized value under the SAME
+        # normalization the parser applies (strip quotes, strip trailing
+        # comments); the matched record's line must be the enrolled
+        # record's line. A divergence fails closed — candidate set =
+        # enrollable set must hold in both directions.
+        _det = elig[0][3].strip().strip('"').strip("'")
+        _det = re.sub(r"\s+#.*$", "", _det).strip()
+        if _det != value:
+            return fail("requested key is not a detected secret")
+        if elig[0][2] not in {i + 1 for i, ln in enumerate(lines)
+                              if ln.strip().partition("=")[0].strip(
+                              ).strip('"').strip("'") == key}:
+            return fail("requested key is not a detected secret")
         # 14.5 — complete-file fingerprint over the SAME opened snapshot.
         fp = hashlib.sha256(data).hexdigest()
         st_initial = os.fstat(fd)
@@ -4070,12 +4088,17 @@ def _literals_add_from(selector, json_mode):
                 or not isinstance(doc["literals"], list)):
             return fail("registry unavailable")
         for item in doc["literals"]:
-            # Per-entry strictness (evidence-fold A5), matching the
-            # readonly validator.
-            if not (isinstance(item, str)
-                    or (isinstance(item, dict)
-                        and isinstance(item.get("value"), str))):
+            # Per-entry strictness (evidence-fold A5 + r2 G14), matching
+            # the readonly validator.
+            if isinstance(item, str):
+                continue
+            if not isinstance(item, dict):
                 return fail("registry unavailable")
+            if not isinstance(item.get("value"), str):
+                return fail("registry unavailable")
+            for _opt in ("id", "kind", "mask"):
+                if _opt in item and not isinstance(item[_opt], str):
+                    return fail("registry unavailable")
         entries, _n, _w = _normalize_entries(doc["literals"])
         vid = None
         dup_kind = None
@@ -4089,11 +4112,16 @@ def _literals_add_from(selector, json_mode):
             _FROM_TEST_HOOK(norm)
         # 14.8 — revalidate the OPENED HANDLE: re-read + re-stat + re-hash.
         # Every operational read path maps to the generic value-free
-        # failure (evidence-fold A6).
+        # failure (evidence-fold A6). The final snapshot uses the same
+        # complete bounded read shape as the initial one (evidence r2
+        # M5/NIT-2: growth past the bound during the final read fails
+        # closed explicitly).
         try:
             os.lseek(fd, 0, os.SEEK_SET)
-            data2 = os.read(fd, _MAX_FILE_BYTES + 1)
-            st_now = os.fstat(fd)
+            data2, st_now = _read_bounded(fd, _MAX_FILE_BYTES)
+        except _DiscoverError:
+            return fail("source grew past 10 MiB during "
+                        "enrollment — aborted")
         except OSError:
             return fail("source changed during enrollment — aborted")
         if ((st_now.st_dev, st_now.st_ino)
@@ -4127,7 +4155,23 @@ def _literals_add_from(selector, json_mode):
             return fail("cannot write registry — unchanged "
                         "(permissions? disk?)")
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            # 14.11-14.12 — COMMIT boundary (evidence-fold A3): a
+            # canonical LOCKED transaction — acquire the exclusive
+            # writer lock, re-read bytes AND identity under the lock,
+            # require both to match the preflight snapshot, then the
+            # canonical atomic write. The lock closes the
+            # compare-then-write window. (Evidence r2 MIN-3: the lock
+            # serializes --from WRITERS; the canonical direct-add/remove
+            # writer is shared pre-existing surface and unchanged — the
+            # accepted residual window is the operator's single-writer
+            # model, documented in the plan.)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            except OSError:
+                # Evidence r2 (Luna M3): a failure of the lock
+                # ACQUISITION itself maps through the generic value-free
+                # exit-2 path.
+                return fail("registry changed concurrently — aborted")
             try:
                 cur_bytes = CUSTOM_LITERALS.read_bytes()
                 cur_st = CUSTOM_LITERALS.stat()

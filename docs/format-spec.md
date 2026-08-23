@@ -1269,3 +1269,6 @@ Consumers of the `info-guard/discover/v1` envelope must:
 4. **Preserve and report unknown `error_class` values** — an unknown
    class must never be silently mapped to a known one; forward it as
    received.
+5. **Treat an unrecognized security-significant `status` or `error_class` as unhandled** — never downgrade an unknown status to `clean` or map an unknown class to a known one; surface it to the operator.
+6. **Do not assume the five candidate fields are the complete set** — treat `key`, `source`, `line`, `shape_class`, `matched_pattern` as the guaranteed minimum; future fields may be added.
+7. **Continue applying the non-disclosure invariant to future fields** — any field added later must also never expose raw secret values.
