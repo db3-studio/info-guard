@@ -1223,7 +1223,7 @@ def cmd_watch(args):
     pd = _protection_deltas(prev.get("protection"), protection)
     et = _engine_transition(prev.get("protection"), protection)
     pm = _protected_value_matches(current, prev, known_fps, sha_id,
-                                  sha_retired)
+                                  sha_retired=sha_retired)
     pm_alarm = [m for m in pm if m["delta"] in ("new", "increased")]
     # Wave B (IG D103): canary-touch = a HONEYTOKEN protected row with
     # delta new/increased → exit 4 (proposal §3: watch-side 4 exists,
@@ -1432,7 +1432,7 @@ def cmd_watch(args):
         f"{_fmt_generated(prev.get('generated', ''))}")
     if json_mode:
         pm = _protected_value_matches(current, prev, known_fps, sha_id,
-                                      sha_retired)
+                                      sha_retired=sha_retired)
         emit_json(prev, d, pd, et, pm)
     # Clean run is still a scan: a degraded engine must not masquerade
     # as clean (D94 doctrine, Wave A A20) — the reduction's exit-2 path
@@ -2934,6 +2934,75 @@ def _env_scan_file(path, index, src_ids):
     return hits, sigs
 
 
+def _scan_dir_files(dirpath, env_index=None, src_ids=None, ht_values=None,
+                    strict=False, diag=None, known_sigs=None, known_files=None):
+    """The ONE shared per-file detector pass (plan 7/19, S15): key_scan
+    shape pass + the exact-value HONEYTOKEN canary pass + the KNOWN env
+    pass, over the SAME corpus directories. Used by _collect_hits
+    (preflight/watch/setup) and by _rotate_scan (the rotate view) — no
+    second detector, no second traversal, no alternate classifier.
+
+    dirpath: directory to scan. env_index/src_ids: prepared env-pass
+    index (None skips the env pass). ht_values: raw canary values for the
+    exact-value canary pass (None or empty skips it). strict=False
+    (preflight/watch/setup): per-file env-pass failures degrade to a
+    generic diagnostic (plan A1.7) and canary read failures degrade to
+    empty text. strict=True (rotate view, A68): every detector/corpus
+    failure propagates so the view fails closed as detector_error.
+    diag/known_sigs/known_files: env-pass bookkeeping containers for
+    _collect_hits. Returns a list of (cls, rule, rel, line, value, masked,
+    ctx) 7-tuples.
+    """
+    hits = []
+    for p in sorted(dirpath.rglob("*")):
+        if not p.is_file():
+            continue
+        for hit in _key_scan(p):
+            hits.append((hit[0], hit[1],
+                         os.path.relpath(str(p), str(_HERMES_HOME)),
+                         *hit[2:]))
+        if ht_values:
+            # Wave B canary pass (IG D103): exact-value scan of the file's
+            # lines against the registered canary set. The canary VALUE is
+            # kept in memory only (masked downstream, never printed); the
+            # raw registry value is the match key.
+            try:
+                text = p.read_text(errors="replace")
+            except OSError:
+                if strict:
+                    raise
+                text = ""
+            for ln, line in enumerate(text.splitlines(), 1):
+                for cval in ht_values:
+                    if cval in line:
+                        hits.append((
+                            "HONEYTOKEN", "honeytoken",
+                            os.path.relpath(str(p), str(_HERMES_HOME)),
+                            ln, cval, _HARD_MASK_RE.sub("***", line)[:140],
+                            _HARD_MASK_RE.sub("***", line)[:140]))
+                        break  # one hit per line (per-file:line:value row)
+        if env_index is not None:
+            try:
+                ehits, esigs = _env_scan_file(p, env_index, src_ids)
+            except BaseException:
+                if strict:
+                    raise
+                # Sanitized adapter (plan A1.7): a per-file env-pass
+                # failure degrades to a generic diagnostic — no raw
+                # values anywhere; other files and detectors continue.
+                ehits, esigs = [], {}
+                if diag is not None:
+                    diag.append(
+                        f"KNOWN pass: {ENV_PASS_INTERNAL} — file skipped")
+            if known_sigs is not None:
+                known_sigs.update(esigs)
+            for h in ehits:
+                hits.append(h)
+            if ehits and known_files is not None:
+                known_files.add(os.path.relpath(str(p), str(_HERMES_HOME)))
+    return hits
+
+
 def _collect_hits(dirs, redact=True, env_pass=False, canary_pass=False):
     """Shared scan used by preflight, watch and setup. Returns
     (all_hits, gitleaks_ok, env_meta) with 7-tuples
@@ -2974,47 +3043,16 @@ def _collect_hits(dirs, redact=True, env_pass=False, canary_pass=False):
                                         for s in src_ids),
                     "known_files": set()}
     for d in dirs:
-        for p in sorted(d.rglob("*")):
-            if not p.is_file():
-                continue
-            for hit in _key_scan(p):
-                all_hits.append((hit[0], hit[1],
-                                 os.path.relpath(str(p), str(_HERMES_HOME)),
-                                 *hit[2:]))
-            if canary_pass and ht_map:
-                # Wave B canary pass: exact-value scan of the file's
-                # lines against the registered canary set. The canary
-                # VALUE is kept in memory only (masked downstream, never
-                # printed); the raw registry value is the match key.
-                try:
-                    text = p.read_text(errors="replace")
-                except OSError:
-                    text = ""
-                for ln, line in enumerate(text.splitlines(), 1):
-                    for cval in _canary_values(ht_map):
-                        if cval in line:
-                            all_hits.append((
-                                "HONEYTOKEN", "honeytoken",
-                                os.path.relpath(str(p), str(_HERMES_HOME)),
-                                ln, cval, _HARD_MASK_RE.sub("***", line)[:140],
-                                _HARD_MASK_RE.sub("***", line)[:140]))
-                            break  # one hit per line (per-file:line:value row)
-            if env_pass:
-                try:
-                    ehits, esigs = _env_scan_file(p, index, src_ids)
-                except BaseException:
-                    # Sanitized adapter (plan A1.7): a per-file env-pass
-                    # failure degrades to a generic diagnostic — no raw
-                    # values anywhere; other files and detectors continue.
-                    ehits, esigs = [], {}
-                    env_meta["diagnostics"].append(
-                        f"KNOWN pass: {ENV_PASS_INTERNAL} — file skipped")
-                env_meta["known_sigs"].update(esigs)
-                for h in ehits:
-                    all_hits.append(h)
-                if ehits:
-                    env_meta["known_files"].add(
-                        os.path.relpath(str(p), str(_HERMES_HOME)))
+        all_hits.extend(_scan_dir_files(
+            d,
+            env_index=index if env_pass else None,
+            src_ids=src_ids if env_pass else None,
+            ht_values=_canary_values(ht_map)
+            if (canary_pass and ht_map) else None,
+            strict=False,
+            diag=env_meta["diagnostics"] if env_pass else None,
+            known_sigs=env_meta["known_sigs"] if env_pass else None,
+            known_files=env_meta["known_files"] if env_pass else None))
         ghits, ok = _gitleaks_scan(d, redact=redact)
         gitleaks_ok = gitleaks_ok and ok
         for cls, rule, fname, line, value, masked, ctx in ghits:
@@ -4750,6 +4788,9 @@ _ROTATE_PRIORITY_RANK = {"critical": 0, "rotate-now": 1, "review": 2,
                          "idle": 3}
 _ROTATE_SCAN_DIRS = ["sessions", "logs", "cron/output"]
 _ROTATE_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+# Exact rotate/view timestamp format (contract §3.2.3 / fold FIX-3/FIX-6):
+# ISO 8601 UTC, second precision, Z suffix, no fractional seconds.
+_ROTATE_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
 def _rotate_ts():
@@ -4760,16 +4801,20 @@ def _rotate_ts():
 
 
 def _read_text_noatime(path: Path) -> str:
-    """Read-only text open attempting O_NOATIME; EPERM/EINVAL/ENOTSUP
-    fall back to an ordinary read-only open (contract §4.2 — atime is
-    outside the content snapshot, never a failure)."""
+    """Read-only text open attempting O_NOATIME; ONLY EPERM/EINVAL/ENOTSUP
+    on the O_NOATIME open fall back to an ordinary read-only open
+    (contract §4.2 + build-diff fold FIX-10 — atime is outside the content
+    snapshot, never a failure, but unrelated open errors propagate to the
+    caller's fail-closed path instead of being masked)."""
     try:
         flags = os.O_RDONLY | os.O_NOATIME
     except AttributeError:
         flags = os.O_RDONLY
     try:
         fd = os.open(str(path), flags)
-    except OSError:
+    except OSError as exc:
+        if exc.errno not in (errno.EPERM, errno.EINVAL, errno.ENOTSUP):
+            raise
         fd = os.open(str(path), os.O_RDONLY)
     with os.fdopen(fd, "r") as f:
         return f.read()
@@ -4848,48 +4893,26 @@ def _rotate_fail(error_class):
 
 def _rotate_scan(dirs, raw_literals):
     """The view's ONE detector pass over the existing scan corpus
-    (contract §3.1.2, S15): the shared _scan_lines shape pass
-    (KEY-SHAPE/TOKEN-SHAPE) + the existing KNOWN env pass + the existing
-    canary pass (HONEYTOKEN). No gitleaks engine, no second detector, no
-    deployment-file read, no registry writes (the canary set comes from
-    the already-loaded read-only raw literals). Returns (cls, rule, rel,
-    line, value, masked, ctx) 7-tuples."""
+    (contract §3.1.2, S15): the shared _scan_dir_files pass (key_scan
+    shape pass + KNOWN env pass + canary pass) — the SAME helper and SAME
+    passes _collect_hits uses for preflight/watch, with gitleaks omitted
+    (its SUSPICIOUS class is outside the view's closed vocabulary). No
+    second detector, no second traversal, no deployment-file read, no
+    registry writes (the canary set comes from the already-loaded
+    read-only raw literals). strict=True (A68): every detector, env-pass,
+    canary-read, or corpus failure PROPAGATES to cmd_rotate_candidates,
+    which fails closed as detector_error — never a silent partial scan.
+    Returns (cls, rule, rel, line, value, masked, ctx) 7-tuples."""
     ht_values = [item["value"] for item in raw_literals
                  if isinstance(item, dict)
                  and _entry_kind(item) == _HONEYTOKEN_KIND
                  and isinstance(item.get("value"), str)]
-    try:
-        index, src_ids, _diag = _env_sources()
-    except BaseException:
-        index, src_ids = {}, []
+    index, src_ids, _diag = _env_sources()
     all_hits = []
     for d in dirs:
-        for p in sorted(d.rglob("*")):
-            if not p.is_file():
-                continue
-            for hit in _key_scan(p):
-                all_hits.append((hit[0], hit[1],
-                                 os.path.relpath(str(p), str(_HERMES_HOME)),
-                                 *hit[2:]))
-            if ht_values:
-                try:
-                    text = p.read_text(errors="replace")
-                except OSError:
-                    text = ""
-                for ln, line in enumerate(text.splitlines(), 1):
-                    for cval in ht_values:
-                        if cval in line:
-                            all_hits.append((
-                                "HONEYTOKEN", "honeytoken",
-                                os.path.relpath(str(p), str(_HERMES_HOME)),
-                                ln, cval, _mask_value(cval),
-                                _mask_value(cval)))
-                            break
-            try:
-                ehits, _esigs = _env_scan_file(p, index, src_ids)
-            except BaseException:
-                ehits = []
-            all_hits.extend(ehits)
+        all_hits.extend(_scan_dir_files(
+            d, env_index=index, src_ids=src_ids, ht_values=ht_values,
+            strict=True))
     return all_hits
 
 
@@ -4899,13 +4922,10 @@ def cmd_rotate_candidates(args):
     2 (error). JSON mode emits exactly one info-guard/rotate/v1 response
     envelope on stdout. The view never writes registry, baseline, state,
     matcher artifacts, or any output file (S12)."""
-    # JSON-mode pre-scan (argv-order independent; the `--` boundary).
-    json_mode = False
-    for _a in args:
-        if _a == "--":
-            break
-        if _a == "--json":
-            json_mode = True
+    # JSON-mode pre-scan over the COMPLETE raw argv (contract line 162:
+    # an exact `--json` anywhere in argv selects the JSON error envelope,
+    # even after a `--` marker — build-diff fold FIX-8).
+    json_mode = any(a == "--json" for a in args)
     # Grammar: no positionals, at most one exact `--json`, bare `--` only
     # with no token after it, unknown options -> usage (plan 17 matrix).
     end_opts = False
@@ -4932,7 +4952,15 @@ def cmd_rotate_candidates(args):
     for item in doc.get("literals", []):
         if isinstance(item, dict) and _entry_kind(item) == _HONEYTOKEN_KIND:
             continue
-        if not isinstance(item, dict) or not item.get("id"):
+        # FIX-4 (fold): every non-canary entry must be a dict with a
+        # non-empty string value and a persisted 16-lowercase-hex id —
+        # malformed entries fail closed, never silently skipped, never
+        # emitted with an invented or malformed value_id (A52/A67).
+        if (not isinstance(item, dict)
+                or not isinstance(item.get("value"), str)
+                or not item.get("value")
+                or not isinstance(item.get("id"), str)
+                or not _ROTATE_ID_RE.fullmatch(item["id"])):
             return _rotate_view_error("registry_unavailable", json_mode)
     # Non-canary value-to-entry scope built from the RAW literals — the
     # canonical normalizer collapses same-value duplicates (first-wins),
@@ -4969,10 +4997,22 @@ def cmd_rotate_candidates(args):
         if not isinstance(bdoc, dict) or not isinstance(bdoc.get("values"),
                                                        list):
             return _rotate_view_error("baseline_unavailable", json_mode)
+        # FIX-3 (fold): every present baseline row must be well-formed
+        # (dict, non-empty str value_sha256, timestamps in the exact UTC
+        # format when present) — a malformed row fails closed as
+        # baseline_unavailable instead of being silently skipped (A63).
         for brow in bdoc["values"]:
-            if isinstance(brow, dict) and isinstance(
-                    brow.get("value_sha256"), str):
-                baseline_rows[brow["value_sha256"]] = brow
+            if (not isinstance(brow, dict)
+                    or not isinstance(brow.get("value_sha256"), str)
+                    or not brow.get("value_sha256")):
+                return _rotate_view_error("baseline_unavailable", json_mode)
+            for _tsk in ("first_seen", "last_seen"):
+                if _tsk in brow and not (
+                        isinstance(brow[_tsk], str)
+                        and _ROTATE_TS_RE.fullmatch(brow[_tsk])):
+                    return _rotate_view_error("baseline_unavailable",
+                                              json_mode)
+            baseline_rows[brow["value_sha256"]] = brow
     # Existing detector + existing scan corpus, exactly once (S15/A68).
     scan_dirs = []
     for name in _ROTATE_SCAN_DIRS:
@@ -5140,12 +5180,7 @@ def _literals_rotate(args):
     replacement value arrives ONLY through stdin and never crosses argv.
     Exit 0 on success; exit 2 on every failure with value-free stderr and
     NO JSON error envelope (the literals family convention)."""
-    json_mode = False
-    for _a in args:
-        if _a == "--":
-            break
-        if _a == "--json":
-            json_mode = True
+    json_mode = any(a == "--json" for a in args)  # FIX-8: complete raw argv
     end_opts = False
     json_seen = False
     positionals = []
@@ -5179,16 +5214,25 @@ def _literals_rotate(args):
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         return _rotate_fail("usage")
-    had_lf = text.endswith("\n")
-    if had_lf:
-        text = text[:-1]
-    if had_lf and text.endswith("\r"):
-        text = text[:-1]
-    new_value = text.strip()
+    # Exact logical-line parser (contract §3.2.4, build-diff fold FIX-2):
+    # at most one final LF or CRLF transport delimiter; any remaining
+    # line terminator is a rejected second line or embedded break; a bare
+    # final CR is forbidden; surrounding whitespace is stripped only
+    # AFTER the delimiter/LF-CR validation.
+    if text.endswith("\n"):
+        body = text[:-1]
+        if body.endswith("\r"):
+            body = body[:-1]               # exactly one final CRLF
+    else:
+        if text.endswith("\r"):
+            return _rotate_fail("usage")   # bare final CR is forbidden
+        body = text
+    if "\n" in body or "\r" in body:
+        return _rotate_fail("usage")       # embedded/second line
+    new_value = body.strip()
     if not new_value:
         return _rotate_fail("usage")
-    if "\n" in new_value or "\r" in new_value \
-            or any(ord(c) < 32 or ord(c) == 127 for c in new_value):
+    if any(ord(c) < 32 or ord(c) == 127 for c in new_value):
         return _rotate_fail("usage")
     # Strict v2 registry; in-memory normalization stages any required
     # lazy id backfill into the SAME candidate (A53 — no preliminary
@@ -5197,33 +5241,46 @@ def _literals_rotate(args):
     if not ok:
         return _rotate_fail("registry_unavailable")
     norm_entries, _n_new, _need = _normalize_entries(doc.get("literals") or [])
-    target = None
-    for item in norm_entries:
-        if isinstance(item, dict) and item.get("id") == target_id:
-            target = item
-            break
-    if target is None:
-        return _rotate_fail("registry_conflict")   # unknown id (A42)
+    # FIX-5 (fold): exactly ONE persisted entry must match the target id.
+    # Zero matches = unknown target -> usage (FIX-7); duplicate target-id
+    # matches = ambiguous target -> registry_conflict (never first-wins).
+    matches = [item for item in norm_entries
+               if isinstance(item, dict) and item.get("id") == target_id]
+    if len(matches) == 0:
+        return _rotate_fail("usage")   # unknown id (A42, FIX-7)
+    if len(matches) > 1:
+        return _rotate_fail("registry_conflict")   # duplicate target id
+    target = matches[0]
     if _entry_kind(target) == _HONEYTOKEN_KIND:
-        return _rotate_fail("registry_conflict")   # honeytoken id (A44)
+        return _rotate_fail("usage")   # honeytoken id (A44, FIX-7)
     if target.get("retired") is True:
-        return _rotate_fail("registry_conflict")   # retired id (A43)
-    # Lineage / retirement-metadata strictness (contract §3.2.3): an
-    # active target carrying `rotated_to`, or malformed retirement
-    # metadata / contradictory lineage, fails closed as
-    # registry_conflict. A dangling rotated_from (severed chain) is
-    # tolerated and documented; unrelated entries are never repaired.
+        return _rotate_fail("usage")   # retired id (A43, FIX-7)
+    # Lineage / retirement-metadata strictness (contract §3.2.3, FIX-6):
+    # an active target carrying `rotated_to`, or malformed retirement
+    # metadata / contradictory lineage / malformed id or timestamp
+    # formats, fails closed as registry_conflict. A dangling rotated_from
+    # (valid id format, severed chain) is tolerated and documented;
+    # unrelated entries are never repaired.
     if "retired" in target and not isinstance(target["retired"], bool):
         return _rotate_fail("registry_conflict")
     if target.get("rotated_to") is not None:
         return _rotate_fail("registry_conflict")
-    if "rotated_from" in target and not isinstance(target["rotated_from"],
-                                                   str):
-        return _rotate_fail("registry_conflict")
-    if "rotated_at" in target and not isinstance(target["rotated_at"], str):
-        return _rotate_fail("registry_conflict")
-    if "retired_at" in target and not isinstance(target["retired_at"], str):
-        return _rotate_fail("registry_conflict")
+    if "retired_at" in target:
+        # retirement metadata requires retired: true + exact UTC format
+        if target.get("retired") is not True:
+            return _rotate_fail("registry_conflict")
+        if not (isinstance(target["retired_at"], str)
+                and _ROTATE_TS_RE.fullmatch(target["retired_at"])):
+            return _rotate_fail("registry_conflict")
+    if "rotated_at" in target and target["rotated_at"] is not None:
+        if not (isinstance(target["rotated_at"], str)
+                and _ROTATE_TS_RE.fullmatch(target["rotated_at"])):
+            return _rotate_fail("registry_conflict")
+    for _lf in ("rotated_from", "rotated_to"):
+        if _lf in target and target[_lf] is not None:
+            if not (isinstance(target[_lf], str)
+                    and _ROTATE_ID_RE.fullmatch(target[_lf])):
+                return _rotate_fail("registry_conflict")
     old_value = target.get("value")
     if not isinstance(old_value, str) or not old_value:
         return _rotate_fail("registry_conflict")
@@ -5277,17 +5334,19 @@ def _literals_rotate(args):
             cand_entries.append(item)
     # Candidate validation (plan 51): both exact values present, two
     # distinct ids, correct bidirectional lineage, exactly one retired
-    # target transition.
+    # target transition. The id-collision assertion checks the fresh id
+    # against the PRE-EXISTING registry ids (norm_entries) — cand_ids
+    # includes the new entry's own id, so it can never prove absence.
+    existing_ids = {item.get("id") for item in norm_entries
+                    if isinstance(item, dict)
+                    and isinstance(item.get("id"), str)}
     cand_values = set()
-    cand_ids = set()
     for item in cand_entries:
-        if isinstance(item, dict):
-            if isinstance(item.get("value"), str):
-                cand_values.add(item["value"])
-            if isinstance(item.get("id"), str):
-                cand_ids.add(item["id"])
+        if isinstance(item, dict) and isinstance(item.get("value"), str):
+            cand_values.add(item["value"])
     if not (old_value in cand_values and new_value in cand_values
-            and len(cand_ids) == len(norm_entries) + 1
+            and new_id not in existing_ids
+            and new_id != target_id
             and old_entry.get("retired") is True
             and isinstance(old_entry.get("retired_at"), str)
             and old_entry.get("rotated_to") == new_id

@@ -430,7 +430,7 @@ printf '%s\n' "$NEW_VALUE_FROM_VAULT" | \
   ~/.info-guard/bin/info-guard literals rotate <value_id>
 
 # 3. regenerate the matcher explicitly
-~/.info-guard/bin/info-guard matcher build
+~/.info-guard/bin/info-guard build
 ```
 
 Safety rules:
@@ -442,7 +442,7 @@ Safety rules:
   last-writer-wins.
 - `.env` and deployment configuration remain deployment-side; the product
   never reads or writes them. A deployment driver obtains the replacement
-  out of band (e.g. a vault), pipes it, runs `matcher build`, and updates
+  out of band (e.g. a vault), pipes it, runs `info-guard build`, and updates
   the deployment-owned files itself.
 - Honeytokens are not rotation candidates; a fired canary is an incident,
   handled by remove + replant.

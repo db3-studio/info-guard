@@ -44,7 +44,7 @@ additive watch metadata.
   obligations.
 
 ### Changed
-- `matcher build` remains the explicit regeneration step after rotation
+- `info-guard build` remains the explicit regeneration step after rotation
   (rotation never rebuilds patterns or touches derived artifacts).
 - Honeytokens are not rotation candidates; canary lifecycle remains
   remove + replant.

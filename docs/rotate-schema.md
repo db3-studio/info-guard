@@ -26,8 +26,8 @@ info-guard rotate-candidates [--json]
   (exit 2).
 - A bare `--` end-of-options marker is accepted only when no token follows
   it.
-- Unknown options — including the descoped output-file and transport-file
-  forms — are usage errors (exit 2); no file is ever opened.
+- Unknown options — including output-file and transport-file options — are
+  usage errors (exit 2); no file is opened and none is ever created.
 - The view reads the current registry (read-only), the current scan via
   the existing detector and existing scan corpus, and the watch baseline
   (read-only and optional). It writes nothing: no registry, baseline,
@@ -330,12 +330,14 @@ unchanged on every failure. Serialization failure also exits 2 and
 remains value-free.
 
 The `error_class` values used by `literals rotate` are a subset of the
-closed enum in §1.9: `usage` (parser/grammar and stdin-shape failures),
-`registry_unavailable` (missing, unreadable, malformed, or unsupported
-registry), `registry_conflict` (retired, honeytoken, unknown, or
-duplicate-value targets; contradictory lineage; same-value or duplicate
-replacement values), and `internal_error` (candidate serialization or
-canonical write failure).
+closed enum in §1.9: `usage` (parser/grammar and stdin-shape failures,
+including an unknown, retired, or honeytoken target id — invalid target
+selection is a usage error, not a data conflict), `registry_unavailable`
+(missing, unreadable, malformed, or unsupported registry),
+`registry_conflict` (duplicate target value, duplicate target-id matches,
+contradictory or malformed lineage on the selected target, or same-value
+and duplicate replacement values), and `internal_error` (candidate
+serialization or canonical write failure).
 
 ---
 
@@ -365,7 +367,7 @@ Lineage is an entry history record — not a replacement pointer, hash,
 external ledger, or second identity mechanism.
 
 Retired entries remain registered, remain masked by the registry after
-`matcher build`, remain included in the next watch run's derived
+`info-guard build`, remain included in the next watch run's derived
 protection fingerprint set, and remain detectable. They appear in
 `literals list` with their masked value, id, and kind, indistinguishable
 from active entries there (that list renders masked value, id, and kind
@@ -451,7 +453,9 @@ the product provides the primitives. The documented sequence:
    vault).
 5. Pipe the value to `info-guard literals rotate <value_id>` — never
    place it in argv.
-6. Run `info-guard matcher build` as the explicit regeneration step.
+6. Run `info-guard build` as the explicit regeneration step. The
+   matcher-regeneration step is performed with `info-guard build`;
+   rotation itself does not rebuild matcher artifacts.
 7. Update the deployment-owned configuration (for example `.env`)
    outside the product.
 8. Verify the new deployment value and the old-value failure using
@@ -501,5 +505,5 @@ obligation; it does not expand v0.9.1 emission.
   prohibited (no registry lock; concurrent writers are last-writer-wins).
 - `.env` and deployment configuration are deployment-side; the product
   never reads or writes them.
-- `matcher build` is the explicit regeneration step after rotation.
+- `info-guard build` is the explicit regeneration step after rotation.
 - Honeytokens are not rotation candidates.

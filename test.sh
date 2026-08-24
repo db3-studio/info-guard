@@ -6949,7 +6949,7 @@ check("battery ledger: all 30 canonical names executed (no informal "
 # literal in the repo); stdin-only transport; argv + output leakage scans;
 # byte/mtime/ctime snapshots; per-group registry resets; explicit cleanup.
 import importlib.machinery, importlib.util, inspect
-import contextlib, io, secrets
+import contextlib, errno, io, secrets
 WE = Path(tempfile.mkdtemp(prefix="ig-we-"))
 WEH = WE / "home"
 WEREG = WEH / "state/info-guard/custom_literals.json"
@@ -6999,6 +6999,61 @@ def we_wipe():
     for _old in WESRC.glob("*"):
         _old.unlink()
 
+def we_reset():
+    """FULL fixture-group isolation (build-diff fold FIX-15): remove the
+    complete scratch state dir, the scratch .env, and every scan-corpus
+    file, then recreate the state dir + corpus. No baseline, matcher
+    artifact, stray state, registry, environment fixture, or temporary
+    fixture survives from a previous group."""
+    _sd = WEH / "state/info-guard"
+    if _sd.exists():
+        shutil.rmtree(str(_sd))
+    _env = WEH / ".env"
+    if _env.exists():
+        _env.unlink()
+    for _old in WESRC.glob("*"):
+        _old.unlink()
+    _sd.mkdir(parents=True)
+    WESRC.mkdir(exist_ok=True)
+
+# Leakage-sweep collector (build-diff fold FIX-12): every captured surface
+# that is NOT already covered by WECAP (subprocess stdout/stderr) — in-
+# process redirected captures, exception texts, log/diagnostic strings,
+# atomic-writer temporary names, state-dir entry names — is appended here
+# and swept for raw synthetic values by rotate_value_leakage_scan.
+WE_SWEEP = []
+def _we_sweep(*items):
+    for _it in items:
+        if isinstance(_it, str) and _it:
+            WE_SWEEP.append(_it)
+
+# Security reporting-alias map (plan 4.1 + build-diff fold FIX-14): the
+# battery.security.rotate_* names are REPORTING ALIASES for the same
+# underlying primary checks — never executed a second time. The evidence
+# bundle generator consumes this map for the security-group report.
+WE_SECURITY_ALIASES = {
+    "battery.security.rotate_value_never_argv":
+        "battery.rotate.rotate_value_never_argv",
+    "battery.security.rotate_value_leakage_scan":
+        "battery.rotate.rotate_value_leakage_scan",
+    "battery.security.no_network_dependency":
+        "battery.rotate.no_network_dependency",
+    "battery.security.rotate_honeytoken_rejection":
+        "battery.rotate.rotate_honeytoken_rejection",
+    "battery.security.rotate_candidates_registry_conflict_fail_closed":
+        "battery.rotate.rotate_candidates_registry_conflict_fail_closed",
+    "battery.security.rotate_candidates_no_mutation_byte_snapshot":
+        "battery.rotate.rotate_candidates_no_mutation_byte_snapshot",
+    "battery.security.rotate_failure_matrix":
+        "battery.rotate.rotate_failure_matrix",
+    "battery.security.rotate_canonical_write_failure":
+        "battery.rotate.rotate_canonical_write_failure",
+    "battery.security.rotate_serialization_failure":
+        "battery.rotate.rotate_serialization_failure",
+    "battery.security.masked_only_all_paths":
+        "battery.rotate.masked_only_all_paths",
+}
+
 def we_run(*args, stdin="", env=None, cwd=None):
     r = subprocess.run(IGPY + list(args), capture_output=True, text=True,
                        input=stdin, env=env or WEENV, cwd=cwd, timeout=180)
@@ -7047,6 +7102,7 @@ def _we_module():
     return _m
 
 # ── Group 1: identity lifecycle, lineage, mask, fingerprints ──────────
+we_reset()
 VA1 = _fcrag("a1"); VA2 = _rtfrag("a2"); VA3 = _rtfrag("a3")
 VA4 = _rtfrag("a4"); VA_idle = _rtfrag("idle")
 WEVALUES += [VA1, VA2, VA3, VA4, VA_idle]
@@ -7219,6 +7275,33 @@ check("battery.rotate.retired_list_visibility_and_remove: A41 retired "
       "severed, refs dangle, no id reuse",
       _list_ok and _rem_ok, "")
 
+# rotate_mask_preservation (plan 4.1 #7, build-diff fold FIX-11): the new
+# entry carries the old entry's mask style, kind, and EVERY unknown
+# non-lineage field; no old retirement fields or successor pointer.
+VM1 = _rtfrag("m1"); VM2 = _rtfrag("m2")
+WEVALUES += [VM1, VM2]
+we_reg([{"value": VM1, "id": "1010101010101010", "mask": "full",
+         "kind": "service-account", "x_extra": {"nested": 1},
+         "note": "preserve-me"}])
+_r = we_run("literals", "rotate", "1010101010101010", stdin=VM2 + "\n")
+_reg = json.loads(WEREG.read_text())
+_old_m = next((e for e in _reg["literals"]
+               if e.get("id") == "1010101010101010"), {})
+_new_m = next((e for e in _reg["literals"] if e.get("value") == VM2), {})
+_mask_ok = (_r.returncode == 0 and _old_m.get("retired") is True
+            and _old_m.get("rotated_to") == _new_m.get("id")
+            and _new_m.get("mask") == "full"
+            and _new_m.get("kind") == "service-account"
+            and _new_m.get("x_extra") == {"nested": 1}
+            and _new_m.get("note") == "preserve-me"
+            and "retired" not in _new_m
+            and "retired_at" not in _new_m
+            and "rotated_to" not in _new_m)
+check("battery.rotate.rotate_mask_preservation: mask style, kind, and "
+      "unknown non-lineage fields carried to the new entry; no retirement "
+      "fields or successor pointer",
+      _mask_ok, f"new={_new_m}")
+
 # A36/A73: explicit matcher build regenerates both values; watch-run
 # fingerprint snapshot contains old + new digests, no stale digest.
 we_reg([{"value": VA1, "id": "1111222233334444"},
@@ -7253,37 +7336,52 @@ check("battery.rotate.rotate_fingerprint_snapshot: A36 explicit build "
       _build_ok and _fp_ok, f"fp={sorted(_bp or [])}")
 
 # ── Group 2: rotate failure matrix + parser matrix ────────────────────
+we_reset()
 VB1 = _rtfrag("b1"); VB2 = _rtfrag("b2"); VB3 = _rtfrag("b3")
 VB_ht = "ht-" + secrets.token_hex(12)
 VB_ret = _rtfrag("br")
 WEVALUES += [VB1, VB2, VB3, VB_ht, VB_ret]
 _fail_ok = True
+_we_fail_at = ""
 def _we_fail_case(label, args, stdin, cls):
-    global _fail_ok
+    global _fail_ok, _we_fail_at
     we_reg([{"value": VB1, "id": "4444555566667777"}])
     _pre = WEREG.read_bytes()
     _r = we_run("literals", "rotate", *args, stdin=stdin)
-    _fail_ok = _fail_ok and _r.returncode == 2 \
+    _ok = _r.returncode == 2 \
         and _r.stdout == "" and _r.stderr == f"error: {cls}\n" \
         and WEREG.read_bytes() == _pre
-# A42 unknown id
-_we_fail_case("unknown", ["9999999999999999"], VB3 + "\n", "registry_conflict")
+    if not _ok:
+        _we_fail_at = f"{label} (rc={_r.returncode} out={_r.stdout!r} " \
+                      f"err={_r.stderr!r})"
+    _fail_ok = _fail_ok and _ok
+# A42 unknown id -> usage (FIX-7: invalid target selection is a usage
+# error, not a data conflict — the closed registry_conflict stays narrow)
+_we_fail_case("unknown", ["9999999999999999"], VB3 + "\n", "usage")
 # A43 retired id
 we_reg([{"value": VB1, "id": "4444555566667777", "retired": True,
          "retired_at": "2026-08-23T00:00:00Z",
          "rotated_to": "aaaaaaaaaaaaaaaa"}])
 _pre = WEREG.read_bytes()
 _r = we_run("literals", "rotate", "4444555566667777", stdin=VB3 + "\n")
-_fail_ok = _fail_ok and _r.returncode == 2 \
-    and _r.stderr == "error: registry_conflict\n" and _r.stdout == "" \
+_ok = _r.returncode == 2 \
+    and _r.stderr == "error: usage\n" and _r.stdout == "" \
     and WEREG.read_bytes() == _pre
+if not _ok:
+    _we_fail_at = f"A43-retired (rc={_r.returncode} out={_r.stdout!r} " \
+                  f"err={_r.stderr!r})"
+_fail_ok = _fail_ok and _ok
 # A44 honeytoken id
 we_reg([{"value": VB_ht, "id": "6666777788889999", "kind": "honeytoken"}])
 _pre = WEREG.read_bytes()
 _r = we_run("literals", "rotate", "6666777788889999", stdin=VB3 + "\n")
-_fail_ok = _fail_ok and _r.returncode == 2 \
-    and _r.stderr == "error: registry_conflict\n" and _r.stdout == "" \
+_ok = _r.returncode == 2 \
+    and _r.stderr == "error: usage\n" and _r.stdout == "" \
     and WEREG.read_bytes() == _pre
+if not _ok:
+    _we_fail_at = f"A44-honeytoken (rc={_r.returncode} out={_r.stdout!r} " \
+                  f"err={_r.stderr!r})"
+_fail_ok = _fail_ok and _ok
 # A45 positional new value; A46 --mask / --kind
 _we_fail_case("positional-value", ["4444555566667777", VB3], "", "usage")
 _we_fail_case("mask", ["--mask", "full", "4444555566667777"], VB3 + "\n",
@@ -7298,24 +7396,149 @@ _we_fail_case("two-lines", ["4444555566667777"],
 _we_fail_case("control", ["4444555566667777"], "va\x01lue\n", "usage")
 _we_fail_case("tab", ["4444555566667777"], "va\tlue\n", "usage")
 _we_fail_case("cr", ["4444555566667777"], "va\rlue\n", "usage")
+# FIX-2 exact logical-line parser cases: one final LF/CRLF only; any
+# remaining terminator, a bare final CR, or a second line is rejected —
+# surrounding whitespace is stripped only AFTER delimiter validation.
+_we_fail_case("double-lf", ["4444555566667777"], VB3 + "\n\n", "usage")
+_we_fail_case("lf-space", ["4444555566667777"], VB3 + "\n ", "usage")
+_we_fail_case("bare-cr", ["4444555566667777"], VB3 + "\r", "usage")
+_we_fail_case("lf-cr", ["4444555566667777"], VB3 + "\n\r", "usage")
 # A48 same value, A49 duplicate against registered (incl. retired)
 _we_fail_case("same", ["4444555566667777"], VB1 + "\n", "registry_conflict")
 we_reg([{"value": VB1, "id": "4444555566667777"},
         {"value": VB2, "id": "5555666677778888"}])
 _pre = WEREG.read_bytes()
 _r = we_run("literals", "rotate", "4444555566667777", stdin=VB2 + "\n")
-_fail_ok = _fail_ok and _r.returncode == 2 \
+_ok = _r.returncode == 2 \
     and _r.stderr == "error: registry_conflict\n" and _r.stdout == "" \
     and WEREG.read_bytes() == _pre  # duplicate against active registered
+if not _ok:
+    _we_fail_at = f"A48-dup-active (rc={_r.returncode} out={_r.stdout!r} " \
+                  f"err={_r.stderr!r})"
+_fail_ok = _fail_ok and _ok
 we_reg([{"value": VB1, "id": "4444555566667777"},
         {"value": VB_ret, "id": "7777888899990000", "retired": True,
          "retired_at": "2026-08-23T00:00:00Z",
          "rotated_to": "bbbbbbbbbbbbbbbb"}])
 _pre = WEREG.read_bytes()
 _r = we_run("literals", "rotate", "4444555566667777", stdin=VB_ret + "\n")
-_fail_ok = _fail_ok and _r.returncode == 2 \
+_ok = _r.returncode == 2 \
     and _r.stderr == "error: registry_conflict\n" and _r.stdout == "" \
     and WEREG.read_bytes() == _pre  # resurrection against retired rejected
+if not _ok:
+    _we_fail_at = f"A49-resurrection (rc={_r.returncode} out={_r.stdout!r} " \
+                  f"err={_r.stderr!r})"
+_fail_ok = _fail_ok and _ok
+# FIX-5 (fold): an unrelated duplicate id (two different values sharing
+# one id, neither the target) must NOT invalidate an otherwise valid
+# rotation — the old len(cand_ids)==len(norm_entries)+1 assertion rejected
+# exactly this; and duplicate occurrences of the TARGET id fail closed.
+VX1 = _rtfrag("x1"); VX2 = _rtfrag("x2"); VX3 = _rtfrag("x3")
+VX4 = _rtfrag("x4")
+WEVALUES += [VX1, VX2, VX3, VX4]
+we_reg([{"value": VX1, "id": "1313131313131313"},
+        {"value": VX2, "id": "2424242424242424"},
+        {"value": VX3, "id": "2424242424242424"}])   # unrelated dup id
+_r = we_run("literals", "rotate", "1313131313131313", stdin=VX4 + "\n")
+_reg = json.loads(WEREG.read_text())
+_dup_ok = _r.returncode == 0 \
+    and any(e.get("id") == "1313131313131313" and e.get("retired") is True
+            for e in _reg["literals"]) \
+    and any(e.get("value") == VX4 and e.get("rotated_from")
+            == "1313131313131313" for e in _reg["literals"])
+# Duplicate TARGET-id occurrences: the canonical pipeline never lets two
+# same-id string-value entries reach the count (readonly loader rejects
+# non-string shapes; the normalizer repairs duplicate ids), so the
+# count>1 -> registry_conflict branch is exercised WHITE-BOX against the
+# loaded module with a forced duplicate-id normalization result — the
+# first match must never be selected, no mutation, no success output.
+wem = _we_module()
+we_reg([{"value": VX1, "id": "3535353535353535"}])
+_pre = WEREG.read_bytes()
+_orig_norm = wem._normalize_entries
+def _dup_norm(raw):
+    return ([{"value": VX1, "id": "3535353535353535"},
+             {"value": VX2, "id": "3535353535353535"}], 0, False)
+wem._normalize_entries = _dup_norm
+_bo = io.StringIO(); _be = io.StringIO(); _rc = 0
+try:
+    with contextlib.redirect_stdout(_bo), contextlib.redirect_stderr(_be):
+        _old_stdin = sys.stdin
+        sys.stdin = io.TextIOWrapper(io.BytesIO((VX3 + "\n").encode()))
+        try:
+            _rc = wem.cmd_literals(["rotate", "3535353535353535"])
+        finally:
+            sys.stdin = _old_stdin
+finally:
+    wem._normalize_entries = _orig_norm
+_dup_ok = _dup_ok and _rc == 2 and _bo.getvalue() == "" \
+    and _be.getvalue() == "error: registry_conflict\n" \
+    and WEREG.read_bytes() == _pre
+check("battery.rotate.rotate_candidates_target_duplicate_rejection: FIX-5 "
+      "unrelated duplicate ids do not block rotation; duplicate TARGET id "
+      "matches fail closed registry_conflict, no mutation",
+      _dup_ok, "")
+
+# FIX-6 (fold): exact target-lineage predicates — malformed id/timestamp
+# formats and contradictory combinations fail closed registry_conflict; a
+# valid dangling rotated_from (severed chain) remains tolerated.
+def _we_lineage_case(fields, expect_rc, stdin_val, cls="registry_conflict"):
+    global _fail_ok, _we_fail_at
+    we_reg([{"value": VB1, "id": "4444555566667777", **fields}])
+    _pre = WEREG.read_bytes()
+    _r = we_run("literals", "rotate", "4444555566667777",
+                stdin=stdin_val + "\n")
+    _ok = _r.returncode == expect_rc \
+        and (_r.stdout == "" if expect_rc == 2 else _r.stdout != "") \
+        and (_r.stderr == f"error: {cls}\n"
+             if expect_rc == 2 else _r.stderr == "") \
+        and (WEREG.read_bytes() == _pre if expect_rc == 2 else True)
+    if not _ok:
+        _we_fail_at = f"lineage {fields} (rc={_r.returncode} " \
+                      f"out={_r.stdout!r} err={_r.stderr!r})"
+    _fail_ok = _fail_ok and _ok
+    return _r
+VX5 = _rtfrag("x5"); VX6 = _rtfrag("x6"); VX7 = _rtfrag("x7")
+VX8 = _rtfrag("x8"); VX9 = _rtfrag("x9"); VX10 = _rtfrag("x10")
+VX11 = _rtfrag("x11"); VX12 = _rtfrag("x12")
+WEVALUES += [VX5, VX6, VX7, VX8, VX9, VX10, VX11, VX12]
+_we_lineage_case({"retired": "yes"}, 2, VX5)                     # bad type
+_we_lineage_case({"retired_at": "2026-08-23T00:00:00Z"}, 2, VX6)
+    # retired_at without retired: true
+# retired_at present on an ACTIVE target fails closed registry_conflict
+# regardless of format (contradictory retirement metadata, FIX-6); the
+# exact-UTC format validation is defensive — a genuinely retired target
+# (retired: true) short-circuits to usage (A43/FIX-7 precedence) before
+# the format check, which is the contract's retired-target rule.
+_we_lineage_case({"retired_at": "not-a-time"}, 2, VX7)
+    # arbitrary timestamp string on an active target
+_we_lineage_case({"retired_at": "2026-08-23T00:00:00.123Z"}, 2, VX8)
+    # fractional timestamp on an active target
+_we_lineage_case({"retired_at": "2026-08-23T00:00:00+00:00"}, 2, VX9)
+    # offset timestamp on an active target
+_we_lineage_case({"retired": True,
+                  "retired_at": "not-a-time"}, 2, VX10, cls="usage")
+    # retired target with a malformed timestamp -> usage (retired wins)
+_we_lineage_case({"rotated_at": "2026-08-23"}, 2, VX11)          # bad fmt
+_we_lineage_case({"rotated_from": "zzz"}, 2, VX12)               # bad id fmt
+_we_lineage_case({"rotated_to": "aaaaaaaaaaaaaaaa"}, 2, VX5)
+    # active target carrying a successor pointer
+_r = _we_lineage_case({"rotated_from": "aaaaaaaaaaaaaaaa"}, 0, VX6)
+    # valid dangling rotated_from -> tolerated, rotation succeeds
+_reg = json.loads(WEREG.read_text())
+# the old entry keeps its dangling rotated_from (historical context) and
+# is retired; the NEW entry's rotated_from is the retired predecessor's
+# id (the writer's canonical chain semantics — the dangling ref on the
+# target never becomes the successor's rotated_from)
+_ok = any(e.get("id") == "4444555566667777"
+          and e.get("rotated_from") == "aaaaaaaaaaaaaaaa"
+          and e.get("retired") is True for e in _reg["literals"]) \
+    and any(e.get("value") == VX6
+            and e.get("rotated_from") == "4444555566667777"
+            for e in _reg["literals"])
+if not _ok:
+    _we_fail_at = f"FIX6-dangling-post (reg={_reg['literals']!r})"
+_fail_ok = _fail_ok and _ok
 # A50 descoped transport forms
 _we_fail_case("file", ["--file", "/tmp/x", "4444555566667777"], VB3 + "\n",
               "usage")
@@ -7329,7 +7552,7 @@ _fail_ok = _fail_ok and _rb.returncode == 2 and _rb.stdout == b"" \
     and _rb.stderr == b"error: usage\n" and WEREG.read_bytes() == _pre
 check("battery.rotate.rotate_failure_matrix: A42-A50/A65 all failures "
       "exit 2, value-free, no mutation, no JSON envelope",
-      _fail_ok, "")
+      _fail_ok, f"fail-at={_we_fail_at}")
 check("battery.rotate.rotate_duplicate_and_resurrection_rejection: A48/A49 "
       "same-value + registered-value duplicates (incl. retired) rejected",
       _fail_ok, "")
@@ -7381,8 +7604,55 @@ _we_parse("unknown-flag", ["--bogus", "4444555566667777"], VB2L + "\n", 2)
 _we_parse("option-after-dash", ["--", "--json"], VB2L + "\n", 2)
 _we_parse("double-dash", ["--", "--"], VB2L + "\n", 2)
 _we_parse("malformed-id", ["nothex"], VB2L + "\n", 2)
+# FIX-2 positives: no final delimiter, one final CRLF, and surrounding
+# whitespace stripped only AFTER delimiter validation all succeed; the
+# stored value is the stripped form.
+VBP1 = _rtfrag("p1"); VBP2 = _rtfrag("p2"); VBP3 = _rtfrag("p3")
+WEVALUES += [VBP1, VBP2, VBP3]
+we_reg([{"value": VB1, "id": "4444555566667777"}])
+_r = we_run("literals", "rotate", "4444555566667777", stdin=VBP1)
+_parser_ok = _parser_ok and _r.returncode == 0 and _r.stderr == "" \
+    and _r.stdout != ""
+we_reg([{"value": VB1, "id": "4444555566667777"}])
+_r = we_run("literals", "rotate", "4444555566667777",
+            stdin=VBP2 + "\r\n")
+_parser_ok = _parser_ok and _r.returncode == 0 and _r.stderr == "" \
+    and _r.stdout != ""
+we_reg([{"value": VB1, "id": "4444555566667777"}])
+_r = we_run("literals", "rotate", "4444555566667777",
+            stdin="  " + VBP3 + "  \n")
+_reg = json.loads(WEREG.read_text())
+_parser_ok = _parser_ok and _r.returncode == 0 and _r.stderr == "" \
+    and _r.stdout != "" \
+    and any(e.get("value") == VBP3 for e in _reg["literals"])
+# FIX-8 (view + rotate): an exact `--json` ANYWHERE in raw argv (incl.
+# after `--`) selects JSON error handling; literals rotate still never
+# emits a JSON error envelope (value-free stderr, empty stdout, exit 2).
+we_reg([{"value": VB1, "id": "4444555566667777"}])
+_r = we_run("literals", "rotate", "--", "--json", stdin=VB2L + "\n")
+_parser_ok = _parser_ok and _r.returncode == 2 and _r.stdout == "" \
+    and _r.stderr == "error: usage\n"
+# FIX-9: `--help` follows the D55 convention — usage text on stdout,
+# exit 0, intercepted before registry/stdin/detector access (run with a
+# registry-less HERMES_HOME so any registry read would fail closed).
+_help_env = dict(os.environ, HERMES_HOME=str(WE / "nohome"))
+_r = we_run("rotate-candidates", "--help", env=_help_env)
+_help_ok = _r.returncode == 0 and _r.stdout != "" and _r.stderr == "" \
+    and "rotate-candidates" in _r.stdout
+_r = we_run("literals", "rotate", "--help", env=_help_env)
+_help_ok = _help_ok and _r.returncode == 0 and _r.stdout != "" \
+    and _r.stderr == "" and "rotate" in _r.stdout
+_r = we_run("literals", "rotate", "--help", "4444555566667777",
+            env=_help_env)
+_help_ok = _help_ok and _r.returncode == 0 and _r.stdout != "" \
+    and _r.stderr == ""
+_r = we_run("rotate-candidates", "--help", "--json", env=_help_env)
+_help_ok = _help_ok and _r.returncode == 0 and _r.stdout != "" \
+    and _r.stderr == ""
+_parser_ok = _parser_ok and _help_ok
 check("battery.rotate.rotate_parser_matrix: A66 exact grammar — json "
-      "placement, repeated/missing/extra/unknown/marker forms",
+      "placement, repeated/missing/extra/unknown/marker forms, FIX-2 "
+      "delimiter positives, FIX-8 --json-after---, FIX-9 --help carve-out",
       _parser_ok, "")
 # JSON-mode failure: no envelope, stdout empty, value-free stderr
 we_reg([{"value": VB1, "id": "4444555566667777"}])
@@ -7404,9 +7674,50 @@ _argv_leak = [v for _l, argv, _rc, _o, _e, _stdin in WECAP
 check("battery.rotate.rotate_value_never_argv: S13 replacement value never "
       "enters argv (stdin-only transport)",
       _argv_leak == [], f"argv-leaks={_argv_leak[:3]}")
+# FIX-12 (fold): LIVE argv/process-list capture — while the child is
+# ALIVE, /proc/<pid>/cmdline and the process list must never contain the
+# fresh replacement value (captured mid-flight, not only after exit).
+VARGV = _rtfrag("argv")
+WEVALUES.append(VARGV)
+we_reg([{"value": VB1, "id": "4444555566667777"}])
+_proc = subprocess.Popen(
+    IGPY + ["literals", "rotate", "4444555566667777"],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE, env=WEENV)
+_proc_ok = True
+try:
+    _cmdline = b""
+    for _i in range(100):
+        try:
+            _cmdline = Path(f"/proc/{_proc.pid}/cmdline").read_bytes()
+        except OSError:
+            pass
+        if _cmdline:
+            break
+        time.sleep(0.05)
+    _ps = ""
+    if shutil.which("ps"):
+        _ps = subprocess.run(["ps", "-o", "args=", "-p", str(_proc.pid)],
+                             capture_output=True, text=True,
+                             timeout=30).stdout
+    _proc_ok = VARGV not in _cmdline.decode("utf-8", "replace") \
+        and VARGV not in _ps
+    _out, _err = _proc.communicate((VARGV + "\n").encode(), timeout=60)
+    _proc_ok = _proc_ok and _proc.returncode == 0
+    _we_sweep(_cmdline.decode("utf-8", "replace"), _ps,
+              _out.decode("utf-8", "replace"),
+              _err.decode("utf-8", "replace"))
+finally:
+    if _proc.poll() is None:
+        _proc.kill()
+        _proc.wait()
+check("battery.rotate.rotate_value_never_argv: FIX-12 live /proc/<pid>/"
+      "cmdline + process-list captures never contain the fresh value",
+      _proc_ok, "")
 
 
 # ── Group 3: rotate-candidates view checks (A54-A60, A62-A63) ─────────
+we_reset()
 # Fresh fixture: all four priorities, cross-tier family counting, equal
 # family-count tie-break, multiple env keys, dedup, first-wins, conflicts.
 VC1 = _fcrag("c1"); VC2 = _rtfrag("c2"); VC3 = _fcrag("c3")
@@ -7471,8 +7782,8 @@ _scope_ok = _scope_ok \
     and _row_ret.get("retired") is True \
     and _row_ret.get("type") is None and _row_ret.get("count") == 0 \
     and _row_ret.get("detected") is False
-check("battery.rotate.rotate_candidates_scope: A54/A55/A56/A57/A59 row "
-      "scope — idle w/o type, review, env-KNOWN, family aggregation, "
+check("battery.rotate.rotate_candidates_truth_table: A54/A55/A56/A57/A59 "
+      "row scope — idle w/o type, review, env-KNOWN, family aggregation, "
       "key-name/already-masked excluded",
       _scope_ok, f"rows={_d.get('rows')}")
 # A60/A57: deterministic ordering (rank, count desc, family, mask, id, sha)
@@ -7498,6 +7809,29 @@ _ord_ok = _ord_ok and _rr.returncode == 2 and _dd.get("status") == "error" \
 check("battery.rotate.rotate_candidates_ordering: A57/A60 deterministic "
       "ordering + repeated --json usage error with JSON envelope",
       _ord_ok, f"order={_ord}")
+# FIX-8 (view): an exact `--json` ANYWHERE in raw argv selects the JSON
+# error envelope — including after the `--` marker, where the token is
+# positional data and the invocation is invalid.
+_rr = we_run("rotate-candidates", "--", "--json")
+_dd = json.loads(_rr.stdout) if _rr.stdout else {}
+_ord_ok = _ord_ok and _rr.returncode == 2 \
+    and _dd.get("status") == "error" and _dd.get("error_class") == "usage" \
+    and _dd.get("rows") == [] and _rr.stderr == ""
+_rr = we_run("rotate-candidates", "--json", "--")
+_dd = json.loads(_rr.stdout) if _rr.stdout else {}
+# `--json --` is VALID per the plan grammar matrix (bare `--`, no
+# positionals after) — JSON mode selected, view runs normally
+_ord_ok = _ord_ok and _rr.returncode in (0, 1) \
+    and _dd.get("status") in ("clean", "candidates") \
+    and _dd.get("error_class") is None and _rr.stderr == ""
+_rr = we_run("rotate-candidates", "--json", "--bogus")
+_dd = json.loads(_rr.stdout) if _rr.stdout else {}
+_ord_ok = _ord_ok and _rr.returncode == 2 \
+    and _dd.get("status") == "error" and _dd.get("error_class") == "usage" \
+    and _rr.stderr == ""
+check("battery.rotate.rotate_candidates_ordering: FIX-8 exact --json "
+      "anywhere in argv (incl. after ---) selects the JSON envelope",
+      _ord_ok, f"last={_rr.stdout!r}")
 # A60/A54: idle-only view -> clean, exit 0; schema/count invariants
 we_reg([{"value": VC7, "id": "cccc333344445555"}])
 we_wipe()
@@ -7516,7 +7850,7 @@ _clean_ok = _clean_ok and _r.returncode == 0 and _r.stdout != "" \
 # A62: no baseline -> first_seen/last_seen omitted, never null
 _clean_ok = _clean_ok and "first_seen" not in _rowidle \
     and "last_seen" not in _rowidle
-check("battery.rotate.rotate_candidates_schema_and_count_invariants: "
+check("battery.rotate.rotate_candidates_clean_exit_invariants: "
       "A54/A60/A62 idle-only clean exit 0; count/actionable; no-baseline "
       "omission",
       _clean_ok, f"rows={_d.get('rows')}")
@@ -7533,12 +7867,14 @@ _d = json.loads(_r.stdout) if _r.stdout else {}
 _row = next((x for x in _d.get("rows", []) if x.get("value_id")), {})
 _dedup_ok = _d.get("count") == 1 and _row.get("count") == 4 \
     and _row.get("value_id") == "eeee555566667777"  # first-wins (2 tiers)
-# A58: rotate the SECOND duplicate's id -> registry_conflict (target value
-# not unique), no mutation, view remains readable
+# A58: rotate the SECOND duplicate's id -> the canonical normalizer
+# collapses same-value duplicates (first-wins, D45), so the collapsed id
+# no longer identifies an entry -> usage (unknown target, FIX-7), no
+# mutation, view remains readable
 _pre = WEREG.read_bytes()
 _r = we_run("literals", "rotate", "ffff666677778888", stdin=VC3 + "\n")
 _dedup_ok = _dedup_ok and _r.returncode == 2 \
-    and _r.stderr == "error: registry_conflict\n" \
+    and _r.stderr == "error: usage\n" \
     and WEREG.read_bytes() == _pre
 _r = we_run("rotate-candidates", "--json")
 _dedup_ok = _dedup_ok and _r.returncode == 1  # view still readable
@@ -7641,10 +7977,106 @@ _bu_ok = _r.returncode == 2 and _d.get("status") == "error" \
 _r = we_run("rotate-candidates")
 _bu_ok = _bu_ok and _r.returncode == 2 and _r.stdout == "" \
     and _r.stderr == "error: baseline_unavailable\n"
-check("battery.rotate.rotate_candidates_fail_closed_exits: A63 malformed "
-      "baseline fails closed baseline_unavailable in both modes",
+# FIX-3 (fold): every present baseline ROW must be well-formed — dict with
+# a non-empty string value_sha256 and exact-UTC timestamps when present.
+# A malformed row fails closed, never silently skipped.
+_BAD_BASELINES = [
+    ("row-missing-hash",
+     {"values": [{"first_seen": "2026-08-23T00:00:00Z"}]}),
+    ("row-empty-hash",
+     {"values": [{"value_sha256": ""}]}),
+    ("row-non-dict",
+     {"values": ["not-a-row"]}),
+    ("row-bad-first-seen",
+     {"values": [{"value_sha256": "a" * 64,
+                  "first_seen": "2026-08-23T00:00:00.123Z"}]}),
+    ("row-offset-ts",
+     {"values": [{"value_sha256": "a" * 64,
+                  "first_seen": "2026-08-23T00:00:00+00:00"}]}),
+    ("row-last-seen-bad",
+     {"values": [{"value_sha256": "a" * 64,
+                  "last_seen": "yesterday"}]}),
+]
+for _bl, _bbody in _BAD_BASELINES:
+    (WEH / "state/info-guard/watch-baseline.json").write_text(
+        json.dumps(_bbody))
+    _r = we_run("rotate-candidates", "--json")
+    _dd = json.loads(_r.stdout) if _r.stdout else {}
+    _bu_ok = _bu_ok and _r.returncode == 2 \
+        and _dd.get("error_class") == "baseline_unavailable" \
+        and _dd.get("rows") == [] and _r.stderr == ""
+    _r = we_run("rotate-candidates")
+    _bu_ok = _bu_ok and _r.returncode == 2 and _r.stdout == "" \
+        and _r.stderr == "error: baseline_unavailable\n"
+# valid-row control: a well-formed baseline joins normally (no failure)
+(WEH / "state/info-guard/watch-baseline.json").write_text(json.dumps(
+    {"schema": "info-guard/watch-baseline/v2",
+     "values": [{"value_sha256": "a" * 64,
+                 "first_seen": "2026-08-23T00:00:00Z",
+                 "last_seen": "2026-08-23T01:00:00Z"}]}))
+_r = we_run("rotate-candidates", "--json")
+_d = json.loads(_r.stdout) if _r.stdout else {}
+_bu_ok = _bu_ok and _r.returncode in (0, 1) \
+    and _d.get("error_class") is None
+check("battery.rotate.rotate_candidates_baseline_unavailable: A63 malformed "
+      "baseline (JSON + every malformed-row shape) fails closed "
+      "baseline_unavailable in both modes; valid rows join normally",
       _bu_ok, "")
 (WEH / "state/info-guard/watch-baseline.json").unlink()
+
+# FIX-10 (fold): _read_text_noatime falls back ONLY on EPERM/EINVAL/
+# ENOTSUP from the O_NOATIME open; unrelated errnos propagate to the
+# caller's fail-closed path (baseline_unavailable). Fault-injected
+# in-process against the loaded module, windowed + restored.
+we_reg([{"value": VC7, "id": "cccc333344445555"}])
+we_wipe()
+we_scan(f"API_TOKEN={VC2}\n", name="h2.env")
+_BPATH = WEH / "state/info-guard/watch-baseline.json"
+_BPATH.write_text(json.dumps(
+    {"schema": "info-guard/watch-baseline/v2",
+     "values": [{"value_sha256": _we_sha(VC7),
+                 "first_seen": "2026-08-23T00:00:00Z"}]}))
+_real_open = os.open
+def _we_open_fault(errno_val, target, state):
+    def _wrapped(path, *a, **kw):
+        if os.fspath(path) == str(target) and not state[0]:
+            state[0] = True
+            raise OSError(errno_val, "injected noatime fault")
+        return _real_open(path, *a, **kw)
+    return _wrapped
+_noatime_ok = True
+for _eno, _expect in ((errno.EPERM, "fallback"),
+                      (errno.EINVAL, "fallback"),
+                      (errno.ENOTSUP, "fallback")):
+    _st = [False]
+    os.open = _we_open_fault(_eno, _BPATH, _st)
+    _bo = io.StringIO(); _be = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(_bo), \
+             contextlib.redirect_stderr(_be):
+            _rc = wem.cmd_rotate_candidates(["--json"])
+    finally:
+        os.open = _real_open
+    _dd = json.loads(_bo.getvalue()) if _bo.getvalue() else {}
+    _noatime_ok = _noatime_ok and _rc == 1 \
+        and _dd.get("error_class") is None and _st[0]
+for _eno in (errno.EACCES, errno.EIO):
+    _st = [False]
+    os.open = _we_open_fault(_eno, _BPATH, _st)
+    _bo = io.StringIO(); _be = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(_bo), \
+             contextlib.redirect_stderr(_be):
+            _rc = wem.cmd_rotate_candidates(["--json"])
+    finally:
+        os.open = _real_open
+    _dd = json.loads(_bo.getvalue()) if _bo.getvalue() else {}
+    _noatime_ok = _noatime_ok and _rc == 2 \
+        and _dd.get("error_class") == "baseline_unavailable" and _st[0]
+check("battery.rotate.rotate_candidates_fail_closed_exits: FIX-10 "
+      "noatime-open fallback restricted to EPERM/EINVAL/ENOTSUP; "
+      "unrelated errnos propagate fail-closed baseline_unavailable",
+      _noatime_ok, "")
 
 # A67: registry failure matrix (missing / unreadable / malformed /
 # unsupported / non-list) in both modes.
@@ -7679,36 +8111,136 @@ _r = we_run("literals", "rotate", "4444555566667777", stdin="x-y-z\n")
 _reg_mtx = _reg_mtx and _r.returncode == 2 \
     and _r.stderr == "error: registry_unavailable\n" and _r.stdout == "" \
     and WEREG.read_bytes() == _pre
+# FIX-4 (fold): every non-canary registry ENTRY must be a dict with a
+# non-empty string value and a 16-lowercase-hex id — any malformed entry
+# fails closed registry_unavailable, never skipped, never emitted with an
+# invented or malformed value_id. Honeytoken entries are excluded FIRST:
+# a malformed honeytoken is not a conflict and not a view failure.
+_BAD_ENTRIES = [
+    ("non-dict", ["legacy-string-entry"]),
+    ("missing-value", [{"id": "aaaaaaaaaaaaaaaa"}]),
+    ("empty-value", [{"value": "", "id": "aaaaaaaaaaaaaaaa"}]),
+    ("non-string-value", [{"value": 123, "id": "aaaaaaaaaaaaaaaa"}]),
+    ("missing-id", [{"value": "x-y-z"}]),
+    ("empty-id", [{"value": "x-y-z", "id": ""}]),
+    ("uppercase-hex-id", [{"value": "x-y-z", "id": "AAAAAAAAAAAAAAAA"}]),
+    ("wrong-length-id", [{"value": "x-y-z", "id": "abcd"}]),
+    ("non-string-id", [{"value": "x-y-z", "id": 123}]),
+]
+for _el, _ebody in _BAD_ENTRIES:
+    we_reg(_ebody)
+    _pre = WEREG.read_bytes()
+    _r = we_run("rotate-candidates", "--json")
+    try:
+        _dd = json.loads(_r.stdout)
+        _reg_mtx = _reg_mtx and _r.returncode == 2 \
+            and _dd.get("error_class") == "registry_unavailable" \
+            and _dd.get("rows") == [] and _r.stderr == ""
+    except ValueError:
+        _reg_mtx = False
+    _r = we_run("rotate-candidates")
+    _reg_mtx = _reg_mtx and _r.returncode == 2 and _r.stdout == "" \
+        and _r.stderr == "error: registry_unavailable\n" \
+        and WEREG.read_bytes() == _pre
+# honeytoken-first boundary: a malformed honeytoken entry is EXCLUDED
+# from the rotate view without failing the view and without conflict.
+we_wipe()                       # no scan corpus -> no unregistered rows
+we_reg([{"value": "ht-" + secrets.token_hex(8), "kind": "honeytoken",
+         "id": "not-a-valid-id"}])
+_r = we_run("rotate-candidates", "--json")
+_d = json.loads(_r.stdout) if _r.stdout else {}
+_reg_mtx = _reg_mtx and _r.returncode == 0 and _d.get("status") == "clean" \
+    and _d.get("error_class") is None
 check("battery.rotate.rotate_malformed_registry: A67 registry failure "
       "matrix — missing/unreadable/malformed/v1/v3/non-list fail closed "
       "in both modes; rotate never mutates",
-      _reg_mtx, "")
+      _reg_mtx, f"mtx={_reg_mtx} last={_el} rc={_r.returncode} "
+                f"err={_r.stderr.strip()!r}")
 
 # A68 + A69: detector failure and serialization failure (in-process).
 wem = _we_module()
 we_reg([{"value": VC7, "id": "cccc333344445555"}])
 we_wipe()
 we_scan(f"API_TOKEN={VC2}\n", name="h.env")
-# detector/corpus failure -> detector_error, both modes, no partial rows
+# detector/corpus failure -> detector_error, both modes, no partial rows,
+# state bytes unchanged. FIX-1 (fold): _env_sources, _env_scan_file, and
+# canary file-read failures all PROPAGATE (strict mode) to detector_error
+# instead of degrading to empty metadata/empty text.
+_det_ok = True
+_we_last_text_err = ""
+def _we_detector_fault(patch, restore):
+    global _det_ok, _we_last_text_err
+    we_reg([{"value": VC7, "id": "cccc333344445555"}])
+    _snap_pre = we_snapshot()
+    patch()
+    _bo = io.StringIO(); _be = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(_bo), \
+             contextlib.redirect_stderr(_be):
+            _rcj = wem.cmd_rotate_candidates(["--json"])
+    finally:
+        _bo2 = io.StringIO(); _be2 = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(_bo2), \
+                 contextlib.redirect_stderr(_be2):
+                _rct = wem.cmd_rotate_candidates([])
+        finally:
+            restore()
+    _we_last_text_err = _be2.getvalue()
+    _dj = json.loads(_bo.getvalue()) if _bo.getvalue() else {}
+    _det_ok = _det_ok and _rcj == 2 \
+        and _dj.get("error_class") == "detector_error" \
+        and _dj.get("rows") == [] and _be.getvalue() == "" \
+        and _rct == 2 and _bo2.getvalue() == "" \
+        and _be2.getvalue() == "error: detector_error\n" \
+        and we_snapshot() == _snap_pre
+    _we_sweep(_bo.getvalue(), _be.getvalue(),
+              _bo2.getvalue(), _be2.getvalue())
 _orig_scan = wem._rotate_scan
 def _boom_scan(dirs, entries):
     raise RuntimeError("forced corpus failure")
-wem._rotate_scan = _boom_scan
+_we_detector_fault(lambda: setattr(wem, "_rotate_scan", _boom_scan),
+                   lambda: setattr(wem, "_rotate_scan", _orig_scan))
+_orig_envsrc = wem._env_sources
+def _boom_envsrc():
+    raise RuntimeError("forced env-sources failure")
+_we_detector_fault(lambda: setattr(wem, "_env_sources", _boom_envsrc),
+                   lambda: setattr(wem, "_env_sources", _orig_envsrc))
+_orig_envsf = wem._env_scan_file
+def _boom_envsf(path, index, src_ids):
+    raise RuntimeError("forced env-scan-file failure")
+_we_detector_fault(lambda: setattr(wem, "_env_scan_file", _boom_envsf),
+                   lambda: setattr(wem, "_env_scan_file", _orig_envsf))
+# canary file-read failure: a registry WITH a honeytoken makes the canary
+# pass read files; a windowed Path.read_text fault on the scan file must
+# propagate (strict) instead of degrading to empty text.
+we_reg([{"value": VC7, "id": "cccc333344445555"},
+        {"value": "ht-" + secrets.token_hex(8), "id": "abababababababab",
+         "kind": "honeytoken"}])
+_snap_pre = we_snapshot()
+_real_read_text = Path.read_text
+def _boom_read(self, *a, **kw):
+    if self.name == "h.env":
+        raise OSError("forced canary read failure")
+    return _real_read_text(self, *a, **kw)
+Path.read_text = _boom_read
 _bo = io.StringIO(); _be = io.StringIO()
-with contextlib.redirect_stdout(_bo), contextlib.redirect_stderr(_be):
-    _rcj = wem.cmd_rotate_candidates(["--json"])
-_bo2 = io.StringIO(); _be2 = io.StringIO()
-with contextlib.redirect_stdout(_bo2), contextlib.redirect_stderr(_be2):
-    _rct = wem.cmd_rotate_candidates([])
-wem._rotate_scan = _orig_scan
+try:
+    with contextlib.redirect_stdout(_bo), contextlib.redirect_stderr(_be):
+        _rcj = wem.cmd_rotate_candidates(["--json"])
+finally:
+    Path.read_text = _real_read_text
 _dj = json.loads(_bo.getvalue()) if _bo.getvalue() else {}
-_det_ok = _rcj == 2 and _dj.get("error_class") == "detector_error" \
+_det_ok = _det_ok and _rcj == 2 \
+    and _dj.get("error_class") == "detector_error" \
     and _dj.get("rows") == [] and _be.getvalue() == "" \
-    and _rct == 2 and _bo2.getvalue() == "" \
-    and _be2.getvalue() == "error: detector_error\n"
+    and we_snapshot() == _snap_pre
+_we_sweep(_bo.getvalue(), _be.getvalue())
 check("battery.rotate.rotate_scan_corpus_failure: A68 detector/corpus "
-      "failure fails closed detector_error in both modes, no partial rows",
-      _det_ok, f"json={_bo.getvalue()!r} text={_be2.getvalue()!r}")
+      "failure fails closed detector_error in both modes, no partial "
+      "rows; FIX-1 env-sources / env-scan-file / canary-read failures "
+      "propagate, state unchanged",
+      _det_ok, f"json={_bo.getvalue()!r} text={_we_last_text_err!r}")
 
 # normal-response serialization failure -> non-recursive fallback
 we_reg([{"value": VC7, "id": "cccc333344445555"}])
@@ -7722,6 +8254,7 @@ with contextlib.redirect_stdout(_bo), contextlib.redirect_stderr(_be):
 wem._rotate_serialize = _orig_ser
 _ser_ok = _rcn == 2 and _bo.getvalue() == "" \
     and _be.getvalue() == "error: internal_error\n"
+_we_sweep(_bo.getvalue(), _be.getvalue())
 # error-envelope serialization failure -> same fallback
 wem._rotate_serialize = _boom_ser
 _bo = io.StringIO(); _be = io.StringIO()
@@ -7730,6 +8263,7 @@ with contextlib.redirect_stdout(_bo), contextlib.redirect_stderr(_be):
 wem._rotate_serialize = _orig_ser
 _ser_ok = _ser_ok and _rce == 2 and _bo.getvalue() == "" \
     and _be.getvalue() == "error: internal_error\n"
+_we_sweep(_bo.getvalue(), _be.getvalue())
 check("battery.rotate.rotate_serialization_failure: A69 normal-response "
       "and error-envelope serialization failures emit the non-recursive "
       "value-free fallback",
@@ -7754,9 +8288,10 @@ _temps = [p.name for p in (WEH / "state/info-guard").glob(".redact-*")]
 _cs_ok = _rc == 2 and _bo.getvalue() == "" \
     and _be.getvalue() == "error: internal_error\n" \
     and WEREG.read_bytes() == _pre and _temps == []
-check("battery.rotate.rotate_serialization_failure: A69 candidate "
-      "serialization failure — exit 2, registry unchanged, no writer "
-      "invocation, no temp artifact",
+_we_sweep(_bo.getvalue(), _be.getvalue(), "\n".join(_temps))
+check("battery.rotate.rotate_candidates_serialization_failure: A69 "
+      "candidate serialization failure — exit 2, registry unchanged, no "
+      "writer invocation, no temp artifact",
       _cs_ok, f"temps={_temps}")
 
 # A69: canonical writer stage failures (temp-write, fsync, pre-replacement
@@ -7778,6 +8313,7 @@ def _we_writer_fault(patch, restore):
     finally:
         restore()
     _temps = [p.name for p in (WEH / "state/info-guard").glob(".redact-*")]
+    _we_sweep(_bo.getvalue(), _be.getvalue(), "\n".join(_temps))
     return (_rc == 2 and _bo.getvalue() == ""
             and _be.getvalue() == "error: internal_error\n"
             and WEREG.read_bytes() == _pre and _temps == [])
@@ -7832,6 +8368,7 @@ check("battery.rotate.rotate_canonical_write_failure: A69 temp-write, "
       _wf_ok, "")
 
 # ── Group 4: watch additive checks (A61, A62, A71, A72, A73) ──────────
+we_reset()
 VD1 = _rtfrag("d1"); VD2 = _rtfrag("d2")
 WEVALUES += [VD1, VD2]
 we_reg([{"value": VD1, "id": "1212121212121212"}])
@@ -7902,12 +8439,92 @@ check("battery.rotate.retired_watch_field_additive: A71 retired protected "
       "unchanged",
       _ret_ok, f"pv={_pv}")
 
+# watch_exit_ladder_unchanged (plan 4.1 #25, build-diff fold FIX-11): a
+# rotated registry with a retired detected value keeps the watch exit
+# ladder (0 clean / 1 findings / 2 degraded-engine) and delta/precedence
+# behavior; second run unchanged; matcher regeneration explicit.
+VW1 = _rtfrag("w1"); VW2 = _rtfrag("w2")
+WEVALUES += [VW1, VW2]
+we_reg([{"value": VW1, "id": "1515151515151515"}])
+_r = we_run("literals", "rotate", "1515151515151515", stdin=VW2 + "\n")
+we_wipe()
+we_scan(f"API_TOKEN={VW1}\n", name="w6.env")        # retired value detected
+_r1 = we_run("watch", "--json")
+_r2 = we_run("watch", "--json")                    # unchanged second run
+_ladder_ok = _r.returncode == 0 \
+    and _r1.returncode == (1 if WE_GITLEAKS else 2) \
+    and _r2.returncode == (0 if WE_GITLEAKS else 2)
+# gitleaks-unavailable leg: a scrubbed HOME (no go/bin, no .local/bin)
+# AND a stripped PATH make _gitleaks_available() false in the subprocess
+# -> exit 2 (PATH carries the user-level gitleaks otherwise)
+_scrub_env = dict(WEENV, HOME=str(WE / "noghome"), PATH="/usr/bin:/bin")
+(WE / "noghome").mkdir(exist_ok=True)
+_r3 = we_run("watch", "--json", env=_scrub_env)
+_ladder_ok = _ladder_ok and _r3.returncode == 2
+# delta/precedence unchanged: run 1 reports the retired row as NEW,
+# run 2 (steady state) reports UNCHANGED — same ladder semantics, no
+# regression after rotation
+try:
+    _d1 = json.loads(_r1.stdout)
+    _d2 = json.loads(_r2.stdout)
+    _pv1 = [x for x in _d1.get("exposure", {}).get("protected_values", [])
+            if x.get("value_id") == "1515151515151515"]
+    _pv2 = [x for x in _d2.get("exposure", {}).get("protected_values", [])
+            if x.get("value_id") == "1515151515151515"]
+    _ladder_ok = _ladder_ok \
+        and bool(_pv1) and _pv1[0].get("delta") in \
+            ("new", "increased", "unchanged") \
+        and bool(_pv2) and _pv2[0].get("delta") == "unchanged"
+except ValueError:
+    _ladder_ok = False
+# explicit matcher regeneration + post-build watch still ladder-consistent
+# (the build needs an env source; written AFTER the watch runs so the
+# env pass of runs 1-3 stays unaffected)
+(WEH / ".env").write_text(f"BUILD_TOKEN={VW2}\n")
+_rb = we_run("build")
+_r4 = we_run("watch", "--json")
+_ladder_ok = _ladder_ok and _rb.returncode == 0 \
+    and _r4.returncode in (0, 1, 2)
+check("battery.rotate.watch_exit_ladder_unchanged: A71/A72/A73 rotated "
+      "registry keeps watch exit ladder + delta behavior; exit 0/2 by "
+      "gitleaks availability; explicit build; post-build watch stable",
+      _ladder_ok, f"r1={_r1.returncode} r2={_r2.returncode} "
+                  f"r3={_r3.returncode} r4={_r4.returncode}")
+
+# FIX-16 (fold): every production call site of _protected_value_matches
+# passes sha_retired= explicitly — a missed site silently suppresses the
+# additive retired field (default None), so source completeness is
+# asserted, not just the outcome.
+_ig_src = Path(os.getcwd(), "bin", "info-guard").read_text()
+_pv_sites = []
+_def_done = False
+for _m in re.finditer(r"_protected_value_matches\(", _ig_src):
+    _pos = _m.start()
+    _pre = _ig_src.rfind("\n", 0, _pos)
+    _line = _ig_src[_pre + 1:_ig_src.find("\n", _pos)]
+    if _line.strip().startswith("def _protected_value_matches"):
+        _def_done = True
+        continue
+    _tail = _ig_src[_pos:_pos + 220]
+    _pv_sites.append("sha_retired=" in _tail)
+_pv_ok = _def_done and len(_pv_sites) >= 2 and all(_pv_sites)
+check("battery.rotate.retired_watch_field_additive: FIX-16 every "
+      "_protected_value_matches call site passes sha_retired= explicitly",
+      _pv_ok, f"sites={len(_pv_sites)} ok={_pv_sites}")
+
 # ── Group 5: security + driver + version ──────────────────────────────
-# S14: no synthetic value on ANY captured output surface.
+we_reset()
+# S14: no synthetic value on ANY captured output surface — every WECAP
+# stdout/stderr, every in-process redirected capture, exception text,
+# diagnostics, and atomic-writer temporary names (build-diff fold FIX-12;
+# the final-state directory-entry names are swept before the ledger).
 _leak = [v for _l, _argv, _rc, o, e, _stdin in WECAP
          for v in WEVALUES if v in (o + e)]
+_leak += [v for v in WEVALUES
+          for _s in WE_SWEEP if v in _s]
 check("battery.rotate.rotate_value_leakage_scan: S14 no raw synthetic "
-      "value on any stdout/stderr surface across the whole battery",
+      "value on any stdout/stderr/in-process/diagnostic/temp-name "
+      "surface across the whole battery",
       _leak == [], f"leaks={_leak[:3]}")
 
 # A70: text TSV escaping — control-bearing legacy value through masked
@@ -7937,24 +8554,32 @@ check("battery.rotate.masked_only_all_paths: A70 TSV escaping — control "
       "chars escaped in value_masked, '-' sentinel columns, no raw value",
       _esc_ok, f"line={_line!r}")
 
-# S15: single-sourced detector — the view reuses the shared _scan_lines
-# + env pass + canary pass; no second detector, no gitleaks, no new regex.
+# S15: single-sourced detector — BOTH _collect_hits (preflight/watch/
+# setup) and _rotate_scan (the view) call the ONE shared _scan_dir_files
+# helper; the view path contains no second traversal, no gitleaks engine,
+# no new regex, no subprocess (build-diff fold FIX-1: function-level
+# reuse, not just absence of engine terms).
 _rv_src = inspect.getsource(wem.cmd_rotate_candidates) \
     + inspect.getsource(wem._rotate_scan)
-_ks_src = inspect.getsource(wem._key_scan)
-_s15 = "_rotate_scan" in inspect.getsource(wem.cmd_rotate_candidates) \
-    and "_key_scan" in _rv_src and "_env_scan_file" in _rv_src \
-    and "_scan_lines" in _ks_src \
-    and "_gitleaks_scan" not in _rv_src and "_collect_hits" not in _rv_src \
+_ch_src = inspect.getsource(wem._collect_hits)
+_sh_src = inspect.getsource(wem._scan_dir_files)
+_s15 = "_scan_dir_files(" in _rv_src \
+    and "_scan_dir_files(" in _ch_src \
+    and "_key_scan(" in _sh_src and "_env_scan_file(" in _sh_src \
+    and "_gitleaks_scan" not in _rv_src and "_collect_hits(" not in _rv_src \
     and "re.compile" not in _rv_src \
-    and "subprocess" not in inspect.getsource(wem._rotate_scan)
-check("battery.rotate.single_sourced_detector: S15 view reuses the shared "
-      "detector (shape + env + canary); no second detector or gitleaks in "
-      "the rotate scan path",
+    and "subprocess" not in inspect.getsource(wem._rotate_scan) \
+    and _rv_src.count("for p in sorted(") == 0
+check("battery.rotate.single_sourced_detector: S15 _collect_hits AND "
+      "_rotate_scan call the shared _scan_dir_files helper (shape + env + "
+      "canary passes); no second traversal, gitleaks, regex, or "
+      "subprocess in the rotate scan path",
       _s15, "")
 
 # S11: no network dependency — the rotate surfaces contain no network
-# client; both flows complete without any external lookup.
+# client; both flows complete without any external lookup (build-diff
+# fold FIX-13: REAL network audit via strace syscall tracing under a
+# hostile proxy env, not just source-string inspection).
 _net_terms = ("socket", "urllib", "requests", "http.client", "ftplib",
               "aiohttp", "httpx", "urlopen")
 _rot_src = inspect.getsource(wem.cmd_rotate_candidates) \
@@ -7962,11 +8587,75 @@ _rot_src = inspect.getsource(wem.cmd_rotate_candidates) \
     + inspect.getsource(wem._rotate_scan)
 _net_ok = all(t not in _rot_src for t in _net_terms)
 we_reg([{"value": VC7, "id": "cccc333344445555"}])
-_r = we_run("rotate-candidates", "--json")
-_r2 = we_run("literals", "rotate", "cccc333344445555", stdin=VC8 + "\n")
+we_wipe()
+we_scan(f"API_TOKEN={VC2}\n", name="n.env")
+# hostile proxy env: any network attempt would fail fast AND be recorded
+_deny_env = dict(WEENV, http_proxy="http://127.0.0.1:1",
+                 https_proxy="http://127.0.0.1:1",
+                 all_proxy="http://127.0.0.1:1", no_proxy="")
+_r = we_run("rotate-candidates", "--json", env=_deny_env)
+_r2 = we_run("literals", "rotate", "cccc333344445555",
+             stdin=VC8 + "\n", env=_deny_env)
 _net_ok = _net_ok and _r.returncode in (0, 1) and _r2.returncode == 0
+# strace syscall audit (when available): zero socket/connect/bind/
+# sendto/recvfrom syscalls across both commands — FRESH registry + fresh
+# replacement value (the hostile-proxy rotate above already retired the
+# target and registered VC8, so the strace'd rotate would otherwise hit a
+# retired target -> usage).
+VN = _rtfrag("net")
+WEVALUES.append(VN)
+_strace = shutil.which("strace")
+if _strace:
+    we_reg([{"value": VC7, "id": "cccc333344445555"}])
+    _net_log = WE / "strace-net.log"
+    _sr = subprocess.run(
+        [_strace, "-f", "-e", "trace=network", "-o", str(_net_log)]
+        + IGPY + ["rotate-candidates", "--json"],
+        capture_output=True, text=True, env=WEENV, timeout=180)
+    _sr2 = subprocess.run(
+        [_strace, "-f", "-e", "trace=network", "-o", str(_net_log) + "2"]
+        + IGPY + ["literals", "rotate", "cccc333344445555"],
+        input=VN + "\n", capture_output=True, text=True, env=WEENV,
+        timeout=180)
+    _conns = []
+    for _lf in (str(_net_log), str(_net_log) + "2"):
+        try:
+            _conns += [l for l in Path(_lf).read_text().splitlines()
+                       if any(t in l for t in
+                              ("socket(", "connect(", "bind(", "sendto(",
+                               "recvfrom(", "socketpair("))]
+        except OSError:
+            pass
+    _net_ok = _net_ok and _sr.returncode in (0, 1) \
+        and _sr2.returncode == 0 and _conns == []
+    _we_sweep("\n".join(_conns))
+# FIX-13: rejected output/transport file options — exit 2, value-free,
+# no mutation, NO file-open attempt, NO creation of the named path.
+for _flag in ("--file", "--json-out"):
+    _target = WE / ("never-" + _flag.strip("-") + ".txt")
+    we_reg([{"value": VC7, "id": "cccc333344445555"}])
+    _pre = WEREG.read_bytes()
+    _r = we_run("literals", "rotate", _flag, str(_target),
+                "cccc333344445555", stdin=VC8 + "\n")
+    _net_ok = _net_ok and _r.returncode == 2 \
+        and _r.stdout == "" and _r.stderr == "error: usage\n" \
+        and WEREG.read_bytes() == _pre and not _target.exists()
+    _r = we_run("rotate-candidates", _flag, str(_target))
+    _net_ok = _net_ok and _r.returncode == 2 and _r.stdout == "" \
+        and not _target.exists()
+    if _strace:
+        _nl = WE / ("strace-" + _flag.strip("-") + ".log")
+        subprocess.run(
+            [_strace, "-f", "-e", "trace=openat,open", "-o", str(_nl)]
+            + IGPY + ["literals", "rotate", _flag, str(_target),
+                      "cccc333344445555"],
+            input=VC8 + "\n", capture_output=True, text=True, env=WEENV,
+            timeout=180)
+        _opened = str(_target) in Path(_nl).read_text()
+        _net_ok = _net_ok and not _opened and not _target.exists()
 check("battery.rotate.no_network_dependency: S11 neither flow performs "
-      "network access; rotate surfaces contain no network client",
+      "network access (strace-audited + hostile proxy env); rejected "
+      "file options exit 2 with no open attempt, no file created",
       _net_ok, "")
 
 # A73/documented_driver_sequence: consume the view, select by value_id,
@@ -7983,8 +8672,13 @@ _drv_ok = _sel.get("value_id") == "1212121212121212" \
 VDRV = _rtfrag("drv")
 WEVALUES.append(VDRV)
 _r = we_run("literals", "rotate", _sel["value_id"], stdin=VDRV + "\n")
+_drv_rc = _r.returncode
 _drv_ok = _drv_ok and _r.returncode == 0
+# the build needs an env source (same fixture requirement as the A36
+# fingerprint block): the deployment's .env carries the rotated value
+(WEH / ".env").write_text(f"BUILD_TOKEN={VDRV}\n")
 _r = we_run("build")
+_build_rc = _r.returncode
 _drv_ok = _drv_ok and _r.returncode == 0
 # the deployment applied the new value: old + new both present in the scan
 we_wipe()
@@ -8014,19 +8708,153 @@ _drv_ok = _drv_ok and _known.get("value_id") is None \
 check("battery.rotate.documented_driver_sequence: A73/A56 driver sequence "
       "— select by value_id, stdin rotate, explicit build, verify; "
       "unregistered KNOWN row has no value_id (enroll first)",
-      _drv_ok, f"sel={_sel} known={_known}")
+      _drv_ok, f"sel={_sel} newrow={_newrow} vnew={_vnew} known={_known} "
+                f"rotate_rc={_drv_rc} build_rc={_build_rc}")
+
+# rotate_candidates_priority (plan 4.1 #11, build-diff fold FIX-11): the
+# COMPLETE priority truth table on one fixture set — retired detected ->
+# critical; retired undetected -> idle (retired:true, count 0, detected
+# false, no type); registered active detected -> rotate-now; unregistered
+# KNOWN env row -> rotate-now with source env/type KNOWN/no value_id;
+# unregistered credential-shaped scan row -> review; registered undetected
+# active -> idle; registration does not force type KNOWN; critical
+# requires detection.
+VP1 = _rtfrag("p1"); VP2 = _fcrag("p2"); VP3 = _rtfrag("p3")
+VP4 = _fcrag("p4"); VP5 = _rtfrag("p5"); VP6 = _fcrag("p6")
+VP7 = _rtfrag("p7")
+WEVALUES += [VP1, VP2, VP3, VP4, VP5, VP6, VP7]
+we_reg([{"value": VP1, "id": "6161616161616161", "retired": True,
+         "retired_at": "2026-08-23T00:00:00Z",
+         "rotated_to": "aaaaaaaaaaaaaaaa"},   # retired, WILL be detected
+        {"value": VP2, "id": "6262626262626262", "retired": True,
+         "retired_at": "2026-08-23T00:00:00Z",
+         "rotated_to": "bbbbbbbbbbbbbbbb"},   # retired, absent (undetected)
+        {"value": VP3, "id": "6363636363636363"},   # registered, detected
+        {"value": VP6, "id": "6666666666666666"}])  # registered, absent
+we_wipe()
+we_scan(f"ALPHA_TOKEN={VP1}\n"                    # retired detected
+        f"BETA_TOKEN={VP3}\n"                     # registered active detected
+        f"GAMMA_TOKEN={VP4}\n"                    # unregistered scan row
+        f"FIXTURE_A_TOKEN= {VP5}\n", name="t.env")
+(WEH / ".env").write_text(f"FIXTURE_A_TOKEN={VP5}\n")
+_r = we_run("rotate-candidates", "--json")
+_d = json.loads(_r.stdout) if _r.stdout else {}
+_trows = {x.get("value_id") or x.get("value_masked"): x
+          for x in _d.get("rows", [])}
+_tr1 = _trows.get("6161616161616161", {})     # retired detected
+_tr2 = _trows.get("6262626262626262", {})     # retired undetected
+_tr3 = _trows.get("6363636363636363", {})     # registered active detected
+_tr4 = _trows.get(_we_mask(VP4), {})          # unregistered scan row
+_tr5 = _trows.get(_we_mask(VP5), {})          # unregistered KNOWN env row
+_tr6 = _trows.get("6666666666666666", {})     # registered undetected active
+_prio_ok = _tr1.get("priority") == "critical" \
+    and _tr1.get("retired") is True and _tr1.get("detected") is True \
+    and _tr2.get("priority") == "idle" and _tr2.get("retired") is True \
+    and _tr2.get("count") == 0 and _tr2.get("detected") is False \
+    and "type" not in _tr2 \
+    and _tr3.get("priority") == "rotate-now" \
+    and _tr3.get("type") == "KEY-SHAPE" \
+    and _tr5.get("priority") == "rotate-now" \
+    and _tr5.get("source") == "env" and _tr5.get("type") == "KNOWN" \
+    and _tr5.get("value_id") is None \
+    and _tr4.get("priority") == "review" \
+    and _tr6.get("priority") == "idle" \
+    and _tr6.get("detected") is False
+check("battery.rotate.rotate_candidates_priority: complete priority truth "
+      "table — critical/rotate-now/review/idle by detection + retirement "
+      "+ registration; env-KNOWN row without value_id; registration never "
+      "forces type KNOWN; critical requires detection",
+      _prio_ok, f"rows={_d.get('rows')}")
 
 # R2: version identity — constant == CLI == CHANGELOG, feature surfaces
-# identify the checked-out version.
+# identify the checked-out version (build-diff fold FIX-19: extended
+# across schema/docs/README surfaces, no stale release identity).
 _r = we_run("--version")
 _chg9 = "\n".join((Path(os.getcwd()) / "CHANGELOG.md")
                   .read_text().split("\n")[:12])
+_schema9 = (Path(os.getcwd()) / "docs/rotate-schema.md").read_text()
+_readme9 = (Path(os.getcwd()) / "README.md").read_text()
 _vid9 = wem._PACKAGE_VERSION == _PKG_VER \
     and _r.stdout.strip() == f"info-guard {_PKG_VER}" \
-    and f"v{_PKG_VER}" in _chg9
+    and f"v{_PKG_VER}" in _chg9 \
+    and f"v{_PKG_VER}" in _schema9 \
+    and f"Rotate secrets (v{_PKG_VER})" in _readme9 \
+    and "info-guard build" in _schema9 \
+    and "v0.9.0" not in _schema9 \
+    and ("## Rotate secrets" not in _readme9
+         or "v0.9.0" not in _readme9[_readme9.index("## Rotate secrets"):])
 check("battery.rotate.version_identity_v0_9_1: R2 package constant == CLI "
-      "--version == CHANGELOG title",
+      "--version == CHANGELOG; schema + README Rotate section identify "
+      "the checked-out version; no stale release identity",
       _vid9, f"const={wem._PACKAGE_VERSION} cli={_r.stdout.strip()!r}")
+
+# FIX-14 (fold): every security reporting alias resolves to an executed
+# primary check — the aliases are reporting metadata, never extra runs.
+_alias_missing = [a for a, p in WE_SECURITY_ALIASES.items()
+                  if not any(l.startswith(p) for l in EXECUTED_LABELS)]
+check("battery.security aliases: all ten rotate_* reporting aliases "
+      "resolve to executed primary checks",
+      _alias_missing == [], f"missing={_alias_missing}")
+
+# FIX-12: final-state directory-entry names swept for raw values (the
+# rotate view is byte/mtime/ctime and directory-entry stable — S12 — so
+# no entry may carry a raw value).
+_final_state_names = [p.name
+                      for p in (WEH / "state/info-guard").rglob("*")]
+_leak2 = [v for v in WEVALUES for _n in _final_state_names if v in _n]
+check("battery.rotate.rotate_value_leakage_scan: FIX-12 final state-dir "
+      "entry names carry no raw synthetic value",
+      _leak2 == [], f"leaks={_leak2[:3]}")
+
+# FIX-11/21 (fold): the FINAL executed-primary ledger contains the exact
+# 38 stable plan-4.1 identifiers (missing or informal names fail; the
+# honeytoken A44+A59 sub-case split and the four renamed sub-case labels
+# are reported informationally, following the E49 harness convention).
+_WE_LEDGER = [
+    "identity_lifecycle_round_trip", "lineage_chain_no_id_reuse",
+    "lineage_survives_later_writes", "rotate_failure_matrix",
+    "rotate_value_never_argv", "rotate_value_leakage_scan",
+    "rotate_mask_preservation", "rotate_duplicate_and_resurrection_rejection",
+    "rotate_honeytoken_rejection", "rotate_candidates_scope",
+    "rotate_candidates_priority", "rotate_candidates_ordering",
+    "rotate_candidates_deduplication", "rotate_candidates_first_wins_identity",
+    "rotate_candidates_registry_conflict_fail_closed",
+    "rotate_candidates_target_duplicate_rejection",
+    "rotate_candidates_fail_closed_exits",
+    "rotate_candidates_no_mutation_byte_snapshot",
+    "rotate_candidates_schema_and_count_invariants",
+    "retired_redetection_critical", "retired_list_visibility_and_remove",
+    "retired_watch_field_additive", "watch_last_seen_refresh",
+    "watch_last_seen_resolution", "watch_exit_ladder_unchanged",
+    "rotate_json_success", "rotate_json_failure", "rotate_parser_matrix",
+    "rotate_malformed_registry", "rotate_scan_corpus_failure",
+    "rotate_canonical_write_failure", "rotate_serialization_failure",
+    "rotate_fingerprint_snapshot", "documented_driver_sequence",
+    "single_sourced_detector", "masked_only_all_paths",
+    "no_network_dependency", "version_identity_v0_9_1",
+]
+_WE_SUBCASES = {
+    "rotate_candidates_truth_table", "rotate_candidates_clean_exit_invariants",
+    "rotate_candidates_baseline_unavailable",
+    "rotate_candidates_serialization_failure",
+}
+_missing_we = [n for n in _WE_LEDGER
+               if not any(l.startswith("battery.rotate." + n)
+                          for l in EXECUTED_LABELS)]
+_informal_we = [l for l in EXECUTED_LABELS
+                if l.startswith("battery.rotate.")
+                and not any(l.startswith("battery.rotate." + n)
+                            for n in _WE_LEDGER)
+                and not any(l.startswith("battery.rotate." + n)
+                            for n in _WE_SUBCASES)]
+_multi_we = [n for n in _WE_LEDGER
+             if sum(1 for l in EXECUTED_LABELS
+                    if l.startswith("battery.rotate." + n)) > 1]
+check("battery ledger: all 38 Wave E rotate primaries executed (missing/"
+      "informal fail; honeytoken + renamed sub-case splits informational)",
+      _missing_we == [] and _informal_we == [],
+      f"missing={_missing_we}; informal={_informal_we}; "
+      f"multi (sub-case splits)={_multi_we}")
 
 # Battery hygiene (evidence-gate fold, run-15 EDQUOT lesson): remove the
 # throwaway fixtures — repeated runs must never accumulate toward the
