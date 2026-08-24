@@ -21,7 +21,7 @@ After:   "the token is 7f...3c and the PIN is ***"
 
 | Setting | Value |
 |---|---|
-| Current Info Guard version | `0.9.1` |
+| Current Info Guard version | `0.9.2` |
 | Supported Hermes Agent versions | `v0.20.0` – `v0.20.5` |
 | Install location (canonical) | `~/.info-guard` |
 | Hermes home (`$HERMES_HOME`) | `~/.hermes` when unset |
