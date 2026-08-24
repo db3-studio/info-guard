@@ -18,8 +18,9 @@ environment, the way they were built and proven in the reference deployment.
 
 - *Discover*: inventory every secret source (`.env` files, docker compose
   envs, app configs, vault).
-- *Register*: every discovered secret gets a registry entry (hashed — never
-  plaintext) before its first config read.
+- *Register*: every discovered secret gets a registry entry (exact value,
+  CLI-managed — the registry file is chmod 600, and masking is display-only)
+  before its first config read.
 - *Mask*: the registered values flow into the pattern file (this repo's
   `info-guard build`); masking is display-only and can never corrupt sources.
 - *Detect*: scheduled scans watch transcripts, logs, and repos for registered
@@ -34,44 +35,77 @@ order, and each one pays for itself.
 
 ## Layer 2 — Secret inventory (register)
 
-A hashed registry of every known secret with priority tiers. Feeds both
-detection (what to scan for) and the matcher (which values get full-mask).
+The inventory backbone is the **product's exact-value registry**
+(`custom_literals.json`). There is no separate inventory store to build:
+every value you register is the identity source for detection, masking, and
+rotation. The old hashed-registry design this layer used to describe is
+superseded by it (a hashed mirror is at most an optional hardening note —
+see below).
 
-**State file** `<state>/info-guard/known_secrets.json` (chmod 600):
+**State file** `<state>/custom_literals.json` (chmod 600) — the product's
+registry, CLI-managed (never hand-edited):
 
 ```json
 {
-  "schema": 2,
-  "secrets": [
+  "version": 2,
+  "literals": [
     {
-      "id": "<sha256 of key>",
-      "key": "SOME_API_KEY",
-      "hash": "<sha256 of value, peppered>",
-      "priority": "critical|high|medium|low",
-      "source": "env|appconfig|honeytoken|retired",
-      "rotation": {"method": "agent|user", "owner": "API/script|UI"},
-      "registered": "2026-08-13T00:00:00Z"
+      "id": "9f3c1e7a2b8d4f60",
+      "value": "actual-secret-value",
+      "mask": "full",
+      "kind": "literal",
+      "rotated_from": null,
+      "rotated_at": null,
+      "retired": false,
+      "retired_at": null,
+      "rotated_to": null
     }
   ]
 }
 ```
 
+The identity fields matter: `id` is the opaque `value_id` join key across
+every surface (watch JSON, rotate candidates); `kind` distinguishes ordinary
+literals from honeytokens (canaries); the lineage fields (`rotated_from` /
+`rotated_at` / `retired` / `retired_at` / `rotated_to`) make rotation an
+identity lifecycle, never string replacement.
+
 Clues for the builder:
 
-- **Pepper**: a dedicated env key (`SECRET_INVENTORY_PEPPER`) — hashes are
-  `sha256(pepper + value)`, so a leaked registry file is not a lookup table.
-- **Priority tiers** (first match wins): spend/org credentials and
-  email/password pairs = `critical`; API keys = `high`; local service
-  passwords = `medium`; everything else = `low`. Critical values get
-  `"mask": "full"` in the pattern file — top-tier secrets never show even a
-  two-character fragment.
-- **Sources**: `.env` files (repo, daemon, docker compose dirs), app configs
-  (per-app env files), honeytokens. Nightly rebuild reconciles reality.
-- **Retention**: retired entries are pruned after 30 days (they are expected
-  residue — detection classifies them separately, see Layer 3).
+- **Register through the CLI only**: `literals add VALUE... [--mask STYLE]
+  [--file FILE] [--json]` (bulk via `--file`, per-value mask style via
+  `--mask`, machine-readable output via `--json`), `--from SOURCE:KEY` to
+  enroll a discovered source value, `--kind honeytoken` to plant a canary.
+  `literals list [--json]` inspects the registry; `literals remove ID`
+  removes an entry; `literals rotate VALUE_ID [--json]` applies a rotation
+  (replacement piped via stdin only — never argv). The registry is a
+  CLI-managed surface — hand-editing is unsupported; `build` regenerates
+  `redact_patterns.json` from `.env` sources + the registry.
+- **Priority tiers are derived, not stored**: the rotate-candidates view
+  derives `critical > rotate-now > review > idle` from detection + retirement
+  state at read time — no manual tier bookkeeping.
+- **Sources**: `.env` files (the default `build` input), `literals add`
+  (explicit registration), `discover` + `literals add --from` (at-source
+  enrollment), honeytokens. Nightly `build` re-runs reconcile reality.
+- **Retention**: retired identities stay registered and detectable until
+  explicitly removed (`literals remove`) — a retired credential must still
+  be caught if it appears; removal severs the lineage chain, leaving
+  surviving references as historical context.
 - **Key-shape warning**: keys not matching the built-in keyword families
   (KEY/PASS/PW/TOKEN/SECRET...) rely solely on exact-value matching — the
   inventory warns on them so they get registered deliberately.
+
+**Optional hardening (superseded design, kept as a note):** the pre-registry
+design stored a peppered sha256 of each value (`sha256(pepper + value)`) in a
+separate `known_secrets.json`, so a leaked inventory file was not a lookup
+table. The product registry stores exact values by necessity (exact matching,
+lineage, rotation) and is protected as sensitive local state (chmod 600, the
+same trust envelope as the pattern file — see the README's honest-boundary
+paragraph). A deployment that wants at-rest hardening **in addition** may keep
+a hashed mirror for detection-only joins, but it is a derived cache, never a
+second source of truth: the product registry is the identity source, and
+parallel hash inventories retire (consolidation doctrine: the deployment reads
+the product registry).
 
 ## Layer 3 — Detection (detect)
 
@@ -81,12 +115,12 @@ Scheduled, silent-when-clean scanners. The reference deployment runs:
 |---|---|---|
 | **Preflight (`info-guard preflight`)** | on demand, before install | Zero-config leak scan of Hermes' own transcripts/logs — key-shape regexes + gitleaks tuned ruleset; the same two passes the scheduled scanner runs, without needing a registry. This is the entry point: run it first, schedule it after. gitleaks is optional (preflight checks first and offers to install it); without it, key-shape + token-prefix passes still run |
 | Leak scan | every 6h | Scans transcripts, logs, and request dumps for registry values, key-shaped secrets, and token-shaped values |
-| HIBP exposed check | weekly | Compares registry hashes against haveibeenpwned's exposed-password API |
+| HIBP exposed check | weekly | Compares registered values against haveibeenpwned's k-anonymity API (SHA-1 prefix only — the full value never leaves; deployment-side, not shipped in v1) |
 | gitleaks discovery | nightly | Scans new app configs/repos for unregistered secrets — at the source, where XML/INI/YAML tags name the secret, so format gaps in the transcript scanners don't block identification |
 
 **Tiering** (what fires an alert, and at what severity):
 
-- `CONFIRMED` — exact registry-hash match: rotate (critical/high =
+- `CONFIRMED` — exact registry-value match: rotate (critical/high =
   immediate; `retired` class = expected residue, verify no active use).
 - `HONEYTOKEN` — a canary value appeared: critical (canaries only exist to
   be touched).
@@ -124,7 +158,12 @@ Clues for the builder:
   (SSO/UI passwords — the user changes them in the UI; the agent verifies).
 - **Order**: change the source first, then consumers, then verify
   old-fails / new-passes, then update inventory + pattern file, then
-  re-scan to confirm the old value no longer appears anywhere.
+  re-scan to confirm the old value no longer appears anywhere. The product's
+  sanctioned handoff: `rotate-candidates --json` selects what to rotate,
+  `literals rotate VALUE_ID` applies it (replacement via stdin only — the
+  replacement value must never appear as a CLI argument), and
+  `build` regenerates the pattern file — deployment drivers consume the
+  view and pipe the replacement; they never read or write the registry.
 - **Drill**: a quarterly scheduled full rotation proves the machinery works
   before an incident needs it.
 
@@ -134,10 +173,10 @@ Small scheduled checks that catch drift before it becomes a leak:
 
 | Check | Schedule | Detects |
 |---|---|---|
-| Env-drift watchdog | weekly | `.env` files changed without the inventory being rebuilt (silent when clean, email on drift) |
+| Env-drift watchdog | weekly | `.env` files changed without `info-guard build` being re-run (registry/pattern drift) — silent when clean, email on drift |
 | Config-audit | on change | New/changed config keys in tracked files (diff-based, with an ignore list for known benign churn) |
-| Nightly refresh | daily | Rebuild inventory + pattern file, re-run discovery — the "forgot to register" safety net |
-| Release hygiene | per release | Tag + CHANGELOG entry (Keep a Changelog); micro-fixes within one workstream consolidate into the wave's latest entry — versions stay meaningful for pull-based consumers |
+| Nightly refresh | daily | Re-run `info-guard build` + discovery — the "forgot to register" safety net |
+| Release hygiene | per release | Tag + CHANGELOG entry (Keep a Changelog); related micro-fixes consolidate into the most recent entry — versions stay meaningful for pull-based consumers |
 
 ## Known failure modes (learned the hard way)
 
@@ -164,7 +203,8 @@ when it isn't. Any implementation of this stack should test for them:
 ## Building order for a new deployment
 
 1. Install this repo (redaction) — immediate value, zero dependencies.
-2. Layer 2 inventory (needed before detection can be meaningful).
+2. Register into Layer 2 (the product registry — `literals add` / `--from`;
+   the registry ships with the product, so this is data entry, not build).
 3. Layer 3 detection (needed before rotation is ever triggered).
 4. Layer 4 rotation for the two highest-priority credential classes.
 5. Layer 5 watchdogs, in the order above.
