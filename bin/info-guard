@@ -4788,6 +4788,10 @@ _ROTATE_PRIORITY_RANK = {"critical": 0, "rotate-now": 1, "review": 2,
                          "idle": 3}
 _ROTATE_SCAN_DIRS = ["sessions", "logs", "cron/output"]
 _ROTATE_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+# Max stdin payload for literals rotate (r3 MIN-3): the contract value is
+# one logical line — 64 KiB bounds memory without constraining any real
+# secret; an over-cap input is a usage failure (exit 2, value-free).
+_ROTATE_STDIN_MAX = 64 * 1024
 # Exact rotate/view timestamp format (contract §3.2.3 / fold FIX-3/FIX-6):
 # ISO 8601 UTC, second precision, Z suffix, no fractional seconds.
 _ROTATE_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -5153,8 +5157,9 @@ def cmd_rotate_candidates(args):
     envelope = {"schema": _ROTATE_SCHEMA, "status": status,
                 "generated": now_ts, "count": len(rows),
                 "actionable": actionable, "rows": rows}
-    if envelope["count"] != len(rows) or actionable > len(rows):
-        return _rotate_view_error("internal_error", json_mode)
+    # (r3 MIN-4: a count!=len(rows) guard here is structurally dead —
+    # count is derived from the same rows list; actionable is likewise
+    # derived. The invariants are enforced by construction.)
     exit_code = 1 if actionable else 0
     if json_mode:
         try:
@@ -5218,6 +5223,8 @@ def _literals_rotate(args):
         raw = sys.stdin.buffer.read()
     except BaseException:
         return _rotate_fail("usage")
+    if len(raw) > _ROTATE_STDIN_MAX:
+        return _rotate_fail("usage")   # r3 MIN-3: bounded stdin payload
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:

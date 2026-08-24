@@ -7409,6 +7409,9 @@ _we_fail_case("double-lf", ["4444555566667777"], VB3 + "\n\n", "usage")
 _we_fail_case("lf-space", ["4444555566667777"], VB3 + "\n ", "usage")
 _we_fail_case("bare-cr", ["4444555566667777"], VB3 + "\r", "usage")
 _we_fail_case("lf-cr", ["4444555566667777"], VB3 + "\n\r", "usage")
+# r3 MIN-3: over-cap stdin payload (64 KiB) -> usage, value-free
+_we_fail_case("over-cap", ["4444555566667777"], "x" * (64 * 1024 + 1),
+              "usage")
 # A48 same value, A49 duplicate against registered (incl. retired)
 _we_fail_case("same", ["4444555566667777"], VB1 + "\n", "registry_conflict")
 we_reg([{"value": VB1, "id": "4444555566667777"},

@@ -339,6 +339,21 @@ contradictory or malformed lineage on the selected target, or same-value
 and duplicate replacement values), and `internal_error` (candidate
 serialization or canonical write failure).
 
+Consolidated `literals` exit codes (proposal §7.2 item 6 — legacy
+surfaces unchanged):
+
+| Subcommand | Success | Unreadable/malformed registry | Other failure |
+|---|---|---|---|
+| `literals add` | 0 | 1 | 1 |
+| `literals list` | 0 | 0 (registry skipped) | 1 |
+| `literals remove` | 0 | **1** | 1 |
+| `literals rotate` | 0 | **2** (`registry_unavailable`) | 2 (`usage` / `registry_conflict` / `internal_error`) |
+
+`literals rotate` is the only literals subcommand whose operational
+failures use the closed `error_class` vocabulary on stderr (`error:
+<class>`) with exit 2 and an empty stdout — the legacy subcommands retain
+their historical exit behavior.
+
 ---
 
 ## 3. Registry lineage
@@ -379,6 +394,34 @@ deletes only that entry, does not rewrite surviving `rotated_from` or
 `rotated_to` references, and never reuses its id. Removal of a lineage
 entry severs the chain; surviving references remain as historical
 context, not corruption.
+
+Worked example — a two-step rotation chain (proposal §7.2 item 7):
+
+```json
+{
+  "version": 2,
+  "literals": [
+    {"value": "…old-value…", "id": "1111222233334444",
+     "retired": true, "retired_at": "2026-08-24T00:00:00Z",
+     "rotated_to": "2222333344445555"},
+    {"value": "…middle-value…", "id": "2222333344445555",
+     "rotated_from": "1111222233334444",
+     "rotated_at": "2026-08-24T00:00:00Z",
+     "retired": true, "retired_at": "2026-08-24T01:00:00Z",
+     "rotated_to": "3333444455556666"},
+    {"value": "…current-value…", "id": "3333444455556666",
+     "rotated_from": "2222333344445555",
+     "rotated_at": "2026-08-24T01:00:00Z"}
+  ]
+}
+```
+
+Each rotate retires its predecessor (`retired: true` + `retired_at` +
+`rotated_to` = the successor id) and establishes the successor
+(`rotated_from` = the retired predecessor's id + `rotated_at`). The
+active tail carries no retirement fields. Removing `2222333344445555`
+severs the chain: `1111222233334444.rotated_to` and
+`3333444455556666.rotated_from` then dangle as historical references.
 
 Honeytokens are never rotation targets and never appear in the rotate
 view. A fired canary is an incident; canary lifecycle is remove +
