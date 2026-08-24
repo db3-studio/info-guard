@@ -361,10 +361,42 @@ check("install.sh replaces a stale applied patch in place",
       f"out={inst.stdout[-250:]!r} err={inst.stderr[-250:]!r}")
 
 # 11b. `check` exits 0 on a healthy install: engine via a symlinked
-#      checkout, pattern file present, artifact probe passes
+#      SCRATCH checkout (IG D138 — the E4 install fixture never operates
+#      on the real tree), pattern file present, artifact probe passes
+scratch_b = os.path.join(tmp, "check-scratch")
+os.makedirs(scratch_b, exist_ok=True)
+for rel in ("agent/redact.py", "cli.py", "gateway/run.py",
+            "hermes_cli/config.py", "hermes_cli/main.py"):
+    d = os.path.join(scratch_b, os.path.dirname(rel))
+    os.makedirs(d, exist_ok=True)
+    clean = subprocess.run(["git", "-C", CHECKOUT, "show", f"HEAD:{rel}"],
+                           capture_output=True, text=True, check=True).stdout
+    with open(os.path.join(scratch_b, rel), "w") as f:
+        f.write(clean)
+# the agent import chain (IG D138 `_wc_target` pattern): redact.py's
+# module-level `from agent.file_safety import …` must resolve INSIDE the
+# scratch — the host venv's editable-install finder maps `agent` to the
+# REAL checkout and must never be the source (hermeticity, and a broken
+# real-tree link would surface here as a phantom failure).
+for f in ("file_safety.py", "__init__.py", "jiter_preload.py"):
+    src = os.path.join(CHECKOUT, "agent", f)
+    if os.path.isfile(src):
+        clean = subprocess.run(["git", "-C", CHECKOUT, "show", f"HEAD:agent/{f}"],
+                               capture_output=True, text=True, check=True).stdout
+        with open(os.path.join(scratch_b, "agent", f), "w") as fh:
+            fh.write(clean)
+subprocess.run(["git", "-C", scratch_b, "init", "-q"], check=True)
+subprocess.run(["git", "-C", scratch_b, "add", "-A"], check=True)
+subprocess.run(["git", "-C", scratch_b, "-c", "user.email=ig@test",
+                "-c", "user.name=ig-test", "commit", "-q", "-m", "base"],
+               check=True)
+# hermetic version source for the supported-range check (D113 pattern)
+subprocess.run(["git", "-C", scratch_b, "tag", "v2026.8.18"], check=True)
+# a healthy install = the package artifact applied to the scratch
+subprocess.run(["git", "-C", scratch_b, "apply", PATCH_PATH], check=True)
 chkhome = os.path.join(tmp, "check-home")
 os.makedirs(os.path.join(chkhome, "state", "info-guard"), exist_ok=True)
-os.symlink(CHECKOUT, os.path.join(chkhome, "hermes-agent"))
+os.symlink(scratch_b, os.path.join(chkhome, "hermes-agent"))
 write(os.path.join(chkhome, "state", "info-guard", "redact_patterns.json"),
       {"mask": {"head": 2, "tail": 2, "floor": 12}, "literals": [],
        "key_patterns": {}})
