@@ -71,6 +71,15 @@ Usage:
                                     --kind honeytoken plants a canary).
   info-guard literals list         List registered literals (masked only).
   info-guard literals remove ID    Remove one literal by id (Wave B).
+  info-guard literals rotate ID    Atomic identity rotation (retire old +
+                                    establish new + lineage) — the
+                                    replacement value arrives ONLY through
+                                    stdin, never argv. --json for the
+                                    masked success object.
+  info-guard rotate-candidates [--json]
+                                    Read-only rotation-candidate view over
+                                    the existing scan corpus (exits 0
+                                    clean / 1 candidates / 2 error).
   info-guard pipe                  Mask stdin against the registry
                                     (fail-closed: missing matcher -> exit 2,
                                     no passthrough).
@@ -149,7 +158,10 @@ _SUBCOMMAND_USAGE = {
     "update": "info-guard update [--check] [--json] [--rollback]   Update the package from the configured origin (run BEFORE `hermes update` — D42 ordering contract)",
     "literals": "info-guard literals add VALUE... [--mask STYLE] [--file FILE] [--json]   Register custom literals (ids assigned)\n"
                 "info-guard literals add --from SOURCE:KEY [--json]   Enroll ONE source value by key (sole enrollment bridge; re-reads live, fails closed)\n"
-                "info-guard literals list [--json]   List registered literals (id + masked value)",
+                "info-guard literals list [--json]   List registered literals (id + masked value)\n"
+                "info-guard literals remove ID   Remove one literal by id\n"
+                "info-guard literals rotate VALUE_ID [--json]   Atomic retire + establish + lineage (replacement value via stdin only)",
+    "rotate-candidates": "info-guard rotate-candidates [--json]   Read-only rotation-candidate view over the existing scan corpus (exits 0 clean / 1 candidates / 2 error)",
     "pipe": "info-guard pipe    Mask stdin against the registry (fail-closed: missing matcher -> exit 2, no passthrough)",
     "view": "info-guard view <surface> <arg>   Masked viewer: systemd-unit <name> | docker-env <container> | compose-config <path> | file <path>",
     "env": "info-guard env [FILE] [--check|--keys]   Keys + lengths only (never values); --check = non-executing grammar validation; --keys = bare sorted unique keys",
@@ -1147,6 +1159,7 @@ def cmd_watch(args):
     # entries (first-wins, NIT-3) — in-memory only; sha stays an
     # internal comparison primitive (D56). Read-only, annotation-only.
     sha_id = _value_id_map()
+    sha_retired = _value_retired_map()
     assessment_snap = _snapshot_assessment_totals(assessment)
     baseline_path = STATE_DIR / "watch-baseline.json"
     prev = None
@@ -1209,7 +1222,8 @@ def cmd_watch(args):
     d = _watch_deltas(current, prev, assessment, sha_id)
     pd = _protection_deltas(prev.get("protection"), protection)
     et = _engine_transition(prev.get("protection"), protection)
-    pm = _protected_value_matches(current, prev, known_fps, sha_id)
+    pm = _protected_value_matches(current, prev, known_fps, sha_id,
+                                  sha_retired)
     pm_alarm = [m for m in pm if m["delta"] in ("new", "increased")]
     # Wave B (IG D103): canary-touch = a HONEYTOKEN protected row with
     # delta new/increased → exit 4 (proposal §3: watch-side 4 exists,
@@ -1417,7 +1431,8 @@ def cmd_watch(args):
     say(f"[info-guard] watch: no new credential-shaped values since "
         f"{_fmt_generated(prev.get('generated', ''))}")
     if json_mode:
-        pm = _protected_value_matches(current, prev, known_fps, sha_id)
+        pm = _protected_value_matches(current, prev, known_fps, sha_id,
+                                      sha_retired)
         emit_json(prev, d, pd, et, pm)
     # Clean run is still a scan: a degraded engine must not masquerade
     # as clean (D94 doctrine, Wave A A20) — the reduction's exit-2 path
@@ -1586,7 +1601,8 @@ def _watch_deltas(current, prev, assessment, sha_id=None):
     return d
 
 
-def _protected_value_matches(current, prev, known_fps, sha_id=None):
+def _protected_value_matches(current, prev, known_fps, sha_id=None,
+                             sha_retired=None):
     """Protected-value matches (v0.4.1, IG D53/D54; value_id v0.4.2,
     IG D64/D65): scan values whose value_sha256 is in the LIVE
     custom_literals fingerprint set (the app's known-value registry).
@@ -1597,7 +1613,9 @@ def _protected_value_matches(current, prev, known_fps, sha_id=None):
     sha256 (the sha is an internal comparison primitive only, D56). A
     value absent from the current scan never appears here: it surfaces
     via resolved_values. Empty/unreadable registry -> empty list
-    (fail-safe)."""
+    (fail-safe). Wave E (W5/W14): a match against a RETIRED registry
+    entry carries additive `retired: true` (the machine-readable
+    old-FAILS signal; absent for active entries, never null)."""
     if not known_fps:
         return []
     sha_id = sha_id or {}
@@ -1620,6 +1638,9 @@ def _protected_value_matches(current, prev, known_fps, sha_id=None):
             row["source_key"] = env_key
         if vid:
             row["value_id"] = vid
+        if sha_retired and sha_retired.get(e["value_sha256"]):
+            # Wave E: additive retired flag for retired registry matches.
+            row["retired"] = True
         old = baseline_rows.get(e["value_sha256"])
         if old is None:
             row["delta"] = "new"
@@ -1904,6 +1925,10 @@ def _write_watch_baseline(path, current, prev, protection=None,
             row = {"value_sha256": e["value_sha256"], "type": e["type"],
                    "family": e["family"], "count": e["count"]}
             row["first_seen"] = old.get("first_seen", now) if old else now
+            # Wave E (W5/W14): last_seen refreshes for every value
+            # present in the current scan; absent values are dropped
+            # under D46. Absent for legacy rows until refreshed.
+            row["last_seen"] = now
             values.append(row)
         values.sort(key=lambda v: (v["first_seen"], v["value_sha256"]))
     doc = {"schema": "info-guard/watch-baseline/v2",
@@ -3365,6 +3390,23 @@ def _value_id_map():
     return out
 
 
+def _value_retired_map():
+    """Wave E (W5/W14): {sha256(value): retired_bool} first-wins over the
+    canonical loader's deduplicated entries — additive watch metadata for
+    protected rows (`retired: true` only for retired registry matches).
+    Same discipline as _value_id_map: in-memory, read-only, first-wins,
+    never writes. Absent/`false`/non-bool `retired` maps to False (the
+    field is only emitted as `true` for retired matches)."""
+    out = {}
+    entries, _ok, _doc = _load_registry()
+    for item in entries:
+        if isinstance(item, dict):
+            v = item.get("value")
+            if isinstance(v, str) and v:
+                out.setdefault(_sha(v), item.get("retired") is True)
+    return out
+
+
 def _honeytoken_id_map():
     """Wave B (IG D103, A1/A4): {sha256(value): id} for CANARY entries
     only (`kind: honeytoken`) — the registry-exact canary-touch lookup.
@@ -3409,7 +3451,7 @@ class _DiscoverError(Exception):
         self.message = message
 
 
-def _load_registry_readonly():
+def _load_registry_readonly(noatime=False):
     """Non-mutating canonical registry load (plan 5.2/5.3, A28/A32(d)).
 
     The canonical _load_registry() MAY WRITE (lazy id backfill, version
@@ -3428,7 +3470,8 @@ def _load_registry_readonly():
     if not CUSTOM_LITERALS.exists():
         return None, False, None
     try:
-        doc = json.loads(CUSTOM_LITERALS.read_text())
+        doc = json.loads(_read_text_noatime(CUSTOM_LITERALS) if noatime
+                         else CUSTOM_LITERALS.read_text())
     except (OSError, ValueError):
         return None, False, None
     if not isinstance(doc, dict):
@@ -4264,6 +4307,8 @@ def cmd_literals(args):
         return _literals_list(rest)
     if sub == "remove":
         return _literals_remove(rest)
+    if sub == "rotate":
+        return _literals_rotate(rest)
     print(f"[info-guard] unknown literals subcommand: {sub} "
           f"(try `info-guard literals --help`)", file=sys.stderr)
     return 2
@@ -4690,6 +4735,578 @@ def _literals_remove(args):
         print(json.dumps({"removed": True, "id": target}, indent=2))
     else:
         print(f"removed {target}")
+    return 0
+
+
+# ── Wave E (W5+W14) — rotate-candidates view + literals rotate ─────────
+# Rotation is an identity lifecycle, never string replacement: retire
+# old identity -> establish new identity -> preserve lineage -> regenerate
+# artifacts explicitly -> expose candidates explicitly (proposal v4).
+# Registry schema stays v2; the view exits 0/1/2, rotate exits 0/2, both
+# with value-free diagnostics. Stdin is the sole replacement transport.
+
+_ROTATE_SCHEMA = "info-guard/rotate/v1"
+_ROTATE_PRIORITY_RANK = {"critical": 0, "rotate-now": 1, "review": 2,
+                         "idle": 3}
+_ROTATE_SCAN_DIRS = ["sessions", "logs", "cron/output"]
+_ROTATE_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+
+
+def _rotate_ts():
+    """One UTC timestamp for rotate/view surfaces: ISO 8601, second
+    precision, Z suffix, no fractional seconds."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+        "+00:00", "Z")
+
+
+def _read_text_noatime(path: Path) -> str:
+    """Read-only text open attempting O_NOATIME; EPERM/EINVAL/ENOTSUP
+    fall back to an ordinary read-only open (contract §4.2 — atime is
+    outside the content snapshot, never a failure)."""
+    try:
+        flags = os.O_RDONLY | os.O_NOATIME
+    except AttributeError:
+        flags = os.O_RDONLY
+    try:
+        fd = os.open(str(path), flags)
+    except OSError:
+        fd = os.open(str(path), os.O_RDONLY)
+    with os.fdopen(fd, "r") as f:
+        return f.read()
+
+
+def _rotate_escape(field) -> str:
+    """Deterministic TSV text-field escaping (contract §3.1.8): backslash
+    -> \\\\, tab -> \\t, LF -> \\n, CR -> \\r, other control characters ->
+    uppercase \\xNN, literal `-` -> \\-. Applied to EVERY text field
+    including value_masked (defensive: legacy control-bearing values,
+    A70)."""
+    out = []
+    for ch in str(field):
+        o = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif o < 0x20 or 0x7F <= o < 0xA0:
+            out.append(f"\\x{o:02X}")
+        elif ch == "-":
+            out.append("\\-")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _rotate_serialize(obj) -> str:
+    """Serialization indirection for rotate surfaces (fault-injection
+    point for candidate / response / envelope serialization failures)."""
+    return json.dumps(obj, ensure_ascii=False, indent=2)
+
+
+def _rotate_view_error(error_class, json_mode):
+    """Exit-2 view failure (contract §4.3): JSON mode -> one error
+    envelope on stdout with empty stderr; text mode -> stderr EXACTLY
+    `error: <class>\\n` with empty stdout. Value-free either way. If the
+    error-envelope serialization itself fails, the non-recursive fallback
+    emits no stdout and exactly `error: internal_error` on stderr."""
+    if json_mode:
+        env = {"schema": _ROTATE_SCHEMA, "status": "error",
+               "generated": _rotate_ts(), "count": 0, "actionable": 0,
+               "rows": [], "error_class": error_class}
+        try:
+            print(_rotate_serialize(env))
+        except BaseException:
+            print("error: internal_error", file=sys.stderr)
+        return 2
+    print(f"error: {error_class}", file=sys.stderr)
+    return 2
+
+
+def _rotate_fail(error_class):
+    """literals rotate failure (contract §3.2.6): exit 2, stdout empty,
+    value-free stderr `error: <class>`. No JSON error envelope — the
+    literals family convention; the structured envelope belongs to the
+    read-only view."""
+    print(f"error: {error_class}", file=sys.stderr)
+    return 2
+
+
+def _rotate_scan(dirs, entries):
+    """The view's ONE detector pass over the existing scan corpus
+    (contract §3.1.2, S15): the shared _scan_lines shape pass
+    (KEY-SHAPE/TOKEN-SHAPE) + the existing KNOWN env pass + the existing
+    canary pass (HONEYTOKEN). No gitleaks engine, no second detector, no
+    deployment-file read, no registry writes (the canary set comes from
+    the already-loaded read-only entries). Returns (cls, rule, rel, line,
+    value, masked, ctx) 7-tuples."""
+    ht_values = [item["value"] for item in entries
+                 if isinstance(item, dict)
+                 and _entry_kind(item) == _HONEYTOKEN_KIND
+                 and isinstance(item.get("value"), str)]
+    try:
+        index, src_ids, _diag = _env_sources()
+    except BaseException:
+        index, src_ids = {}, []
+    all_hits = []
+    for d in dirs:
+        for p in sorted(d.rglob("*")):
+            if not p.is_file():
+                continue
+            for hit in _key_scan(p):
+                all_hits.append((hit[0], hit[1],
+                                 os.path.relpath(str(p), str(_HERMES_HOME)),
+                                 *hit[2:]))
+            if ht_values:
+                try:
+                    text = p.read_text(errors="replace")
+                except OSError:
+                    text = ""
+                for ln, line in enumerate(text.splitlines(), 1):
+                    for cval in ht_values:
+                        if cval in line:
+                            all_hits.append((
+                                "HONEYTOKEN", "honeytoken",
+                                os.path.relpath(str(p), str(_HERMES_HOME)),
+                                ln, cval, _mask_value(cval),
+                                _mask_value(cval)))
+                            break
+            try:
+                ehits, _esigs = _env_scan_file(p, index, src_ids)
+            except BaseException:
+                ehits = []
+            all_hits.extend(ehits)
+    return all_hits
+
+
+def cmd_rotate_candidates(args):
+    """info-guard rotate-candidates [--json] — the read-only rotation
+    candidate view (proposal v4 §3.1). Exits 0 (clean) / 1 (candidates) /
+    2 (error). JSON mode emits exactly one info-guard/rotate/v1 response
+    envelope on stdout. The view never writes registry, baseline, state,
+    matcher artifacts, or any output file (S12)."""
+    # JSON-mode pre-scan (argv-order independent; the `--` boundary).
+    json_mode = False
+    for _a in args:
+        if _a == "--":
+            break
+        if _a == "--json":
+            json_mode = True
+    # Grammar: no positionals, at most one exact `--json`, bare `--` only
+    # with no token after it, unknown options -> usage (plan 17 matrix).
+    end_opts = False
+    json_seen = False
+    positional = []
+    for a in args:
+        if not end_opts and a == "--":
+            end_opts = True
+        elif not end_opts and a == "--json":
+            if json_seen:
+                return _rotate_view_error("usage", json_mode)
+            json_seen = True
+        elif not end_opts and a.startswith("--"):
+            return _rotate_view_error("usage", json_mode)
+        else:
+            positional.append(a)
+    if positional:
+        return _rotate_view_error("usage", json_mode)
+    # Read-only registry (never writes; id-less non-canary entries fail
+    # closed — no in-memory public id is invented, D18/A52).
+    entries, ok, doc = _load_registry_readonly(noatime=True)
+    if not ok:
+        return _rotate_view_error("registry_unavailable", json_mode)
+    for item in doc.get("literals", []):
+        if isinstance(item, dict) and _entry_kind(item) == _HONEYTOKEN_KIND:
+            continue
+        if not isinstance(item, dict) or not item.get("id"):
+            return _rotate_view_error("registry_unavailable", json_mode)
+    # Non-canary value-to-entry scope (first-wins) + active/retired
+    # duplicate conflict detection (contract §3.1.2, A58).
+    value_map, retired_vals, conflict = {}, set(), False
+    for item in entries:
+        if not isinstance(item, dict) or _entry_kind(item) == _HONEYTOKEN_KIND:
+            continue
+        v = item.get("value")
+        if not isinstance(v, str) or not v:
+            continue
+        retired = item.get("retired") is True
+        if v in value_map:
+            if (v in retired_vals) != retired:
+                conflict = True
+            continue
+        value_map[v] = item
+        if retired:
+            retired_vals.add(v)
+    if conflict:
+        return _rotate_view_error("registry_conflict", json_mode)
+    # Baseline (read-only, optional; present-but-invalid fails closed,
+    # D19/A63).
+    baseline_rows = {}
+    baseline_path = STATE_DIR / "watch-baseline.json"
+    if baseline_path.exists():
+        try:
+            bdoc = json.loads(_read_text_noatime(baseline_path))
+        except (OSError, ValueError):
+            return _rotate_view_error("baseline_unavailable", json_mode)
+        if not isinstance(bdoc, dict) or not isinstance(bdoc.get("values"),
+                                                       list):
+            return _rotate_view_error("baseline_unavailable", json_mode)
+        for brow in bdoc["values"]:
+            if isinstance(brow, dict) and isinstance(
+                    brow.get("value_sha256"), str):
+                baseline_rows[brow["value_sha256"]] = brow
+    # Existing detector + existing scan corpus, exactly once (S15/A68).
+    scan_dirs = []
+    for name in _ROTATE_SCAN_DIRS:
+        p = _HERMES_HOME / name
+        if p.is_dir():
+            scan_dirs.append(p)
+    try:
+        all_hits = _rotate_scan(scan_dirs, entries)
+    except BaseException:
+        return _rotate_view_error("detector_error", json_mode)
+    # Closed v0.9.1 type vocabulary (plan 25/66): a non-HONEYTOKEN
+    # classification outside KNOWN/KEY-SHAPE/TOKEN-SHAPE fails closed as
+    # detector_error — never emitted as an unknown type, never dropped.
+    for h in all_hits:
+        cls = h[0]
+        if cls == "HONEYTOKEN":
+            continue
+        if cls not in ("KNOWN", "KEY-SHAPE", "TOKEN-SHAPE"):
+            return _rotate_view_error("detector_error", json_mode)
+    # Aggregate distinct exact values (dedup by value internally; never
+    # mask or public id as the key, A57/A58).
+    det = {}
+    for h in all_hits:
+        cls, rule, _rel, _ln, value, _masked, _ctx = h
+        if cls == "HONEYTOKEN" or not value:
+            continue
+        if cls != "KNOWN" and _value_class(value) != "token-format":
+            continue  # key-name-only / already-masked / placeholder (A59)
+        e = det.setdefault(value, {"count": 0, "types": set(),
+                                   "fams": {}, "env_keys": set()})
+        e["count"] += 1
+        e["types"].add(cls)
+        f = _family_of(rule)
+        e["fams"][f] = e["fams"].get(f, 0) + 1
+        if cls == "KNOWN" and rule.startswith("known-env:"):
+            e["env_keys"].add(rule[len("known-env:"):])
+    now_ts = _rotate_ts()
+    pairs = []  # (exact_value, row) — the value's sha256 is the final
+                # ordering key and is never emitted
+    for value, e in det.items():
+        entry = value_map.get(value)
+        retired = value in retired_vals
+        src_key = min(e["env_keys"]) if e["env_keys"] else None
+        if entry is not None:
+            source, vid = "literal", entry.get("id")
+        else:
+            source = "env" if src_key is not None else "scan"
+            vid = None
+        if e["count"] > 0:
+            if entry is not None:
+                priority = "critical" if retired else "rotate-now"
+            else:
+                priority = "rotate-now" if src_key is not None else "review"
+        else:
+            priority = "idle"
+        fam = None
+        if e["fams"]:
+            best = min(sorted(e["fams"]),
+                       key=lambda f: (-e["fams"][f], f))
+            if best != "bare-token":
+                fam = best
+        row = {"priority": priority, "value_masked": _mask_value(value),
+               "count": e["count"], "detected": e["count"] > 0,
+               "source": source}
+        if e["count"] > 0:
+            if "KNOWN" in e["types"]:
+                row["type"] = "KNOWN"
+            elif "KEY-SHAPE" in e["types"]:
+                row["type"] = "KEY-SHAPE"
+            else:
+                row["type"] = "TOKEN-SHAPE"
+        if fam is not None:
+            row["family"] = fam
+        if src_key is not None:
+            row["source_key"] = src_key
+        if vid:
+            row["value_id"] = vid
+        if retired:
+            row["retired"] = True
+        b = baseline_rows.get(_sha(value))
+        if b is not None:
+            if b.get("first_seen"):
+                row["first_seen"] = b["first_seen"]
+            if b.get("last_seen"):
+                row["last_seen"] = b["last_seen"]
+        pairs.append((value, row))
+    # Registered non-canary entries absent from the scan -> idle rows
+    # (contract §3.1.3 truth table, A54).
+    seen_values = set(det)
+    for value, entry in value_map.items():
+        if value in seen_values:
+            continue
+        retired = value in retired_vals
+        row = {"priority": "idle", "value_masked": _mask_value(value),
+               "count": 0, "detected": False, "source": "literal"}
+        if entry.get("id"):
+            row["value_id"] = entry["id"]
+        if retired:
+            row["retired"] = True
+        b = baseline_rows.get(_sha(value))
+        if b is not None:
+            if b.get("first_seen"):
+                row["first_seen"] = b["first_seen"]
+            if b.get("last_seen"):
+                row["last_seen"] = b["last_seen"]
+        pairs.append((value, row))
+    # Deterministic ordering (contract §3.1.5): priority rank, count
+    # desc, family asc (absent last), value_masked asc, value_id asc
+    # (absent last), internal sha256 of the exact value asc.
+    pairs.sort(key=lambda pr: (
+        _ROTATE_PRIORITY_RANK[pr[1]["priority"]],
+        -pr[1]["count"],
+        (pr[1].get("family") is None, pr[1].get("family") or ""),
+        pr[1]["value_masked"],
+        (pr[1].get("value_id") is None, pr[1].get("value_id") or ""),
+        _sha(pr[0])))
+    rows = [r for _v, r in pairs]
+    actionable = sum(1 for r in rows if r["priority"] != "idle")
+    status = "candidates" if actionable else "clean"
+    envelope = {"schema": _ROTATE_SCHEMA, "status": status,
+                "generated": now_ts, "count": len(rows),
+                "actionable": actionable, "rows": rows}
+    if envelope["count"] != len(rows) or actionable > len(rows):
+        return _rotate_view_error("internal_error", json_mode)
+    exit_code = 1 if actionable else 0
+    if json_mode:
+        try:
+            payload = _rotate_serialize(envelope)
+        except BaseException:
+            print("error: internal_error", file=sys.stderr)
+            return 2
+        print(payload)
+        return exit_code
+    if not rows:
+        return 0  # zero-row view emits exactly zero bytes (A60)
+    out_lines = []
+    for r in rows:
+        cols = [r["priority"], r["value_masked"], r.get("type"),
+                r.get("family"), str(r["count"]),
+                "true" if r["detected"] else "false", r["source"],
+                r.get("source_key"), r.get("value_id"),
+                "true" if r.get("retired") else None,
+                r.get("first_seen"), r.get("last_seen")]
+        out_lines.append("\t".join(
+            _rotate_escape(c) if c is not None else "-"
+            for c in cols) + "\n")
+    sys.stdout.write("".join(out_lines))
+    return exit_code
+
+
+def _literals_rotate(args):
+    """info-guard literals rotate <value_id> [--json] — Wave E W14.
+
+    Atomic retire + establish + lineage transaction through the canonical
+    writer (one final registry write; no preliminary write). The
+    replacement value arrives ONLY through stdin and never crosses argv.
+    Exit 0 on success; exit 2 on every failure with value-free stderr and
+    NO JSON error envelope (the literals family convention)."""
+    json_mode = False
+    for _a in args:
+        if _a == "--":
+            break
+        if _a == "--json":
+            json_mode = True
+    end_opts = False
+    json_seen = False
+    positionals = []
+    for a in args:
+        if not end_opts and a == "--":
+            end_opts = True
+        elif not end_opts and a == "--json":
+            if json_seen:
+                return _rotate_fail("usage")
+            json_seen = True
+        elif not end_opts and a in ("--mask", "--kind", "--file",
+                                    "--json-out"):
+            return _rotate_fail("usage")
+        elif not end_opts and a.startswith("--"):
+            return _rotate_fail("usage")
+        else:
+            positionals.append(a)
+    if len(positionals) != 1:
+        return _rotate_fail("usage")
+    target_id = positionals[0]
+    if not _ROTATE_ID_RE.fullmatch(target_id):
+        return _rotate_fail("usage")
+    # Stdin is the SOLE replacement-value transport (contract §3.2.2:
+    # strict UTF-8, one logical line, optional final LF/CRLF transport
+    # syntax, surrounding-whitespace stripping, no control characters).
+    try:
+        raw = sys.stdin.buffer.read()
+    except BaseException:
+        return _rotate_fail("usage")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return _rotate_fail("usage")
+    had_lf = text.endswith("\n")
+    if had_lf:
+        text = text[:-1]
+    if had_lf and text.endswith("\r"):
+        text = text[:-1]
+    new_value = text.strip()
+    if not new_value:
+        return _rotate_fail("usage")
+    if "\n" in new_value or "\r" in new_value \
+            or any(ord(c) < 32 or ord(c) == 127 for c in new_value):
+        return _rotate_fail("usage")
+    # Strict v2 registry; in-memory normalization stages any required
+    # lazy id backfill into the SAME candidate (A53 — no preliminary
+    # write; unsupported/malformed registries fail closed).
+    entries, ok, doc = _load_registry_readonly()
+    if not ok:
+        return _rotate_fail("registry_unavailable")
+    norm_entries, _n_new, _need = _normalize_entries(doc.get("literals") or [])
+    target = None
+    for item in norm_entries:
+        if isinstance(item, dict) and item.get("id") == target_id:
+            target = item
+            break
+    if target is None:
+        return _rotate_fail("registry_conflict")   # unknown id (A42)
+    if _entry_kind(target) == _HONEYTOKEN_KIND:
+        return _rotate_fail("registry_conflict")   # honeytoken id (A44)
+    if target.get("retired") is True:
+        return _rotate_fail("registry_conflict")   # retired id (A43)
+    # Lineage / retirement-metadata strictness (contract §3.2.3): an
+    # active target carrying `rotated_to`, or malformed retirement
+    # metadata / contradictory lineage, fails closed as
+    # registry_conflict. A dangling rotated_from (severed chain) is
+    # tolerated and documented; unrelated entries are never repaired.
+    if "retired" in target and not isinstance(target["retired"], bool):
+        return _rotate_fail("registry_conflict")
+    if target.get("rotated_to") is not None:
+        return _rotate_fail("registry_conflict")
+    if "rotated_from" in target and not isinstance(target["rotated_from"],
+                                                   str):
+        return _rotate_fail("registry_conflict")
+    if "rotated_at" in target and not isinstance(target["rotated_at"], str):
+        return _rotate_fail("registry_conflict")
+    if "retired_at" in target and not isinstance(target["retired_at"], str):
+        return _rotate_fail("registry_conflict")
+    old_value = target.get("value")
+    if not isinstance(old_value, str) or not old_value:
+        return _rotate_fail("registry_conflict")
+    # Target exact-value uniqueness across active AND retired entries
+    # (contract §3.2.3 — prevents rotate from creating the conflict).
+    dup = 0
+    for item in norm_entries:
+        if isinstance(item, dict) and item.get("value") == old_value:
+            dup += 1
+    if dup > 1:
+        return _rotate_fail("registry_conflict")
+    # Replacement uniqueness (resurrection rejection, A48/A49).
+    if new_value == old_value:
+        return _rotate_fail("registry_conflict")
+    for item in norm_entries:
+        v = item.get("value") if isinstance(item, dict) else item
+        if isinstance(v, str) and v == new_value:
+            return _rotate_fail("registry_conflict")
+    # Fresh id: secrets.token_hex(8), never derived, never reused, no
+    # collision with any candidate id (contract §3.3.2).
+    candidate_ids = set()
+    for item in norm_entries:
+        if isinstance(item, dict) and isinstance(item.get("id"), str):
+            candidate_ids.add(item["id"])
+    while True:
+        new_id = _new_id()
+        if new_id != target_id and new_id not in candidate_ids:
+            break
+    # Candidate construction: retire + establish + lineage, with
+    # unknown-field, mask-style and non-honeytoken-kind preservation
+    # (A51). One transaction timestamp for both entries.
+    ts = _rotate_ts()
+    old_entry = dict(target)
+    old_entry["retired"] = True
+    old_entry["retired_at"] = ts
+    old_entry["rotated_to"] = new_id
+    new_entry = dict(target)
+    new_entry["value"] = new_value
+    new_entry["id"] = new_id
+    new_entry["rotated_from"] = target_id
+    new_entry["rotated_at"] = ts
+    new_entry.pop("retired", None)
+    new_entry.pop("retired_at", None)
+    new_entry.pop("rotated_to", None)
+    cand_entries = []
+    for item in norm_entries:
+        if isinstance(item, dict) and item.get("id") == target_id:
+            cand_entries.append(old_entry)
+            cand_entries.append(new_entry)
+        else:
+            cand_entries.append(item)
+    # Candidate validation (plan 51): both exact values present, two
+    # distinct ids, correct bidirectional lineage, exactly one retired
+    # target transition.
+    cand_values = set()
+    cand_ids = set()
+    for item in cand_entries:
+        if isinstance(item, dict):
+            if isinstance(item.get("value"), str):
+                cand_values.add(item["value"])
+            if isinstance(item.get("id"), str):
+                cand_ids.add(item["id"])
+    if not (old_value in cand_values and new_value in cand_values
+            and len(cand_ids) == len(norm_entries) + 1
+            and old_entry.get("retired") is True
+            and isinstance(old_entry.get("retired_at"), str)
+            and old_entry.get("rotated_to") == new_id
+            and new_entry.get("rotated_from") == target_id
+            and isinstance(new_entry.get("rotated_at"), str)
+            and new_entry.get("retired") is None
+            and new_entry.get("id") != target_id):
+        return _rotate_fail("internal_error")
+    out = dict(doc) if isinstance(doc, dict) else {}
+    out["version"] = 2
+    out["literals"] = cand_entries
+    # Candidate serialization BEFORE the writer (A69) — a failure leaves
+    # registry bytes unchanged and never invokes the writer.
+    try:
+        _rotate_serialize(out)
+    except BaseException:
+        return _rotate_fail("internal_error")
+    # Prebuild the complete success response BEFORE the writer (plan 52):
+    # after a successful write only these in-memory bytes are emitted —
+    # no post-commit output serialization failure exists.
+    if json_mode:
+        try:
+            resp = _rotate_serialize({
+                "rotated": True, "old_id": target_id, "new_id": new_id,
+                "value_masked": _mask_value(new_value)})
+        except BaseException:
+            return _rotate_fail("internal_error")
+    else:
+        resp = f"rotated {target_id} -> {new_id}\n"
+    # ONE canonical atomic write (plan 53). A failure — including a
+    # pre-replacement atomic-replacement failure — closes with exit 2,
+    # unchanged registry bytes, no success output, value-free diagnostics,
+    # and no orphaned same-directory temporary artifact (the writer's
+    # exception path unlinks it).
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(CUSTOM_LITERALS, out)
+    except BaseException:
+        return _rotate_fail("internal_error")
+    if json_mode:
+        print(resp)
+    else:
+        sys.stdout.write(resp)
     return 0
 
 
@@ -6358,6 +6975,8 @@ def main(argv):
         return cmd_env(rest)
     if cmd == "discover":
         return cmd_discover(rest)
+    if cmd == "rotate-candidates":
+        return cmd_rotate_candidates(rest)
     if cmd == "literals":
         return cmd_literals(rest)
     print(f"[info-guard] unknown command: {cmd} (try `info-guard --help`)")
