@@ -4959,6 +4959,12 @@ def cmd_rotate_candidates(args):
     entries, ok, doc = _load_registry_readonly(noatime=True)
     if not ok:
         return _rotate_view_error("registry_unavailable", json_mode)
+    # r2 fold FIX-2 (Sonnet MAJ-1): predecessor-RESOLUTION set for the
+    # dangling-rotated_from rule — every persisted id in the RAW registry,
+    # honeytokens included (a canary is still an existing entry).
+    raw_view_ids = {item["id"] for item in doc.get("literals", [])
+                    if isinstance(item, dict)
+                    and isinstance(item.get("id"), str)}
     for item in doc.get("literals", []):
         if isinstance(item, dict) and _entry_kind(item) == _HONEYTOKEN_KIND:
             continue
@@ -4989,6 +4995,35 @@ def cmd_rotate_candidates(args):
                     isinstance(item[_lk], str)
                     and _ROTATE_ID_RE.fullmatch(item[_lk])):
                 return _rotate_view_error("registry_unavailable", json_mode)
+        # r2 fold FIX-1 (Luna MAJ-3): CROSS-FIELD lineage/retirement
+        # invariants — the view fails closed on contradictory combinations
+        # it could otherwise misclassify (mirrors the rotate path's
+        # target-side checks, §3.2.3 item 10 / A67):
+        #   - rotated_at without rotated_from (orphan timestamp);
+        #   - self-referential rotated_from (an entry as its own
+        #     predecessor);
+        #   - retirement metadata on an active entry (retired_at, or a
+        #     rotated_to successor pointer, present while retired is not
+        #     exactly True — field-PRESENCE, not truthiness).
+        if "rotated_at" in item and "rotated_from" not in item:
+            return _rotate_view_error("registry_unavailable", json_mode)
+        if (isinstance(item.get("rotated_from"), str)
+                and item["rotated_from"] == item.get("id")):
+            return _rotate_view_error("registry_unavailable", json_mode)
+        if "retired_at" in item and item.get("retired") is not True:
+            return _rotate_view_error("registry_unavailable", json_mode)
+        if "rotated_to" in item and item.get("retired") is not True:
+            return _rotate_view_error("registry_unavailable", json_mode)
+        # r2 fold FIX-2 (Sonnet MAJ-1): the dangling-rotated_from
+        # tolerance is defined by predecessor-RESOLUTION, not field
+        # absence — a rotated_from that still resolves to an existing
+        # raw-registry entry (honeytokens included) while rotated_at is
+        # absent is contradictory live-chain metadata, not a severed
+        # chain (§3.2.3 "removal of the predecessor").
+        if ("rotated_from" in item and "rotated_at" not in item
+                and isinstance(item.get("rotated_from"), str)
+                and item["rotated_from"] in raw_view_ids):
+            return _rotate_view_error("registry_unavailable", json_mode)
     # Non-canary value-to-entry scope built from the RAW literals — the
     # canonical normalizer collapses same-value duplicates (first-wins),
     # which would hide both the active/retired conflict and the
@@ -5290,10 +5325,13 @@ def _literals_rotate(args):
     new_value = body.strip()
     if not new_value:
         return _rotate_fail("usage")
-    if any(ord(c) < 32 or 127 <= ord(c) < 160 for c in new_value):
+    if any(ord(c) < 32 or 127 <= ord(c) < 160
+           or unicodedata.category(c) in ("Zl", "Zp") for c in new_value):
         # Evidence-gate fold FIX-5 (Luna MIN-1): C0 + C1 controls (mirrors
         # the product scan-path standard); the contract requires
-        # control-character rejection.
+        # control-character rejection. r2 fold FIX-3 (Luna MIN-1): Unicode
+        # line-separator characters U+2028/U+2029 (categories Zl/Zp) are
+        # embedded line terminators under §3.2.2 and are rejected too.
         return _rotate_fail("usage")
     # Strict v2 registry; in-memory normalization stages any required
     # lazy id backfill into the SAME candidate (A53 — no preliminary
@@ -5303,6 +5341,12 @@ def _literals_rotate(args):
         return _rotate_fail("registry_unavailable")
     norm_entries, _n_new, _need = _normalize_entries(doc.get("literals") or [])
     raw_literals = doc.get("literals") or []
+    # r2 evidence fold FIX-2 (Sonnet MAJ-1): the predecessor-RESOLUTION
+    # id set — every persisted id in the RAW registry, honeytokens
+    # included (a canary is still an existing entry).
+    raw_ids = {item["id"] for item in raw_literals
+               if isinstance(item, dict)
+               and isinstance(item.get("id"), str)}
     # FIX-5 (fold): exactly ONE persisted entry must match the target id.
     # Zero matches = unknown target -> usage (FIX-7); duplicate target-id
     # matches = ambiguous target -> registry_conflict (never first-wins).
@@ -5385,14 +5429,24 @@ def _literals_rotate(args):
     # Evidence-gate fold FIX-4 (Luna MAJ-5, ASYMMETRIC — fold-verify note):
     # a rotation timestamp without a predecessor record (rotated_at
     # present, rotated_from absent) is contradictory metadata; the
-    # REVERSE (rotated_from present, rotated_at absent) is the RATIFIED
-    # severed-chain dangling tolerance (r2 fold + existing fixture) and
-    # must remain tolerated. Self-reference (an entry as its own
-    # predecessor) is contradictory.
+    # REVERSE (rotated_from present, rotated_at absent) is the severed-
+    # chain dangling tolerance and must remain tolerated ONLY when the
+    # predecessor genuinely does not resolve (r2 evidence fold FIX-2,
+    # Sonnet MAJ-1 — the tolerance is defined by predecessor-REMOVAL,
+    # contract §3.2.3, not by field absence). Self-reference (an entry
+    # as its own predecessor) is contradictory.
     if "rotated_at" in target and "rotated_from" not in target:
         return _rotate_fail("registry_conflict")
     if (isinstance(target.get("rotated_from"), str)
             and target["rotated_from"] == target_id):
+        return _rotate_fail("registry_conflict")
+    if ("rotated_from" in target and "rotated_at" not in target
+            and isinstance(target.get("rotated_from"), str)
+            and target["rotated_from"] in raw_ids):
+        # r2 FIX-2: the referenced predecessor STILL EXISTS in the raw
+        # registry — contradictory live-chain metadata (an unrotated
+        # predecessor), not a severed chain. The raw id set includes
+        # honeytokens: a canary is still an existing entry.
         return _rotate_fail("registry_conflict")
     old_value = target.get("value")
     if not isinstance(old_value, str) or not old_value:

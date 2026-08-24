@@ -7415,6 +7415,11 @@ _we_fail_case("over-cap", ["4444555566667777"], "x" * (64 * 1024 + 1),
 # evidence-gate fold FIX-5 (Luna MIN-1): C1 control (U+0085 NEL) rejected
 # by the extended C0+C1 range (mirrors the product scan-path standard)
 _we_fail_case("c1-nel", ["4444555566667777"], "va\u0085lue\n", "usage")
+# r2 evidence fold FIX-3 (Luna MIN-1): Unicode LINE/PARAGRAPH separators
+# (U+2028 Zl / U+2029 Zp) are embedded line terminators under §3.2.2 and
+# are rejected as usage, value-free
+_we_fail_case("u2028", ["4444555566667777"], "va\u2028lue\n", "usage")
+_we_fail_case("u2029", ["4444555566667777"], "va\u2029lue\n", "usage")
 # evidence-gate fold FIX-6 (Luna MIN-2): bounded-read boundary — exactly
 # MAX stdin bytes (65535 chars + final LF) reaches value validation and
 # succeeds; MAX+1 bytes fails usage before any candidate or write.
@@ -7785,8 +7790,17 @@ check("battery.rotate.rotate_value_never_argv: S13 replacement value never "
 we_reset()
 # Fresh fixture: all four priorities, cross-tier family counting, equal
 # family-count tie-break, multiple env keys, dedup, first-wins, conflicts.
-VC1 = _fcrag("c1"); VC2 = _rtfrag("c2"); VC3 = _fcrag("c3")
-VC4 = _fcrag("c4"); VC5 = _fcrag("c5"); VC6 = _rtfrag("c6")
+VC1 = _fcrag("c1"); VC2 = _rtfrag("c2")
+# Hermetic-mask tails (2026-08-24 battery-harness lesson): the unregistered
+# fc- rows are looked up in `_rows` by value_masked (`fc...XX`); random
+# 2-hex tails collide ~2%/run (VC3/VC5 both ended `...a2` on 2026-08-24 and
+# _row5 resolved to the wrong row). Pin distinct tails for the unregistered
+# fc- values so the mask keys are deterministic. Still fragment-built at
+# runtime (no complete literal in the repo, CI-gitleaks rule).
+VC3 = _fcrag("c3")[:-2] + "03"
+VC4 = _fcrag("c4")[:-2] + "04"
+VC5 = _fcrag("c5")[:-2] + "05"
+VC6 = _rtfrag("c6")
 VC7 = _rtfrag("c7"); VC8 = _rtfrag("c8")
 VC_ret = _fcrag("cret")
 WEVALUES += [VC1, VC2, VC3, VC4, VC5, VC6, VC7, VC8, VC_ret]
@@ -8286,6 +8300,25 @@ _BAD_ENTRIES = [
                            "rotated_from": "zzz"}]),
     ("bad-rotated-to", [{"value": "x-y-z", "id": "aaaaaaaaaaaaaaaa",
                          "rotated_to": 123}]),
+    # r2 evidence fold FIX-1 (Luna MAJ-3): CROSS-FIELD lineage/
+    # retirement contradictions fail the view closed (registry_unavailable)
+    # in both modes — orphan rotated_at, self-referential rotated_from,
+    # retirement metadata on an active entry.
+    ("cross-orphan-rotated-at",
+     [{"value": "x-y-z", "id": "aaaaaaaaaaaaaaaa",
+       "rotated_at": "2026-08-23T00:00:00Z"}]),
+    ("cross-self-ref-rotated-from",
+     [{"value": "x-y-z", "id": "aaaaaaaaaaaaaaaa",
+       "rotated_from": "aaaaaaaaaaaaaaaa"}]),
+    ("cross-retired-at-on-active",
+     [{"value": "x-y-z", "id": "aaaaaaaaaaaaaaaa",
+       "retired_at": "2026-08-23T00:00:00Z"}]),
+    ("cross-rotated-to-on-active",
+     [{"value": "x-y-z", "id": "aaaaaaaaaaaaaaaa",
+       "rotated_to": "bbbbbbbbbbbbbbbb"}]),
+    ("cross-rotated-to-null-on-active",
+     [{"value": "x-y-z", "id": "aaaaaaaaaaaaaaaa",
+       "rotated_to": None}]),
 ]
 for _el, _ebody in _BAD_ENTRIES:
     we_reg(_ebody)
@@ -8302,6 +8335,52 @@ for _el, _ebody in _BAD_ENTRIES:
     _reg_mtx = _reg_mtx and _r.returncode == 2 and _r.stdout == "" \
         and _r.stderr == "error: registry_unavailable\n" \
         and WEREG.read_bytes() == _pre
+# r2 evidence fold FIX-2 (Sonnet MAJ-1): predecessor-RESOLUTION rule —
+# a rotated_from that points to an EXISTING raw-registry entry while
+# rotated_at is absent is contradictory live-chain metadata, NOT a
+# severed chain: the view fails closed registry_unavailable (both
+# modes), and the rotate path fails closed registry_conflict with no
+# write. A genuinely removed predecessor (id absent from the registry)
+# remains tolerated.
+VX_pa = _rtfrag("pa"); VX_pb = _rtfrag("pb"); VX_pc = _rtfrag("pc")
+WEVALUES += [VX_pa, VX_pb, VX_pc]
+# view: existing predecessor, no rotated_at -> registry_unavailable
+we_reg([{"value": VX_pa, "id": "aaaaaaaaaaaaaaaa",
+         "rotated_from": "bbbbbbbbbbbbbbbb"},
+        {"value": VX_pb, "id": "bbbbbbbbbbbbbbbb"}])
+_pre = WEREG.read_bytes()
+_r = we_run("rotate-candidates", "--json")
+_dd = json.loads(_r.stdout) if _r.stdout else {}
+_r2pred_ok = _r.returncode == 2 \
+    and _dd.get("error_class") == "registry_unavailable" \
+    and _dd.get("rows") == [] and _r.stderr == ""
+_r = we_run("rotate-candidates")
+_r2pred_ok = _r2pred_ok and _r.returncode == 2 and _r.stdout == "" \
+    and _r.stderr == "error: registry_unavailable\n" \
+    and WEREG.read_bytes() == _pre
+# view control: removed predecessor (id absent) -> view stays readable
+we_reg([{"value": VX_pa, "id": "aaaaaaaaaaaaaaaa",
+         "rotated_from": "cccccccccccccccc"},
+        {"value": VX_pb, "id": "bbbbbbbbbbbbbbbb"}])
+_r = we_run("rotate-candidates", "--json")
+_d = json.loads(_r.stdout) if _r.stdout else {}
+_r2pred_ok = _r2pred_ok and _r.returncode in (0, 1) \
+    and _d.get("error_class") is None
+# rotate: existing predecessor, no rotated_at -> registry_conflict
+we_reg([{"value": VX_pa, "id": "aaaaaaaaaaaaaaaa",
+         "rotated_from": "bbbbbbbbbbbbbbbb"},
+        {"value": VX_pb, "id": "bbbbbbbbbbbbbbbb"}])
+_pre = WEREG.read_bytes()
+_r = we_run("literals", "rotate", "aaaaaaaaaaaaaaaa", stdin=VX_pc + "\n")
+_r2pred_ok = _r2pred_ok and _r.returncode == 2 \
+    and _r.stderr == "error: registry_conflict\n" and _r.stdout == "" \
+    and WEREG.read_bytes() == _pre
+# rotate control: removed predecessor (id absent) -> rotation succeeds
+we_reg([{"value": VX_pa, "id": "aaaaaaaaaaaaaaaa",
+         "rotated_from": "cccccccccccccccc"},
+        {"value": VX_pb, "id": "bbbbbbbbbbbbbbbb"}])
+_r = we_run("literals", "rotate", "aaaaaaaaaaaaaaaa", stdin=VX_pc + "\n")
+_r2pred_ok = _r2pred_ok and _r.returncode == 0 and _r.stderr == ""
 # honeytoken-first boundary: a malformed honeytoken entry is EXCLUDED
 # from the rotate view without failing the view and without conflict.
 we_wipe()                       # no scan corpus -> no unregistered rows
@@ -8313,9 +8392,13 @@ _reg_mtx = _reg_mtx and _r.returncode == 0 and _d.get("status") == "clean" \
     and _d.get("error_class") is None
 check("battery.rotate.rotate_malformed_registry: A67 registry failure "
       "matrix — missing/unreadable/malformed/v1/v3/non-list fail closed "
-      "in both modes; rotate never mutates",
-      _reg_mtx, f"mtx={_reg_mtx} last={_el} rc={_r.returncode} "
-                f"err={_r.stderr.strip()!r}")
+      "in both modes; rotate never mutates; r2 FIX-1 cross-field lineage "
+      "contradictions + r2 FIX-2 predecessor-resolution (existing "
+      "predecessor w/o rotated_at fails closed; removed predecessor "
+      "tolerated)",
+      _reg_mtx and _r2pred_ok,
+      f"mtx={_reg_mtx} pred={_r2pred_ok} last={_el} rc={_r.returncode} "
+      f"err={_r.stderr.strip()!r}")
 
 # A68 + A69: detector failure and serialization failure (in-process).
 wem = _we_module()
