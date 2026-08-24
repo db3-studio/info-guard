@@ -4,6 +4,51 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 
 > Convention: micro-version fixes within the same workstream are consolidated into the latest entry of that release, not captured per tag.
 
+## [v0.9.1] - 2026-08-24
+
+Secret rotation as an identity lifecycle: a read-only rotation-candidate
+view, an atomic `literals rotate` registry transaction with lineage, and
+additive watch metadata.
+
+### Added
+- **`info-guard rotate-candidates [--json]`** — read-only rotation-candidate
+  view over the existing scan corpus (exits 0 clean / 1 candidates / 2
+  error; JSON envelope `info-guard/rotate/v1`). One row per distinct
+  exact value: registered detected (`rotate-now`), retired detected
+  (`critical`), unregistered environment-verified (`rotate-now`, `env`),
+  unregistered scan detection (`review`), and registered undetected
+  (`idle`). Deterministic ordering; baseline `first_seen`/`last_seen`
+  joins by exact value; honeytokens, key-name mentions, and already-masked
+  findings are excluded; active/retired duplicate-value conflicts fail
+  closed as `registry_conflict`. The view is fully read-only: no registry,
+  baseline, state, or matcher writes; no output-file mode.
+- **`info-guard literals rotate <value_id> [--json]`** — atomic identity
+  rotation: retires the old entry (retained in the registry), establishes
+  a fresh entry with a new random id, records bidirectional lineage
+  (`rotated_from`/`rotated_at` on the new entry; `retired`,
+  `retired_at`, `rotated_to` on the old), and preserves the old entry's
+  mask style, kind, and unknown fields — all in one canonical registry
+  write. The replacement value arrives **through stdin only** (strict
+  UTF-8, one line) and never crosses argv. Failures exit 2 with
+  value-free diagnostics and unchanged registry bytes.
+- **Watch `retired` field** — protected rows matching a retired registry
+  entry carry `retired: true` (the machine-readable old-FAILS signal);
+  watch exits and delta semantics are unchanged.
+- **Baseline `last_seen`** — watch baseline value rows record the last
+  watch run in which the value was present; absent values are still
+  dropped and `first_seen` is still union-kept.
+- **`docs/rotate-schema.md`** — the `info-guard/rotate/v1` schema: row
+  fields and omission rules, priority derivation, deterministic ordering,
+  text TSV format and escaping, exit tables, registry lineage fields,
+  error classes, the deployment driver sequence, and consumer
+  obligations.
+
+### Changed
+- `matcher build` remains the explicit regeneration step after rotation
+  (rotation never rebuilds patterns or touches derived artifacts).
+- Honeytokens are not rotation candidates; canary lifecycle remains
+  remove + replant.
+
 ## [v0.9.0] - 2026-08-23
 
 Discovery: `discover` enumerates unregistered secrets from operator-named

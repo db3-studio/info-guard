@@ -6002,12 +6002,12 @@ check("battery.security.stripped_path_gitleaks: stripped-PATH invocation works",
       r33.returncode == 1 and r33.stderr == "", "")
 
 # item 27: version identity (package constant == CLI == CHANGELOG title).
-_vid = wdm._PACKAGE_VERSION == "0.9.0"
+_vid = wdm._PACKAGE_VERSION == _PKG_VER
 r34 = wd_run("--version")
-_vid = _vid and r34.stdout.strip() == "info-guard 0.9.0"
+_vid = _vid and r34.stdout.strip() == f"info-guard {_PKG_VER}"
 _chg = "\n".join((Path(os.getcwd()) / "CHANGELOG.md").read_text().split("\n")[:12])
-_vid = _vid and "v0.9.0" in _chg
-check("battery.release.version_identity_v0_9_0: version identity — constant == CLI == CHANGELOG",
+_vid = _vid and f"v{_PKG_VER}" in _chg
+check(f"battery.release.version_identity_v{_PKG_VER}: version identity — constant == CLI == CHANGELOG",
       _vid, f"const={wdm._PACKAGE_VERSION} cli={r34.stdout.strip()!r}")
 
 
@@ -6250,9 +6250,9 @@ check("battery.security.masked_only_all_paths: no complete"
 
 # E27 — version identity complete: constant, CLI, preflight tool.version,
 # CHANGELOG title.
-_v27 = wdm._PACKAGE_VERSION == "0.9.0"
+_v27 = wdm._PACKAGE_VERSION == _PKG_VER
 _r = wd2_run("--version")
-_v27 = _v27 and _r.stdout.strip() == "info-guard 0.9.0"
+_v27 = _v27 and _r.stdout.strip() == f"info-guard {_PKG_VER}"
 # E27 — version identity: constant == CLI == preflight tool.version ==
 # CHANGELOG. The preflight scan dir must sit INSIDE HERMES_HOME
 # (preflight computes dir.relative_to(HERMES_HOME) — the F1 pre-existing
@@ -6261,12 +6261,12 @@ _v27 = _v27 and _r.stdout.strip() == "info-guard 0.9.0"
 _r = wd2_run("preflight", str(WDH2 / "scanme"), "--json")
 try:
     _v27 = _v27 and json.loads(_r.stdout).get("tool", {}).get("version") \
-        == "0.9.0"
+        == _PKG_VER
 except ValueError:
     _v27 = False
-_v27 = _v27 and "v0.9.0" in "\n".join(
+_v27 = _v27 and f"v{_PKG_VER}" in "\n".join(
     (Path(os.getcwd()) / "CHANGELOG.md").read_text().split("\n")[:12])
-check("battery.release.version_identity_v0_9_0: constant =="
+check(f"battery.release.version_identity_v{_PKG_VER}: constant =="
       "CLI == preflight tool.version == CHANGELOG",
       _v27, "")
 
@@ -6349,10 +6349,10 @@ try:
                         capture_output=True, text=True, env=_e4env,
                         timeout=120)
     _e4ok = _e4ok and _r.returncode == 0 \
-        and _r.stdout.strip() == "info-guard 0.9.0"
+        and _r.stdout.strip() == f"info-guard {_PKG_VER}"
     _inst4 = os.path.join(_e4home, "state", "info-guard", "install.json")
     _e4ok = _e4ok and os.path.isfile(_inst4) \
-        and json.load(open(_inst4)).get("version") == "0.9.0"
+        and json.load(open(_inst4)).get("version") == _PKG_VER
     _e4src = os.path.join(WD2, "e4-src")
     os.makedirs(_e4src, exist_ok=True)
     with open(os.path.join(_e4src, "f.env"), "w") as _fh:
@@ -6363,7 +6363,7 @@ try:
         and json.load(open(_reg4)) == {"version": 2, "literals": []}
     _inst4 = os.path.join(_e4home, "state", "info-guard", "install.json")
     _e4ok = _e4ok and os.path.isfile(_inst4) \
-        and json.load(open(_inst4)).get("version") == "0.9.0"
+        and json.load(open(_inst4)).get("version") == _PKG_VER
     _r = subprocess.run([sys.executable, E4_CLI, "discover", _e4src,
                          "--json"], capture_output=True, text=True,
                         env=_e4env, timeout=120)
@@ -6389,7 +6389,7 @@ try:
     # update battery, sections 8-10).
     _e4ok = _e4ok and _r.returncode == 0 \
         and "up to date" in _r.stdout \
-        and json.load(open(_inst4)).get("version") == "0.9.0" \
+        and json.load(open(_inst4)).get("version") == _PKG_VER \
         and _e4val not in _r.stdout + _r.stderr
     _r = subprocess.run(
         ["bash", os.path.join(os.getcwd(), "uninstall.sh"), "--checkout",
@@ -6410,7 +6410,7 @@ except (subprocess.CalledProcessError, OSError) as _e4err:
 check("battery.wave_d.e4_fresh_lifecycle_discover_enroll: "
       "installed-artifact install -> discover -> enroll -> check -> "
       "update -> uninstall round-trip",
-      _e4ok, "no deployment-owned machinery; version 0.9.0; cleanup verified")
+      _e4ok, f"no deployment-owned machinery; version {_PKG_VER}; cleanup verified")
 
 # S9 strengthen: discover calls the SHARED scan; the shared function
 # holds the single corpus (function-level reuse, not string co-occurrence).
