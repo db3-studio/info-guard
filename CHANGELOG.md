@@ -4,6 +4,36 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 
 > Convention: micro-version fixes within the same workstream are consolidated into the latest entry of that release, not captured per tag.
 
+## [v0.9.2] - 2026-08-24
+
+Documentation and verification hardening release.
+
+### Changed
+- **README overhaul** — rewritten as the product's presentation surface:
+  exact-value pitch, defaults at a glance, command surface table,
+  masked-viewer (no-dump) doctrine, profiles & multi-instance guidance,
+  and upgrade ordering.
+- **`docs/full-stack.md` rewritten as the five-layer build blueprint** —
+  Layer 1 (redaction) through Layer 5 (watchdogs and hygiene): each layer
+  names the shipped commands (`build`, `status`, `pipe`, `view`, `env`,
+  `literals`, `setup`, `preflight`, `watch`, `discover`,
+  `rotate-candidates`, `check`, `update`), with surface/mechanism tables,
+  per-layer agent guardrails, known silent-fail classes, and a building
+  order for new deployments.
+- **Supported-version range single-sourced** — the CLI constants
+  `_SUPPORTED_MIN`/`_SUPPORTED_MAX` are the single source of truth; README,
+  `docs/format-spec.md`, and the CI matrix must carry the same bounds or the
+  battery fails (new `battery.release.supported_range_single_source` check).
+- **Install verification hardened** — the install/uninstall battery check
+  now runs against a scratch Hermes checkout (tagged, artifact applied)
+  instead of the live agent tree, carrying the full agent import chain the
+  smoke test requires.
+
+### Fixed
+- **Help-string and doc hygiene** — internal process references removed
+  from CLI help text and `docs/format-spec.md`; consumer-facing surfaces
+  carry product language only.
+
 ## [v0.9.1] - 2026-08-24
 
 Secret rotation as an identity lifecycle: a read-only rotation-candidate

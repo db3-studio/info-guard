@@ -361,10 +361,42 @@ check("install.sh replaces a stale applied patch in place",
       f"out={inst.stdout[-250:]!r} err={inst.stderr[-250:]!r}")
 
 # 11b. `check` exits 0 on a healthy install: engine via a symlinked
-#      checkout, pattern file present, artifact probe passes
+#      SCRATCH checkout (IG D138 — the E4 install fixture never operates
+#      on the real tree), pattern file present, artifact probe passes
+scratch_b = os.path.join(tmp, "check-scratch")
+os.makedirs(scratch_b, exist_ok=True)
+for rel in ("agent/redact.py", "cli.py", "gateway/run.py",
+            "hermes_cli/config.py", "hermes_cli/main.py"):
+    d = os.path.join(scratch_b, os.path.dirname(rel))
+    os.makedirs(d, exist_ok=True)
+    clean = subprocess.run(["git", "-C", CHECKOUT, "show", f"HEAD:{rel}"],
+                           capture_output=True, text=True, check=True).stdout
+    with open(os.path.join(scratch_b, rel), "w") as f:
+        f.write(clean)
+# the agent import chain (IG D138 `_wc_target` pattern): redact.py's
+# module-level `from agent.file_safety import …` must resolve INSIDE the
+# scratch — the host venv's editable-install finder maps `agent` to the
+# REAL checkout and must never be the source (hermeticity, and a broken
+# real-tree link would surface here as a phantom failure).
+for f in ("file_safety.py", "__init__.py", "jiter_preload.py"):
+    src = os.path.join(CHECKOUT, "agent", f)
+    if os.path.isfile(src):
+        clean = subprocess.run(["git", "-C", CHECKOUT, "show", f"HEAD:agent/{f}"],
+                               capture_output=True, text=True, check=True).stdout
+        with open(os.path.join(scratch_b, "agent", f), "w") as fh:
+            fh.write(clean)
+subprocess.run(["git", "-C", scratch_b, "init", "-q"], check=True)
+subprocess.run(["git", "-C", scratch_b, "add", "-A"], check=True)
+subprocess.run(["git", "-C", scratch_b, "-c", "user.email=ig@test",
+                "-c", "user.name=ig-test", "commit", "-q", "-m", "base"],
+               check=True)
+# hermetic version source for the supported-range check (D113 pattern)
+subprocess.run(["git", "-C", scratch_b, "tag", "v2026.8.18"], check=True)
+# a healthy install = the package artifact applied to the scratch
+subprocess.run(["git", "-C", scratch_b, "apply", PATCH_PATH], check=True)
 chkhome = os.path.join(tmp, "check-home")
 os.makedirs(os.path.join(chkhome, "state", "info-guard"), exist_ok=True)
-os.symlink(CHECKOUT, os.path.join(chkhome, "hermes-agent"))
+os.symlink(scratch_b, os.path.join(chkhome, "hermes-agent"))
 write(os.path.join(chkhome, "state", "info-guard", "redact_patterns.json"),
       {"mask": {"head": 2, "tail": 2, "floor": 12}, "literals": [],
        "key_patterns": {}})
@@ -9026,6 +9058,37 @@ check("battery.rotate.version_identity_v0_9_1: R2 package constant == CLI "
       "--version == CHANGELOG; schema + README Rotate section identify "
       "the checked-out version; no stale release identity",
       _vid9, f"const={wem._PACKAGE_VERSION} cli={_r.stdout.strip()!r}")
+
+# W7/S4 (docs wave v0.9.2): supported-range SINGLE SOURCE — the canonical
+# bounds live in bin/info-guard's _SUPPORTED_MIN/_SUPPORTED_MAX (semver name
+# in each trailing comment); README, docs/format-spec.md and
+# .github/workflows/ci.yml must carry the SAME bounds — drift fails here,
+# never at a release (the v0.8.0 stale-identity lesson, applied to the range).
+_s4_src = (Path(os.getcwd()) / "bin" / "info-guard").read_text()
+_s4_min = re.search(r"_SUPPORTED_MIN = \(\d+, \d+, \d+\)\s+# (v[\d.]+)", _s4_src)
+_s4_max = re.search(r"_SUPPORTED_MAX = \(\d+, \d+, \d+\)\s+# (v[\d.]+)", _s4_src)
+_s4_ok = _s4_min is not None and _s4_max is not None
+if _s4_ok:
+    _s4_docs = {
+        "README.md": (Path(os.getcwd()) / "README.md").read_text(),
+        "docs/format-spec.md": (Path(os.getcwd()) / "docs" / "format-spec.md").read_text(),
+        ".github/workflows/ci.yml": (Path(os.getcwd()) / ".github" / "workflows" / "ci.yml").read_text(),
+    }
+    _s4_next = "v0.20." + str(int(_s4_max.group(1).split(".")[-1]) + 1)
+    _s4_ok = all(_s4_min.group(1) in t and _s4_max.group(1) in t
+                 for t in _s4_docs.values())
+    # the "vX.Y.Z+" overstatement class is banned on the public surface
+    _s4_ok = _s4_ok and "v0.20.0+" not in _s4_docs["README.md"] \
+        and "v0.20.0+" not in _s4_docs["docs/format-spec.md"]
+    # no version beyond the tested max may appear (stale-range class)
+    _s4_ok = _s4_ok and all(_s4_next not in t for t in _s4_docs.values())
+check("battery.release.supported_range_single_source: S4/W7 — the supported "
+      "range is single-sourced from bin/info-guard _SUPPORTED_MIN/_SUPPORTED_MAX "
+      "trailing comments; README, format-spec and ci.yml carry the same bounds "
+      "(no v0.20.0+ overstatement, no version beyond the tested max)",
+      _s4_ok,
+      f"min={_s4_min.group(1) if _s4_min else None} "
+      f"max={_s4_max.group(1) if _s4_max else None}")
 
 # FIX-14 (fold): every security reporting alias resolves to an executed
 # primary check — the aliases are reporting metadata, never extra runs
