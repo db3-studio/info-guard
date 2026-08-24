@@ -415,6 +415,44 @@ reported as candidates, because they cannot be enrolled.
 More examples — value types, mask styles, key patterns — in
 `examples/redact_patterns.json.example` and `examples/custom_literals.json.example`.
 
+## Rotate secrets (v0.9.1)
+
+Rotation is an identity lifecycle: retire the old identity, establish a
+new one, preserve lineage, regenerate matching artifacts explicitly, and
+expose the candidate explicitly.
+
+```bash
+# 1. see rotation candidates (read-only; exit 0 clean / 1 candidates / 2 error)
+~/.info-guard/bin/info-guard rotate-candidates --json
+
+# 2. rotate one registered identity — the new value comes from STDIN only
+printf '%s\n' "$NEW_VALUE_FROM_VAULT" | \
+  ~/.info-guard/bin/info-guard literals rotate <value_id>
+
+# 3. regenerate the matcher explicitly
+~/.info-guard/bin/info-guard build
+```
+
+Safety rules:
+
+- **Replacement values must never be placed in argv** — pipe them through
+  stdin; the raw value never appears on any product surface.
+- **Do not run concurrent `literals rotate` invocations against one
+  registry** — there is no registry lock; concurrent writers are
+  last-writer-wins.
+- `.env` and deployment configuration remain deployment-side; the product
+  never reads or writes them. A deployment driver obtains the replacement
+  out of band (e.g. a vault), pipes it, runs `info-guard build`, and updates
+  the deployment-owned files itself.
+- Honeytokens are not rotation candidates; a fired canary is an incident,
+  handled by remove + replant.
+- A retired identity stays registered and detectable until explicitly
+  removed; remove severs the lineage chain, leaving surviving references
+  as historical context.
+
+The full schema (`info-guard/rotate/v1`), exit tables, lineage fields,
+and the documented driver sequence live in `docs/rotate-schema.md`.
+
 ## Masked viewers (the no-dump doctrine)
 
 **Prefer masked viewers over raw dumps — `info-guard view`, `info-guard
