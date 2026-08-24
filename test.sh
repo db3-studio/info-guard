@@ -6894,7 +6894,7 @@ check("battery.wave_d.registry_normalization_suppression: quoted "
 # least one EXECUTED check label (captured by the harness check()
 # wrapper), and NO informal labels (WD-prefixed) may remain.
 _LEDGER = [
-    "battery.release.version_identity_v0_9_0",
+    f"battery.release.version_identity_v{_PKG_VER}",
     "battery.security.masked_only_all_paths",
     "battery.security.no_shell_execution",
     "battery.security.single_sourced_detector",
@@ -6959,7 +6959,14 @@ WESRC.mkdir()
 WEENV = dict(os.environ, HERMES_HOME=str(WEH))
 WECAP = []          # (label, argv, rc, stdout, stderr) for S13/S14 scans
 WEVALUES = []       # every synthetic raw value — never on any surface
-WE_GITLEAKS = shutil.which("gitleaks") is not None
+# WE_GITLEAKS mirrors the product's own _gitleaks_available() (PATH +
+# ~/go/bin + ~/.local/bin): the watch exit ladder (2 if not gitleaks_ok)
+# must be asserted against the SAME resolver the subprocess uses — a
+# PATH-only shutil.which disagrees with the product under the stripped-PATH
+# battery leg when gitleaks sits in the user-level fallback dirs.
+WE_GITLEAKS = (shutil.which("gitleaks") is not None
+               or (Path.home() / "go" / "bin" / "gitleaks").is_file()
+               or (Path.home() / ".local" / "bin" / "gitleaks").is_file())
 
 def _we_sha(s):
     return hashlib.sha256(s.encode()).hexdigest()
