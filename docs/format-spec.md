@@ -140,7 +140,7 @@ unacceptable in your threat model, keep the registry under your own
 
 ## Custom literals (the PII workflow) — registry v2 (v0.4.2)
 
-`<state>/custom_literals.json` — hand-edited, survives rebuilds, masking only
+`<state>/custom_literals.json` — CLI-managed (literals add/rotate/remove), survives rebuilds, masking only
 (never part of detection). Registry v2 shape:
 
 ```json
@@ -511,7 +511,7 @@ Every **public** machine-readable surface is an envelope:
 Exempt from the envelope doctrine:
 
 - `custom_literals.json` — user-owned local configuration (trusted 0600
-  state, hand-editable, raw values by design).
+  state, managed through the CLI, raw values by design).
 - `watch-baseline.json` — internal state; versioned independently, not part
   of the envelope doctrine unless explicitly promoted to a public contract.
 - The exit-code table — **documentation-only in v0.6.0**; its

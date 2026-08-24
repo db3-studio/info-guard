@@ -258,7 +258,8 @@ no registry write on any violation:
 
 Rotation validates only its selected target and the target/new-value
 uniqueness rules. It does not repair malformed lineage on unrelated
-entries; an operator may hand-repair such entries.
+entries; dangling references left by entry removal are tolerated, and
+unrelated entries are never rewritten.
 
 ### 2.4 The transaction
 
@@ -365,6 +366,13 @@ Registry schema remains version 2:
   "literals": []
 }
 ```
+
+**Registry ownership.** `custom_literals.json` is product-owned. Entries
+are added, rotated, and removed through the CLI only (`literals add`,
+`literals rotate`, `literals remove`); directly editing the file is
+unsupported. Validation and fail-closed behavior cover the states the
+product itself can produce — a hand-edited registry may not be detected
+as invalid.
 
 Lineage fields are additive per-entry fields.
 
