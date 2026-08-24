@@ -4946,6 +4946,10 @@ def cmd_rotate_candidates(args):
             json_seen = True
         elif not end_opts and a.startswith("--"):
             return _rotate_view_error("usage", json_mode)
+        elif not end_opts and a.startswith("-") and a != "-":
+            # Evidence-gate fold FIX-8 (Sonnet MIN-2): explicit short-dash
+            # unknown-option rejection; bare `-` stays a positional token.
+            return _rotate_view_error("usage", json_mode)
         else:
             positional.append(a)
     if positional:
@@ -4968,6 +4972,23 @@ def cmd_rotate_candidates(args):
                 or not isinstance(item.get("id"), str)
                 or not _ROTATE_ID_RE.fullmatch(item["id"])):
             return _rotate_view_error("registry_unavailable", json_mode)
+        # Evidence-gate fold FIX-2 (Luna MAJ-3): known retirement/lineage
+        # metadata must be well-typed and well-formed when present;
+        # malformed metadata fails closed (registry_unavailable) instead
+        # of silently reclassifying an entry's retirement state
+        # (e.g. `retired: "true"` treated as active).
+        if "retired" in item and not isinstance(item["retired"], bool):
+            return _rotate_view_error("registry_unavailable", json_mode)
+        for _lk in ("retired_at", "rotated_at"):
+            if _lk in item and not (
+                    isinstance(item[_lk], str)
+                    and _ROTATE_TS_RE.fullmatch(item[_lk])):
+                return _rotate_view_error("registry_unavailable", json_mode)
+        for _lk in ("rotated_from", "rotated_to"):
+            if _lk in item and not (
+                    isinstance(item[_lk], str)
+                    and _ROTATE_ID_RE.fullmatch(item[_lk])):
+                return _rotate_view_error("registry_unavailable", json_mode)
     # Non-canary value-to-entry scope built from the RAW literals — the
     # canonical normalizer collapses same-value duplicates (first-wins),
     # which would hide both the active/retired conflict and the
@@ -5003,6 +5024,11 @@ def cmd_rotate_candidates(args):
         if not isinstance(bdoc, dict) or not isinstance(bdoc.get("values"),
                                                        list):
             return _rotate_view_error("baseline_unavailable", json_mode)
+        # Evidence-gate fold FIX-3 (Luna MAJ-4): the baseline envelope must
+        # carry the v2 schema — missing/wrong/legacy schemas fail closed
+        # (the view never migrates; present-but-invalid fails closed).
+        if bdoc.get("schema") != "info-guard/watch-baseline/v2":
+            return _rotate_view_error("baseline_unavailable", json_mode)
         # FIX-3 (fold): every present baseline row must be well-formed
         # (dict, non-empty str value_sha256 in exact SHA-256 hex format,
         # timestamps in the exact UTC format when present, unique hash —
@@ -5024,6 +5050,16 @@ def cmd_rotate_candidates(args):
                         and _ROTATE_TS_RE.fullmatch(brow[_tsk])):
                     return _rotate_view_error("baseline_unavailable",
                                               json_mode)
+                if _tsk in brow:
+                    # Evidence-gate fold FIX-3: SEMANTIC timestamp
+                    # validation — a syntactically shaped but impossible
+                    # date (e.g. 2026-99-99T99:99:99Z) fails closed.
+                    try:
+                        datetime.strptime(brow[_tsk],
+                                          "%Y-%m-%dT%H:%M:%SZ")
+                    except ValueError:
+                        return _rotate_view_error("baseline_unavailable",
+                                                  json_mode)
             baseline_rows[brow["value_sha256"]] = brow
     # Existing detector + existing scan corpus, exactly once (S15/A68).
     scan_dirs = []
@@ -5209,6 +5245,10 @@ def _literals_rotate(args):
             return _rotate_fail("usage")
         elif not end_opts and a.startswith("--"):
             return _rotate_fail("usage")
+        elif not end_opts and a.startswith("-") and a != "-":
+            # Evidence-gate fold FIX-8 (Sonnet MIN-2): explicit short-dash
+            # unknown-option rejection; bare `-` stays a positional token.
+            return _rotate_fail("usage")
         else:
             positionals.append(a)
     if len(positionals) != 1:
@@ -5220,10 +5260,13 @@ def _literals_rotate(args):
     # strict UTF-8, one logical line, optional final LF/CRLF transport
     # syntax, surrounding-whitespace stripping, no control characters).
     try:
-        raw = sys.stdin.buffer.read()
+        raw = sys.stdin.buffer.read(_ROTATE_STDIN_MAX + 1)
     except BaseException:
         return _rotate_fail("usage")
-    if len(raw) > _ROTATE_STDIN_MAX:
+    # Evidence-gate fold FIX-6 (Luna MIN-2): bounded read — allocation is
+    # capped at MAX+1. A pipe may return FEWER bytes than are available, so
+    # a trailing one-byte probe detects a truncated over-cap payload.
+    if len(raw) > _ROTATE_STDIN_MAX or sys.stdin.buffer.read(1):
         return _rotate_fail("usage")   # r3 MIN-3: bounded stdin payload
     try:
         text = raw.decode("utf-8")
@@ -5247,7 +5290,10 @@ def _literals_rotate(args):
     new_value = body.strip()
     if not new_value:
         return _rotate_fail("usage")
-    if any(ord(c) < 32 or ord(c) == 127 for c in new_value):
+    if any(ord(c) < 32 or 127 <= ord(c) < 160 for c in new_value):
+        # Evidence-gate fold FIX-5 (Luna MIN-1): C0 + C1 controls (mirrors
+        # the product scan-path standard); the contract requires
+        # control-character rejection.
         return _rotate_fail("usage")
     # Strict v2 registry; in-memory normalization stages any required
     # lazy id backfill into the SAME candidate (A53 — no preliminary
@@ -5256,16 +5302,49 @@ def _literals_rotate(args):
     if not ok:
         return _rotate_fail("registry_unavailable")
     norm_entries, _n_new, _need = _normalize_entries(doc.get("literals") or [])
+    raw_literals = doc.get("literals") or []
     # FIX-5 (fold): exactly ONE persisted entry must match the target id.
     # Zero matches = unknown target -> usage (FIX-7); duplicate target-id
     # matches = ambiguous target -> registry_conflict (never first-wins).
-    matches = [item for item in norm_entries
-               if isinstance(item, dict) and item.get("id") == target_id]
-    if len(matches) == 0:
-        return _rotate_fail("usage")   # unknown id (A42, FIX-7)
-    if len(matches) > 1:
+    # The normalized count>1 branch stays the FIX-9 white-box defensive
+    # gate (the canonical normalizer repairs duplicate ids
+    # deterministically under D65, so the branch is unreachable black-box;
+    # the white-box fixture substitutes _normalize_entries to reach it).
+    norm_matches = [item for item in norm_entries
+                    if isinstance(item, dict) and item.get("id") == target_id]
+    if len(norm_matches) > 1:
         return _rotate_fail("registry_conflict")   # duplicate target id
-    target = matches[0]
+    # Evidence-gate fold FIX-1 (A59): target identity is resolved against
+    # the RAW persisted list, mirroring the view's raw-literals scope —
+    # the canonical normalizer's first-wins VALUE collapse would hide the
+    # ordinary half of a honeytoken/ordinary same-value pair, making the
+    # ordinary entry unrotatable (and, if it preceded the canary, would
+    # drop the honeytoken from the subsequent write). Raw fallback only:
+    # the normalized list remains the primary surface (FIX-9 above).
+    raw_matches = [item for item in raw_literals
+                   if isinstance(item, dict) and item.get("id") == target_id]
+    if len(raw_matches) == 0:
+        return _rotate_fail("usage")   # unknown id (A42, FIX-7)
+    if len(raw_matches) > 1:
+        return _rotate_fail("registry_conflict")   # raw duplicate target id
+    target = raw_matches[0]
+    # Candidate base: the normalized list (carries the A53 lazy id
+    # backfill and D65 dup-id repair into the write), re-augmented with
+    # every raw honeytoken the value collapse dropped AND the raw target
+    # itself when the collapse hid it — a canary must never silently
+    # disappear from a rotate write (A59/FIX-1).
+    work_entries = list(norm_entries)
+    work_ids = {e.get("id") for e in work_entries
+                if isinstance(e, dict) and isinstance(e.get("id"), str)}
+    for item in raw_literals:
+        if (isinstance(item, dict) and _entry_kind(item) == _HONEYTOKEN_KIND
+                and isinstance(item.get("id"), str)
+                and item["id"] not in work_ids):
+            work_entries.append(item)
+            work_ids.add(item["id"])
+    if target_id not in work_ids:
+        work_entries.append(target)
+        work_ids.add(target_id)
     if _entry_kind(target) == _HONEYTOKEN_KIND:
         return _rotate_fail("usage")   # honeytoken id (A44, FIX-7)
     if target.get("retired") is True:
@@ -5303,28 +5382,65 @@ def _literals_rotate(args):
         if not (isinstance(target["rotated_from"], str)
                 and _ROTATE_ID_RE.fullmatch(target["rotated_from"])):
             return _rotate_fail("registry_conflict")
+    # Evidence-gate fold FIX-4 (Luna MAJ-5, ASYMMETRIC — fold-verify note):
+    # a rotation timestamp without a predecessor record (rotated_at
+    # present, rotated_from absent) is contradictory metadata; the
+    # REVERSE (rotated_from present, rotated_at absent) is the RATIFIED
+    # severed-chain dangling tolerance (r2 fold + existing fixture) and
+    # must remain tolerated. Self-reference (an entry as its own
+    # predecessor) is contradictory.
+    if "rotated_at" in target and "rotated_from" not in target:
+        return _rotate_fail("registry_conflict")
+    if (isinstance(target.get("rotated_from"), str)
+            and target["rotated_from"] == target_id):
+        return _rotate_fail("registry_conflict")
     old_value = target.get("value")
     if not isinstance(old_value, str) or not old_value:
         return _rotate_fail("registry_conflict")
+    # Evidence-gate fold FIX-1 (Luna MAJ-2): target exact-value uniqueness
+    # against the RAW persisted snapshot (contract §3.2.3 — "the target's
+    # exact value is unique across the whole registry"). The canonical
+    # normalizer collapses same-value duplicates (first-wins), which would
+    # otherwise hide a hand-corrupted duplicate-value registry; honeytoken
+    # entries stay excluded so honeytoken/ordinary same-value pairs remain
+    # rotatable. No raw duplicate-ID check: D65 deterministic dup-id
+    # repair is ratified (the normalized count>1 branch stays white-box).
+    raw_dup = 0
+    for item in doc.get("literals") or []:
+        if not isinstance(item, dict) or _entry_kind(item) == _HONEYTOKEN_KIND:
+            continue
+        v = item.get("value")
+        if isinstance(v, str) and v and v == old_value:
+            raw_dup += 1
+    if raw_dup > 1:
+        return _rotate_fail("registry_conflict")
     # Target exact-value uniqueness across active AND retired entries
     # (contract §3.2.3 — prevents rotate from creating the conflict).
+    # Honeytokens are excluded from this count (A59/FIX-1: the canary is
+    # not a value competitor; the raw_dup check above already applied the
+    # same exclusion at the raw level).
     dup = 0
-    for item in norm_entries:
-        if isinstance(item, dict) and item.get("value") == old_value:
+    for item in work_entries:
+        if (isinstance(item, dict)
+                and _entry_kind(item) != _HONEYTOKEN_KIND
+                and item.get("value") == old_value):
             dup += 1
     if dup > 1:
         return _rotate_fail("registry_conflict")
-    # Replacement uniqueness (resurrection rejection, A48/A49).
+    # Replacement uniqueness (resurrection rejection, A48/A49). The
+    # honeytoken REMAINS included in this check (A59/FIX-1: a replacement
+    # value equal to the canary's value is rejected) — work_entries
+    # carries every raw honeytoken the value collapse would have hidden.
     if new_value == old_value:
         return _rotate_fail("registry_conflict")
-    for item in norm_entries:
+    for item in work_entries:
         v = item.get("value") if isinstance(item, dict) else item
         if isinstance(v, str) and v == new_value:
             return _rotate_fail("registry_conflict")
     # Fresh id: secrets.token_hex(8), never derived, never reused, no
     # collision with any candidate id (contract §3.3.2).
     candidate_ids = set()
-    for item in norm_entries:
+    for item in work_entries:
         if isinstance(item, dict) and isinstance(item.get("id"), str):
             candidate_ids.add(item["id"])
     while True:
@@ -5333,7 +5449,10 @@ def _literals_rotate(args):
             break
     # Candidate construction: retire + establish + lineage, with
     # unknown-field, mask-style and non-honeytoken-kind preservation
-    # (A51). One transaction timestamp for both entries.
+    # (A51). One transaction timestamp for both entries. Built from
+    # work_entries so the write preserves every honeytoken the
+    # first-wins value collapse dropped (A59/FIX-1 — a rotate must never
+    # silently delete a canary).
     ts = _rotate_ts()
     old_entry = dict(target)
     old_entry["retired"] = True
@@ -5348,7 +5467,7 @@ def _literals_rotate(args):
     new_entry.pop("retired_at", None)
     new_entry.pop("rotated_to", None)
     cand_entries = []
-    for item in norm_entries:
+    for item in work_entries:
         if isinstance(item, dict) and item.get("id") == target_id:
             cand_entries.append(old_entry)
             cand_entries.append(new_entry)
@@ -5357,9 +5476,9 @@ def _literals_rotate(args):
     # Candidate validation (plan 51): both exact values present, two
     # distinct ids, correct bidirectional lineage, exactly one retired
     # target transition. The id-collision assertion checks the fresh id
-    # against the PRE-EXISTING registry ids (norm_entries) — cand_ids
+    # against the PRE-EXISTING registry ids (work_entries) — cand_ids
     # includes the new entry's own id, so it can never prove absence.
-    existing_ids = {item.get("id") for item in norm_entries
+    existing_ids = {item.get("id") for item in work_entries
                     if isinstance(item, dict)
                     and isinstance(item.get("id"), str)}
     cand_values = set()

@@ -7412,6 +7412,35 @@ _we_fail_case("lf-cr", ["4444555566667777"], VB3 + "\n\r", "usage")
 # r3 MIN-3: over-cap stdin payload (64 KiB) -> usage, value-free
 _we_fail_case("over-cap", ["4444555566667777"], "x" * (64 * 1024 + 1),
               "usage")
+# evidence-gate fold FIX-5 (Luna MIN-1): C1 control (U+0085 NEL) rejected
+# by the extended C0+C1 range (mirrors the product scan-path standard)
+_we_fail_case("c1-nel", ["4444555566667777"], "va\u0085lue\n", "usage")
+# evidence-gate fold FIX-6 (Luna MIN-2): bounded-read boundary — exactly
+# MAX stdin bytes (65535 chars + final LF) reaches value validation and
+# succeeds; MAX+1 bytes fails usage before any candidate or write.
+we_reg([{"value": VB1, "id": "4444555566667777"}])
+_r = we_run("literals", "rotate", "4444555566667777",
+            stdin=("y" * (64 * 1024 - 1)) + "\n")
+_ok = _r.returncode == 0 and _r.stderr == ""
+if not _ok:
+    _we_fail_at = f"FIX6-boundary-max (rc={_r.returncode} " \
+                  f"err={_r.stderr!r})"
+_fail_ok = _fail_ok and _ok
+we_reg([{"value": VB1, "id": "4444555566667777"}])
+_pre = WEREG.read_bytes()
+_r = we_run("literals", "rotate", "4444555566667777",
+            stdin=("y" * (64 * 1024)) + "\n")
+_ok = _r.returncode == 2 and _r.stdout == "" \
+    and _r.stderr == "error: usage\n" and WEREG.read_bytes() == _pre
+if not _ok:
+    _we_fail_at = f"FIX6-boundary-over (rc={_r.returncode} " \
+                  f"err={_r.stderr!r})"
+_fail_ok = _fail_ok and _ok
+# evidence-gate fold FIX-8 (Sonnet MIN-2): explicit short-dash
+# unknown-option rejection on literals rotate (before and after the id)
+_we_fail_case("short-dash", ["-x", "4444555566667777"], VB3 + "\n", "usage")
+_we_fail_case("short-dash-post", ["4444555566667777", "-x"], VB3 + "\n",
+              "usage")
 # A48 same value, A49 duplicate against registered (incl. retired)
 _we_fail_case("same", ["4444555566667777"], VB1 + "\n", "registry_conflict")
 we_reg([{"value": VB1, "id": "4444555566667777"},
@@ -7442,6 +7471,22 @@ _fail_ok = _fail_ok and _ok
 # one id, neither the target) must NOT invalidate an otherwise valid
 # rotation — the old len(cand_ids)==len(norm_entries)+1 assertion rejected
 # exactly this; and duplicate occurrences of the TARGET id fail closed.
+# Evidence-gate fold FIX-1 (Luna MAJ-2): a raw persisted duplicate of the
+# target VALUE (contract §3.2.3 — "the target's exact value is unique
+# across the whole registry") fails closed registry_conflict; the
+# normalizer would otherwise collapse the pair and hide the violation.
+VX_rd1 = _rtfrag("rd1"); VX_rd2 = _rtfrag("rd2")
+WEVALUES += [VX_rd1, VX_rd2]
+we_reg([{"value": VX_rd1, "id": "1919191919191919"},
+        {"value": VX_rd1, "id": "2828282828282828"}])   # raw dup value
+_pre = WEREG.read_bytes()
+_r = we_run("literals", "rotate", "1919191919191919", stdin=VX_rd2 + "\n")
+_ok = _r.returncode == 2 and _r.stderr == "error: registry_conflict\n" \
+    and _r.stdout == "" and WEREG.read_bytes() == _pre
+if not _ok:
+    _we_fail_at = f"FIX1-raw-dup (rc={_r.returncode} out={_r.stdout!r} " \
+                  f"err={_r.stderr!r})"
+_fail_ok = _fail_ok and _ok
 VX1 = _rtfrag("x1"); VX2 = _rtfrag("x2"); VX3 = _rtfrag("x3")
 VX4 = _rtfrag("x4")
 WEVALUES += [VX1, VX2, VX3, VX4]
@@ -7536,6 +7581,13 @@ _we_lineage_case({"rotated_to": None}, 2, VX6)
 _we_lineage_case({"rotated_from": None}, 2, VX7)
 _we_lineage_case({"rotated_at": None}, 2, VX8)
 _we_lineage_case({"retired": False}, 2, VX9)
+# evidence-gate fold FIX-4 (Luna MAJ-5): rotated_at WITHOUT rotated_from
+# (a rotation timestamp with no predecessor record) is contradictory;
+# self-referential rotated_from (an entry as its own predecessor) is
+# contradictory. The ratified dangling rotated_from (no rotated_at)
+# remains tolerated — asserted by the next case.
+_we_lineage_case({"rotated_at": "2026-08-23T00:00:00Z"}, 2, VX8)
+_we_lineage_case({"rotated_from": "4444555566667777"}, 2, VX9)
 _r = _we_lineage_case({"rotated_from": "aaaaaaaaaaaaaaaa"}, 0, VX10)
     # valid dangling rotated_from -> tolerated, rotation succeeds
 _reg = json.loads(WEREG.read_text())
@@ -7842,6 +7894,17 @@ _dd = json.loads(_rr.stdout) if _rr.stdout else {}
 _ord_ok = _ord_ok and _rr.returncode == 2 \
     and _dd.get("status") == "error" and _dd.get("error_class") == "usage" \
     and _rr.stderr == ""
+# evidence-gate fold FIX-8 (Sonnet MIN-2): explicit short-dash unknown
+# option rejection — `-x` is usage in both modes (bare `-` stays a
+# positional token, unchanged)
+_rr = we_run("rotate-candidates", "--json", "-x")
+_dd = json.loads(_rr.stdout) if _rr.stdout else {}
+_ord_ok = _ord_ok and _rr.returncode == 2 \
+    and _dd.get("status") == "error" and _dd.get("error_class") == "usage" \
+    and _dd.get("rows") == [] and _rr.stderr == ""
+_rr = we_run("rotate-candidates", "-x")
+_ord_ok = _ord_ok and _rr.returncode == 2 and _rr.stdout == "" \
+    and _rr.stderr == "error: usage\n"
 check("battery.rotate.rotate_candidates_ordering: A57/A60 deterministic "
       "ordering + repeated --json usage error with JSON envelope; FIX-8 "
       "exact --json anywhere in argv (incl. after ---) selects the JSON "
@@ -7883,14 +7946,18 @@ _d = json.loads(_r.stdout) if _r.stdout else {}
 _row = next((x for x in _d.get("rows", []) if x.get("value_id")), {})
 _dedup_ok = _d.get("count") == 1 and _row.get("count") == 4 \
     and _row.get("value_id") == "eeee555566667777"  # first-wins (2 tiers)
-# A58: rotate the SECOND duplicate's id -> the canonical normalizer
-# collapses same-value duplicates (first-wins, D45), so the collapsed id
-# no longer identifies an entry -> usage (unknown target, FIX-7), no
-# mutation, view remains readable
+# A58: rotate the SECOND duplicate's id -> evidence-fold FIX-1 raw
+# target-value uniqueness: the RAW snapshot holds two non-honeytoken
+# entries with the exact target value (contract §3.2.3 violation), so
+# the rotation fails closed registry_conflict — never first-wins, never
+# usage. (Pre-fold this id collapsed away and fell to unknown -> usage;
+# FIX-1 validates the raw snapshot so the duplicate-value corruption is
+# classified as the data conflict it is, regardless of which id is
+# named.) No mutation, view remains readable.
 _pre = WEREG.read_bytes()
 _r = we_run("literals", "rotate", "ffff666677778888", stdin=VC3 + "\n")
 _dedup_ok = _dedup_ok and _r.returncode == 2 \
-    and _r.stderr == "error: usage\n" \
+    and _r.stderr == "error: registry_conflict\n" \
     and WEREG.read_bytes() == _pre
 _r = we_run("rotate-candidates", "--json")
 _dedup_ok = _dedup_ok and _r.returncode == 1  # view still readable
@@ -7921,7 +7988,9 @@ check("battery.rotate.rotate_candidates_target_duplicate_rejection: FIX-5 "
       "unrelated duplicate ids do not block rotation; duplicate TARGET id "
       "matches fail closed registry_conflict, no mutation; A49/A58 "
       "duplicate target value rejected, registry unchanged, view readable "
-      "after",
+      "after (duplicate-TARGET-id branch is DEFENSIVE/WHITE-BOX ONLY — "
+      "the canonical normalizer repairs duplicate ids deterministically "
+      "under D65; not black-box end-to-end coverage, evidence fold FIX-9)",
       _dup_ok and _dedup_ok, "")
 # honeytoken + ordinary same-value pair: NO conflict; ordinary row only.
 VH_dup = _rtfrag("hdup")
@@ -7942,6 +8011,38 @@ we_reg([{"value": VH_dup, "id": "abababababababab", "kind": "honeytoken"}])
 _r = we_run("rotate-candidates", "--json")
 _d = json.loads(_r.stdout) if _r.stdout else {}
 _ht_ok = _ht_ok and _d.get("count") == 0 and _d.get("status") == "clean"
+# evidence-gate fold FIX-1 control: honeytoken/ordinary same-value pair —
+# rotating the ORDINARY entry SUCCEEDS (the honeytoken is excluded from
+# the raw target-value uniqueness count; the non-canary conflict
+# boundary, A59) AND the canary survives the write (a rotate must never
+# silently delete a honeytoken — work_entries preservation).
+VH_rot = _rtfrag("hrot"); VH_rot2 = _rtfrag("hrot2")
+WEVALUES += [VH_rot, VH_rot2]
+we_reg([{"value": VH_rot, "id": "abababababababab", "kind": "honeytoken"},
+        {"value": VH_rot, "id": "cdcdcdcdcdcdcdcd"}])
+_r = we_run("literals", "rotate", "cdcdcdcdcdcdcdcd", stdin=VH_rot2 + "\n")
+_ht_ok = _ht_ok and _r.returncode == 0 and _r.stderr == ""
+_reg = json.loads(WEREG.read_text())
+_ht_ok = _ht_ok and any(
+    isinstance(e, dict) and e.get("kind") == "honeytoken"
+    and e.get("id") == "abababababababab" and e.get("value") == VH_rot
+    for e in _reg.get("literals", [])) \
+    and any(isinstance(e, dict) and e.get("id") == "cdcdcdcdcdcdcdcd"
+            and e.get("retired") is True for e in _reg.get("literals", []))
+# reversed order control: ordinary first, honeytoken second — the
+# first-wins value collapse would otherwise drop the canary from the
+# write entirely (FIX-1 work_entries preservation)
+we_reg([{"value": VH_rot, "id": "cdcdcdcdcdcdcdcd"},
+        {"value": VH_rot, "id": "abababababababab", "kind": "honeytoken"}])
+_r = we_run("literals", "rotate", "cdcdcdcdcdcdcdcd", stdin=VH_rot2 + "\n")
+_ht_ok = _ht_ok and _r.returncode == 0 and _r.stderr == ""
+_reg = json.loads(WEREG.read_text())
+_ht_ok = _ht_ok and any(
+    isinstance(e, dict) and e.get("kind") == "honeytoken"
+    and e.get("id") == "abababababababab" and e.get("value") == VH_rot
+    for e in _reg.get("literals", [])) \
+    and any(isinstance(e, dict) and e.get("id") == "cdcdcdcdcdcdcdcd"
+            and e.get("retired") is True for e in _reg.get("literals", []))
 check("battery.rotate.rotate_honeytoken_rejection: A44 honeytoken target "
       "rejected (canary never a rotation subject); A59 honeytoken/ordinary "
       "same-value pair — no conflict, ordinary row only; canary-only "
@@ -7996,27 +8097,45 @@ _bu_ok = _bu_ok and _r.returncode == 2 and _r.stdout == "" \
     and _r.stderr == "error: baseline_unavailable\n"
 # FIX-3 (fold): every present baseline ROW must be well-formed — dict with
 # a non-empty string value_sha256 and exact-UTC timestamps when present.
-# A malformed row fails closed, never silently skipped.
+# A malformed row fails closed, never silently skipped. Evidence-gate
+# fold FIX-3 (Luna MAJ-4) adds the ENVELOPE schema check (v2 required)
+# and SEMANTIC timestamp validation (impossible dates fail closed).
 _BAD_BASELINES = [
+    ("env-missing-schema",                    # FIX-3: envelope schema
+     {"values": []}),
+    ("env-wrong-schema",                      # FIX-3: legacy/unknown schema
+     {"schema": "info-guard/watch-baseline/v1", "values": []}),
+    ("env-impossible-date",                   # FIX-3: semantic ts
+     {"schema": "info-guard/watch-baseline/v2",
+      "values": [{"value_sha256": "a" * 64,
+                  "last_seen": "2026-99-99T99:99:99Z"}]}),
     ("row-missing-hash",
-     {"values": [{"first_seen": "2026-08-23T00:00:00Z"}]}),
+     {"schema": "info-guard/watch-baseline/v2",
+      "values": [{"first_seen": "2026-08-23T00:00:00Z"}]}),
     ("row-empty-hash",
-     {"values": [{"value_sha256": ""}]}),
+     {"schema": "info-guard/watch-baseline/v2",
+      "values": [{"value_sha256": ""}]}),
     ("row-non-dict",
-     {"values": ["not-a-row"]}),
+     {"schema": "info-guard/watch-baseline/v2",
+      "values": ["not-a-row"]}),
     ("row-bad-first-seen",
-     {"values": [{"value_sha256": "a" * 64,
+     {"schema": "info-guard/watch-baseline/v2",
+      "values": [{"value_sha256": "a" * 64,
                   "first_seen": "2026-08-23T00:00:00.123Z"}]}),
     ("row-offset-ts",
-     {"values": [{"value_sha256": "a" * 64,
+     {"schema": "info-guard/watch-baseline/v2",
+      "values": [{"value_sha256": "a" * 64,
                   "first_seen": "2026-08-23T00:00:00+00:00"}]}),
     ("row-last-seen-bad",
-     {"values": [{"value_sha256": "a" * 64,
+     {"schema": "info-guard/watch-baseline/v2",
+      "values": [{"value_sha256": "a" * 64,
                   "last_seen": "yesterday"}]}),
     ("row-bad-hash-format",               # r2 MAJ-3: not SHA-256 hex
-     {"values": [{"value_sha256": "xyz"}]}),
+     {"schema": "info-guard/watch-baseline/v2",
+      "values": [{"value_sha256": "xyz"}]}),
     ("row-dup-hash",                      # r2 MAJ-3: duplicate join key
-     {"values": [{"value_sha256": "a" * 64},
+     {"schema": "info-guard/watch-baseline/v2",
+      "values": [{"value_sha256": "a" * 64},
                  {"value_sha256": "a" * 64}]}),
 ]
 for _bl, _bbody in _BAD_BASELINES:
@@ -8149,6 +8268,24 @@ _BAD_ENTRIES = [
     ("uppercase-hex-id", [{"value": "x-y-z", "id": "AAAAAAAAAAAAAAAA"}]),
     ("wrong-length-id", [{"value": "x-y-z", "id": "abcd"}]),
     ("non-string-id", [{"value": "x-y-z", "id": 123}]),
+    # evidence-gate fold FIX-2 (Luna MAJ-3): known retirement/lineage
+    # metadata must be well-typed and well-formed when present —
+    # malformed metadata fails closed instead of silently reclassifying
+    # an entry's retirement state (e.g. `retired: "true"` as active).
+    ("retired-string", [{"value": "x-y-z", "id": "aaaaaaaaaaaaaaaa",
+                         "retired": "true"}]),
+    ("retired-num", [{"value": "x-y-z", "id": "aaaaaaaaaaaaaaaa",
+                      "retired": 1}]),
+    ("retired-null", [{"value": "x-y-z", "id": "aaaaaaaaaaaaaaaa",
+                       "retired": None}]),
+    ("bad-retired-at", [{"value": "x-y-z", "id": "aaaaaaaaaaaaaaaa",
+                         "retired_at": "not-a-time"}]),
+    ("bad-rotated-at", [{"value": "x-y-z", "id": "aaaaaaaaaaaaaaaa",
+                         "rotated_at": "2026-08-23"}]),
+    ("bad-rotated-from", [{"value": "x-y-z", "id": "aaaaaaaaaaaaaaaa",
+                           "rotated_from": "zzz"}]),
+    ("bad-rotated-to", [{"value": "x-y-z", "id": "aaaaaaaaaaaaaaaa",
+                         "rotated_to": 123}]),
 ]
 for _el, _ebody in _BAD_ENTRIES:
     we_reg(_ebody)

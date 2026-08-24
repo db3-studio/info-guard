@@ -400,7 +400,7 @@ material itself stays private).
      stability across reorder, duplicate repair/preservation, 0600
      preservation, real-v0.4.1-reader downgrade probe, JSON stdout
      purity on the post-upgrade first run, `literals` contract, build
-     migration, plus the independent evidence review's fixes pinned:
+     migration, plus fixes pinned from the audit pass:
      top-level keys survive `literals add`/`setup` writes, no-op adds
      never rewrite, empty values rejected, full-mask entries list as
      `***`. CI checkout now fetches full history + tags
@@ -444,13 +444,12 @@ material itself stays private).
 - Battery: +26 checks (151 → 177): protected-value matrix (new /
   increased / decreased / unchanged / live-registry), overlay rule,
   surface audit (raw values + sha256 absent from every surface), CLI
-  contract (incl. positional --help, evidence-review MIN-1).
+  contract (incl. positional --help).
 
 ## [v0.4.0] - 2026-08-20
 
 ### Added
-- **`watch` v2 — three-track delta monitoring** (external design guidance
-  + independent plan review, 2026-08-20; user GO):
+- **`watch` v2 — three-track delta monitoring** (external design guidance):
   1. **Exposure deltas** — beyond new values: `resolved_values`
      (informational — "No longer detected in the current scan scope.
      This does not confirm that the credential is dead or revoked"),

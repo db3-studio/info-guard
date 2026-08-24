@@ -339,8 +339,7 @@ contradictory or malformed lineage on the selected target, or same-value
 and duplicate replacement values), and `internal_error` (candidate
 serialization or canonical write failure).
 
-Consolidated `literals` exit codes (proposal §7.2 item 6 — legacy
-surfaces unchanged):
+Consolidated `literals` exit codes (legacy surfaces unchanged):
 
 | Subcommand | Success | Unreadable/malformed registry | Other failure |
 |---|---|---|---|
@@ -395,7 +394,7 @@ deletes only that entry, does not rewrite surviving `rotated_from` or
 entry severs the chain; surviving references remain as historical
 context, not corruption.
 
-Worked example — a two-step rotation chain (proposal §7.2 item 7):
+Worked example — a two-step rotation chain:
 
 ```json
 {
