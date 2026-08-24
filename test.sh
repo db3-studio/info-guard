@@ -7058,7 +7058,7 @@ def we_run(*args, stdin="", env=None, cwd=None):
     r = subprocess.run(IGPY + list(args), capture_output=True, text=True,
                        input=stdin, env=env or WEENV, cwd=cwd, timeout=180)
     WECAP.append((" ".join(args[:2]), list(args), r.returncode,
-                  r.stdout, r.stderr, stdin))
+                  r.stdout, r.stderr, stdin, dict(env or WEENV)))
     return r
 
 def we_run_b(*args, stdin=b"", env=None):
@@ -7066,7 +7066,8 @@ def we_run_b(*args, stdin=b"", env=None):
                        input=stdin, env=env or WEENV, timeout=180)
     WECAP.append((" ".join(args[:2]), list(args), r.returncode,
                   r.stdout.decode("utf-8", "replace"),
-                  r.stderr.decode("utf-8", "replace"), stdin))
+                  r.stderr.decode("utf-8", "replace"), stdin,
+                  dict(env or WEENV)))
     return r
 
 def we_snapshot():
@@ -7084,6 +7085,12 @@ def we_snapshot():
         else:
             snap[str(p) + "/"] = (b"", st.st_mtime_ns, st.st_ctime_ns)
     return snap
+
+def _we_state_entries():
+    """Complete state-directory entry-name set (r2 MAJ-9/MIN-4): the
+    no-orphan-temp assertion diffs this set before/after every writer
+    fault instead of guessing a temporary-file prefix."""
+    return {p.name for p in (WEH / "state/info-guard").rglob("*")}
 
 def _we_module():
     """Fresh in-process module with HERMES_HOME pinned to the scratch home
@@ -7122,18 +7129,17 @@ _rc1 = _rc1 and _row1.get("priority") == "rotate-now" \
     and _row1.get("type") == "KEY-SHAPE" \
     and "value_masked" in _row1 and _row1.get("value_masked") != VA1 \
     and "family" in _row1 and _r.stderr == ""
-check("battery.rotate.rotate_candidates_scope: A33 registered detected "
-      "row — rotate-now, literal, value_id, detector type, masked",
-      _rc1, f"rows={_d.get('rows')}")
+# (the rotate_candidates_scope + schema_and_count_invariants primaries
+# run ONCE at the end of Group 3 with their Group-1/Group-3 sub-cases —
+# single execution per plan 4.1, build-diff r2 MAJ-8)
 _r2 = we_run("rotate-candidates")
 _rc1b = (_r2.returncode == 1 and _r2.stderr == ""
          and VA1 not in _r2.stdout and "1111222233334444" in _r2.stdout)
 _ln = _r2.stdout.splitlines()
 _rc1b = _rc1b and len(_ln) == 2 and _ln[0].startswith("rotate-now\t") \
     and _ln[0].split("\t")[1] == _row1["value_masked"]
-check("battery.rotate.rotate_candidates_schema_and_count_invariants: "
-      "text mode — fixed columns, masked only, ids on rows",
-      _rc1b, f"out={_r2.stdout!r}")
+# (the schema_and_count_invariants primary check runs once at the end of
+# Group 3 with its Group-3 sub-cases — single execution per plan 4.1)
 
 # A34/A35: rotate I1 -> V2 via stdin; exactly one logical transaction.
 _before = we_snapshot()
@@ -7474,10 +7480,8 @@ finally:
 _dup_ok = _dup_ok and _rc == 2 and _bo.getvalue() == "" \
     and _be.getvalue() == "error: registry_conflict\n" \
     and WEREG.read_bytes() == _pre
-check("battery.rotate.rotate_candidates_target_duplicate_rejection: FIX-5 "
-      "unrelated duplicate ids do not block rotation; duplicate TARGET id "
-      "matches fail closed registry_conflict, no mutation",
-      _dup_ok, "")
+# (the target_duplicate_rejection primary runs once in Group 3 with the
+# A58 duplicate-target sub-case — single execution per plan 4.1)
 
 # FIX-6 (fold): exact target-lineage predicates — malformed id/timestamp
 # formats and contradictory combinations fail closed registry_conflict; a
@@ -7523,7 +7527,13 @@ _we_lineage_case({"rotated_at": "2026-08-23"}, 2, VX11)          # bad fmt
 _we_lineage_case({"rotated_from": "zzz"}, 2, VX12)               # bad id fmt
 _we_lineage_case({"rotated_to": "aaaaaaaaaaaaaaaa"}, 2, VX5)
     # active target carrying a successor pointer
-_r = _we_lineage_case({"rotated_from": "aaaaaaaaaaaaaaaa"}, 0, VX6)
+# r2 MAJ-6: field PRESENCE semantics — null lineage fields and
+# retired:false on an active target are contradictory, not tolerated
+_we_lineage_case({"rotated_to": None}, 2, VX6)
+_we_lineage_case({"rotated_from": None}, 2, VX7)
+_we_lineage_case({"rotated_at": None}, 2, VX8)
+_we_lineage_case({"retired": False}, 2, VX9)
+_r = _we_lineage_case({"rotated_from": "aaaaaaaaaaaaaaaa"}, 0, VX10)
     # valid dangling rotated_from -> tolerated, rotation succeeds
 _reg = json.loads(WEREG.read_text())
 # the old entry keeps its dangling rotated_from (historical context) and
@@ -7533,7 +7543,7 @@ _reg = json.loads(WEREG.read_text())
 _ok = any(e.get("id") == "4444555566667777"
           and e.get("rotated_from") == "aaaaaaaaaaaaaaaa"
           and e.get("retired") is True for e in _reg["literals"]) \
-    and any(e.get("value") == VX6
+    and any(e.get("value") == VX10
             and e.get("rotated_from") == "4444555566667777"
             for e in _reg["literals"])
 if not _ok:
@@ -7556,9 +7566,8 @@ check("battery.rotate.rotate_failure_matrix: A42-A50/A65 all failures "
 check("battery.rotate.rotate_duplicate_and_resurrection_rejection: A48/A49 "
       "same-value + registered-value duplicates (incl. retired) rejected",
       _fail_ok, "")
-check("battery.rotate.rotate_honeytoken_rejection: A44 honeytoken target "
-      "rejected; canary never a rotation subject",
-      _fail_ok, "")
+# (the honeytoken_rejection primary runs once in Group 3 with the A59
+# view-exclusion sub-case — single execution per plan 4.1)
 
 # A66 parser matrix: accepted forms proceed to value validation; rejected
 # forms exit 2 without mutation or disclosure.
@@ -7667,13 +7676,12 @@ check("battery.rotate.rotate_json_failure: A65 JSON-mode failure — no "
 # that invocation's argv (stdin-only transport). Legacy `literals add`
 # and the deliberate positional-value rejection case are out of scope —
 # they carry values in argv by design (add) or as the rejected form.
-_argv_leak = [v for _l, argv, _rc, _o, _e, _stdin in WECAP
+_argv_leak = [v for _l, argv, _rc, _o, _e, _stdin, _env in WECAP
               if _l.startswith("literals rotate") and _stdin
               for v in WEVALUES
               if v in str(_stdin) and any(v in str(a) for a in argv)]
-check("battery.rotate.rotate_value_never_argv: S13 replacement value never "
-      "enters argv (stdin-only transport)",
-      _argv_leak == [], f"argv-leaks={_argv_leak[:3]}")
+# (value_never_argv primary runs once after the FIX-12 live-capture
+# sub-case — single execution per plan 4.1)
 # FIX-12 (fold): LIVE argv/process-list capture — while the child is
 # ALIVE, /proc/<pid>/cmdline and the process list must never contain the
 # fresh replacement value (captured mid-flight, not only after exit).
@@ -7711,9 +7719,11 @@ finally:
     if _proc.poll() is None:
         _proc.kill()
         _proc.wait()
-check("battery.rotate.rotate_value_never_argv: FIX-12 live /proc/<pid>/"
+check("battery.rotate.rotate_value_never_argv: S13 replacement value never "
+      "enters argv (stdin-only transport); FIX-12 live /proc/<pid>/"
       "cmdline + process-list captures never contain the fresh value",
-      _proc_ok, "")
+      _argv_leak == [] and _proc_ok,
+      f"argv-leaks={_argv_leak[:3]} proc-ok={_proc_ok}")
 
 
 # ── Group 3: rotate-candidates view checks (A54-A60, A62-A63) ─────────
@@ -7782,10 +7792,11 @@ _scope_ok = _scope_ok \
     and _row_ret.get("retired") is True \
     and _row_ret.get("type") is None and _row_ret.get("count") == 0 \
     and _row_ret.get("detected") is False
-check("battery.rotate.rotate_candidates_truth_table: A54/A55/A56/A57/A59 "
-      "row scope — idle w/o type, review, env-KNOWN, family aggregation, "
-      "key-name/already-masked excluded",
-      _scope_ok, f"rows={_d.get('rows')}")
+check("battery.rotate.rotate_candidates_scope: A33 registered detected "
+      "row (rotate-now, literal, value_id, detector type, masked) + "
+      "A54-A59 row scope (idle w/o type, review, env-KNOWN, family "
+      "aggregation, key-name/already-masked excluded)",
+      _rc1 and _scope_ok, f"rows={_d.get('rows')}")
 # A60/A57: deterministic ordering (rank, count desc, family, mask, id, sha)
 _ord = [x.get("priority") for x in _d.get("rows", [])]
 _rank = {"critical": 0, "rotate-now": 1, "review": 2, "idle": 3}
@@ -7806,9 +7817,8 @@ _ord_ok = _ord_ok and _rr.returncode == 2 and _dd.get("status") == "error" \
     and _dd.get("error_class") == "usage" and _dd.get("rows") == [] \
     and _dd.get("count") == 0 and _dd.get("actionable") == 0 \
     and _rr.stderr == "" and _dd.get("schema") == "info-guard/rotate/v1"
-check("battery.rotate.rotate_candidates_ordering: A57/A60 deterministic "
-      "ordering + repeated --json usage error with JSON envelope",
-      _ord_ok, f"order={_ord}")
+# (ordering primary check runs once after the FIX-8 sub-cases below —
+# single execution per plan 4.1)
 # FIX-8 (view): an exact `--json` ANYWHERE in raw argv selects the JSON
 # error envelope — including after the `--` marker, where the token is
 # positional data and the invocation is invalid.
@@ -7829,9 +7839,11 @@ _dd = json.loads(_rr.stdout) if _rr.stdout else {}
 _ord_ok = _ord_ok and _rr.returncode == 2 \
     and _dd.get("status") == "error" and _dd.get("error_class") == "usage" \
     and _rr.stderr == ""
-check("battery.rotate.rotate_candidates_ordering: FIX-8 exact --json "
-      "anywhere in argv (incl. after ---) selects the JSON envelope",
-      _ord_ok, f"last={_rr.stdout!r}")
+check("battery.rotate.rotate_candidates_ordering: A57/A60 deterministic "
+      "ordering + repeated --json usage error with JSON envelope; FIX-8 "
+      "exact --json anywhere in argv (incl. after ---) selects the JSON "
+      "envelope",
+      _ord_ok, f"order={_ord} last={_rr.stdout!r}")
 # A60/A54: idle-only view -> clean, exit 0; schema/count invariants
 we_reg([{"value": VC7, "id": "cccc333344445555"}])
 we_wipe()
@@ -7850,10 +7862,11 @@ _clean_ok = _clean_ok and _r.returncode == 0 and _r.stdout != "" \
 # A62: no baseline -> first_seen/last_seen omitted, never null
 _clean_ok = _clean_ok and "first_seen" not in _rowidle \
     and "last_seen" not in _rowidle
-check("battery.rotate.rotate_candidates_clean_exit_invariants: "
+check("battery.rotate.rotate_candidates_schema_and_count_invariants: "
+      "A33 text mode — fixed columns, masked only, ids on rows; "
       "A54/A60/A62 idle-only clean exit 0; count/actionable; no-baseline "
       "omission",
-      _clean_ok, f"rows={_d.get('rows')}")
+      _rc1b and _clean_ok, f"out={_r2.stdout!r} rows={_d.get('rows')}")
 
 # A58: dedup — same value across files is one row; same-state dup entries
 # keep first-wins identity; active+retired dup fails closed.
@@ -7901,10 +7914,12 @@ check("battery.rotate.rotate_candidates_registry_conflict_fail_closed: "
       "A58 active+retired duplicate fails closed registry_conflict, no "
       "partial rows, no mutation, both modes",
       _conf_ok, "")
-check("battery.rotate.rotate_candidates_target_duplicate_rejection: A49/"
-      "A58 duplicate target value rejected, registry unchanged, view "
-      "readable after",
-      _dedup_ok, "")
+check("battery.rotate.rotate_candidates_target_duplicate_rejection: FIX-5 "
+      "unrelated duplicate ids do not block rotation; duplicate TARGET id "
+      "matches fail closed registry_conflict, no mutation; A49/A58 "
+      "duplicate target value rejected, registry unchanged, view readable "
+      "after",
+      _dup_ok and _dedup_ok, "")
 # honeytoken + ordinary same-value pair: NO conflict; ordinary row only.
 VH_dup = _rtfrag("hdup")
 WEVALUES.append(VH_dup)
@@ -7924,10 +7939,11 @@ we_reg([{"value": VH_dup, "id": "abababababababab", "kind": "honeytoken"}])
 _r = we_run("rotate-candidates", "--json")
 _d = json.loads(_r.stdout) if _r.stdout else {}
 _ht_ok = _ht_ok and _d.get("count") == 0 and _d.get("status") == "clean"
-check("battery.rotate.rotate_honeytoken_rejection: A59 honeytoken/ordinary "
+check("battery.rotate.rotate_honeytoken_rejection: A44 honeytoken target "
+      "rejected (canary never a rotation subject); A59 honeytoken/ordinary "
       "same-value pair — no conflict, ordinary row only; canary-only "
       "registry yields no rows",
-      _ht_ok, f"rows={_d.get('rows')}")
+      _fail_ok and _ht_ok, f"rows={_d.get('rows')}")
 
 # A52: id-less legacy entry -> registry_unavailable (both modes), and the
 # view never backfills (bytes untouched).
@@ -7942,9 +7958,7 @@ _r = we_run("rotate-candidates")
 _idless_ok = _idless_ok and _r.returncode == 2 and _r.stdout == "" \
     and _r.stderr == "error: registry_unavailable\n" \
     and WEREG.read_bytes() == _pre
-check("battery.rotate.rotate_candidates_fail_closed_exits: A52 id-less "
-      "entry fails closed registry_unavailable, never backfilled",
-      _idless_ok, "")
+# (the fail_closed_exits primary runs once after the FIX-10 sub-case)
 
 # S12: view is byte/mtime/ctime-stable across the complete file set.
 we_reg([{"value": VC7, "id": "cccc333344445555"}])
@@ -7996,6 +8010,11 @@ _BAD_BASELINES = [
     ("row-last-seen-bad",
      {"values": [{"value_sha256": "a" * 64,
                   "last_seen": "yesterday"}]}),
+    ("row-bad-hash-format",               # r2 MAJ-3: not SHA-256 hex
+     {"values": [{"value_sha256": "xyz"}]}),
+    ("row-dup-hash",                      # r2 MAJ-3: duplicate join key
+     {"values": [{"value_sha256": "a" * 64},
+                 {"value_sha256": "a" * 64}]}),
 ]
 for _bl, _bbody in _BAD_BASELINES:
     (WEH / "state/info-guard/watch-baseline.json").write_text(
@@ -8018,10 +8037,8 @@ _r = we_run("rotate-candidates", "--json")
 _d = json.loads(_r.stdout) if _r.stdout else {}
 _bu_ok = _bu_ok and _r.returncode in (0, 1) \
     and _d.get("error_class") is None
-check("battery.rotate.rotate_candidates_baseline_unavailable: A63 malformed "
-      "baseline (JSON + every malformed-row shape) fails closed "
-      "baseline_unavailable in both modes; valid rows join normally",
-      _bu_ok, "")
+# (the A63 baseline sub-case merges into the fail_closed_exits primary
+# that runs after the FIX-10 sub-case — single execution per plan 4.1)
 (WEH / "state/info-guard/watch-baseline.json").unlink()
 
 # FIX-10 (fold): _read_text_noatime falls back ONLY on EPERM/EINVAL/
@@ -8073,10 +8090,13 @@ for _eno in (errno.EACCES, errno.EIO):
     _dd = json.loads(_bo.getvalue()) if _bo.getvalue() else {}
     _noatime_ok = _noatime_ok and _rc == 2 \
         and _dd.get("error_class") == "baseline_unavailable" and _st[0]
-check("battery.rotate.rotate_candidates_fail_closed_exits: FIX-10 "
-      "noatime-open fallback restricted to EPERM/EINVAL/ENOTSUP; "
+check("battery.rotate.rotate_candidates_fail_closed_exits: A52 id-less "
+      "entry fails closed registry_unavailable, never backfilled; A63 "
+      "malformed baseline (JSON + every malformed-row shape) fails closed "
+      "baseline_unavailable in both modes, valid rows join normally; "
+      "FIX-10 noatime-open fallback restricted to EPERM/EINVAL/ENOTSUP; "
       "unrelated errnos propagate fail-closed baseline_unavailable",
-      _noatime_ok, "")
+      _idless_ok and _bu_ok and _noatime_ok, "")
 
 # A67: registry failure matrix (missing / unreadable / malformed /
 # unsupported / non-list) in both modes.
@@ -8264,15 +8284,13 @@ wem._rotate_serialize = _orig_ser
 _ser_ok = _ser_ok and _rce == 2 and _bo.getvalue() == "" \
     and _be.getvalue() == "error: internal_error\n"
 _we_sweep(_bo.getvalue(), _be.getvalue())
-check("battery.rotate.rotate_serialization_failure: A69 normal-response "
-      "and error-envelope serialization failures emit the non-recursive "
-      "value-free fallback",
-      _ser_ok, f"normal={_bo.getvalue()!r} env={_be.getvalue()!r}")
+# (serialization_failure primary runs once after the candidate sub-case)
 
 # A69: candidate serialization failure — registry unchanged, writer never
 # invoked (no success output, no temp artifact).
 we_reg([{"value": VC7, "id": "cccc333344445555"}])
 _pre = WEREG.read_bytes()
+_entries_pre = _we_state_entries()
 _orig_ser = wem._rotate_serialize
 wem._rotate_serialize = _boom_ser
 _bo = io.StringIO(); _be = io.StringIO(); _rc = 0
@@ -8284,21 +8302,25 @@ with contextlib.redirect_stdout(_bo), contextlib.redirect_stderr(_be):
     finally:
         sys.stdin = _old_stdin
 wem._rotate_serialize = _orig_ser
-_temps = [p.name for p in (WEH / "state/info-guard").glob(".redact-*")]
+_entries_cs = _we_state_entries()
 _cs_ok = _rc == 2 and _bo.getvalue() == "" \
     and _be.getvalue() == "error: internal_error\n" \
-    and WEREG.read_bytes() == _pre and _temps == []
-_we_sweep(_bo.getvalue(), _be.getvalue(), "\n".join(_temps))
-check("battery.rotate.rotate_candidates_serialization_failure: A69 "
-      "candidate serialization failure — exit 2, registry unchanged, no "
-      "writer invocation, no temp artifact",
-      _cs_ok, f"temps={_temps}")
+    and WEREG.read_bytes() == _pre and _entries_cs == _entries_pre
+_we_sweep(_bo.getvalue(), _be.getvalue(),
+          "\n".join(sorted(_entries_cs)))
+check("battery.rotate.rotate_serialization_failure: A69 normal-response "
+      "and error-envelope serialization failures emit the non-recursive "
+      "value-free fallback; candidate serialization failure — exit 2, "
+      "registry unchanged, no writer invocation, no temp artifact",
+      _ser_ok and _cs_ok, f"normal={_bo.getvalue()!r} env={_be.getvalue()!r} "
+                          f"temps={_temps}")
 
 # A69: canonical writer stage failures (temp-write, fsync, pre-replacement
 # os.replace) — registry unchanged, no success output, no orphan temps.
 def _we_writer_fault(patch, restore):
     we_reg([{"value": VC7, "id": "cccc333344445555"}])
     _pre = WEREG.read_bytes()
+    _entries_pre = _we_state_entries()
     patch()
     _bo = io.StringIO(); _be = io.StringIO(); _rc = 0
     try:
@@ -8312,11 +8334,13 @@ def _we_writer_fault(patch, restore):
                 sys.stdin = _old_stdin
     finally:
         restore()
-    _temps = [p.name for p in (WEH / "state/info-guard").glob(".redact-*")]
-    _we_sweep(_bo.getvalue(), _be.getvalue(), "\n".join(_temps))
+    _entries_post = _we_state_entries()
+    _we_sweep(_bo.getvalue(), _be.getvalue(),
+              "\n".join(sorted(_entries_post)))
     return (_rc == 2 and _bo.getvalue() == ""
             and _be.getvalue() == "error: internal_error\n"
-            and WEREG.read_bytes() == _pre and _temps == [])
+            and WEREG.read_bytes() == _pre
+            and _entries_post == _entries_pre)
 _real_fsync = os.fsync
 _real_replace = os.replace
 def _boom_fsync(fd):
@@ -8332,39 +8356,23 @@ _wf_ok = _wf_ok and _we_writer_fault(
 # temp-file write failure via read-only state dir (subprocess-level)
 we_reg([{"value": VC7, "id": "cccc333344445555"}])
 _pre = WEREG.read_bytes()
+_entries_pre = _we_state_entries()
 os.chmod(WEH / "state/info-guard", 0o555)
 _r = we_run("literals", "rotate", "cccc333344445555", stdin=VC8 + "\n")
 os.chmod(WEH / "state/info-guard", 0o755)
-_temps = [p.name for p in (WEH / "state/info-guard").glob(".redact-*")]
+_entries_post = _we_state_entries()
 _wf_ok = _wf_ok and _r.returncode == 2 and _r.stdout == "" \
     and _r.stderr == "error: internal_error\n" \
-    and WEREG.read_bytes() == _pre and _temps == []
-# completed-replacement case: os.replace succeeds, then raises — the
-# operation is COMMITTED; bytes must NOT be asserted unchanged.
-we_reg([{"value": VC7, "id": "cccc333344445555"}])
-def _late_raise(a, b):
-    _real_replace(a, b)
-    raise OSError("post-commit injected")
-os.replace = _late_raise
-_bo = io.StringIO(); _be = io.StringIO(); _rc = 0
-try:
-    with contextlib.redirect_stdout(_bo), contextlib.redirect_stderr(_be):
-        _old_stdin = sys.stdin
-        sys.stdin = io.TextIOWrapper(io.BytesIO((VC8 + "\n").encode()))
-        try:
-            _rc = wem.cmd_literals(["rotate", "cccc333344445555"])
-        finally:
-            sys.stdin = _old_stdin
-finally:
-    os.replace = _real_replace
-_regc = json.loads(WEREG.read_text())
-_committed = any(e.get("value") == VC8 for e in _regc["literals"]) \
-    and any(e.get("value") == VC7 and e.get("retired") is True
-            for e in _regc["literals"])
-_wf_ok = _wf_ok and _rc == 2 and _committed  # committed, not byte-preserved
+    and WEREG.read_bytes() == _pre and _entries_post == _entries_pre
+# Plan step 55 (build-diff r2 fold): the atomic-replacement fault point is
+# an injection that raises INSIDE os.replace — replacement either
+# completed (committed, success) or did not (old bytes, exit 2). A
+# post-completion synthetic raise is NOT a sanctioned fault and is not
+# classified as a failed rotation; the committed-success semantics are
+# asserted by the success paths (identity_lifecycle_round_trip et al.).
 check("battery.rotate.rotate_canonical_write_failure: A69 temp-write, "
       "fsync, pre-replacement replace failures — exit 2, unchanged bytes, "
-      "no orphan temps; completed replacement is committed",
+      "no orphan temps; completed replacement is committed (success paths)",
       _wf_ok, "")
 
 # ── Group 4: watch additive checks (A61, A62, A71, A72, A73) ──────────
@@ -8434,10 +8442,8 @@ _ret_ok = _pv_ret.get("retired") is True \
 # second run (unchanged) -> 0; ladder intact after rotation
 _r = we_run("watch", "--json")
 _ret_ok = _ret_ok and _r.returncode == (0 if WE_GITLEAKS else 2)
-check("battery.rotate.retired_watch_field_additive: A71 retired protected "
-      "row carries additive retired:true; active rows absent; watch exits "
-      "unchanged",
-      _ret_ok, f"pv={_pv}")
+# (the retired_watch_field_additive primary runs once after the FIX-16
+# call-site sub-case below — single execution per plan 4.1)
 
 # watch_exit_ladder_unchanged (plan 4.1 #25, build-diff fold FIX-11): a
 # rotated registry with a retired detected value keeps the watch exit
@@ -8508,24 +8514,26 @@ for _m in re.finditer(r"_protected_value_matches\(", _ig_src):
     _tail = _ig_src[_pos:_pos + 220]
     _pv_sites.append("sha_retired=" in _tail)
 _pv_ok = _def_done and len(_pv_sites) >= 2 and all(_pv_sites)
-check("battery.rotate.retired_watch_field_additive: FIX-16 every "
-      "_protected_value_matches call site passes sha_retired= explicitly",
-      _pv_ok, f"sites={len(_pv_sites)} ok={_pv_sites}")
+check("battery.rotate.retired_watch_field_additive: A71 retired protected "
+      "row carries additive retired:true; active rows absent; watch exits "
+      "unchanged; FIX-16 every _protected_value_matches call site passes "
+      "sha_retired= explicitly",
+      _ret_ok and _pv_ok, f"pv={_pv} sites={len(_pv_sites)} ok={_pv_sites}")
 
 # ── Group 5: security + driver + version ──────────────────────────────
 we_reset()
 # S14: no synthetic value on ANY captured output surface — every WECAP
-# stdout/stderr, every in-process redirected capture, exception text,
-# diagnostics, and atomic-writer temporary names (build-diff fold FIX-12;
-# the final-state directory-entry names are swept before the ledger).
-_leak = [v for _l, _argv, _rc, o, e, _stdin in WECAP
-         for v in WEVALUES if v in (o + e)]
+# stdout/stderr AND subprocess environment metadata, every in-process
+# redirected capture, exception text, diagnostics, and atomic-writer
+# temporary names (build-diff fold FIX-12/r2 MAJ-9; the final-state
+# directory-entry names are swept before the ledger).
+_leak = [v for _l, _argv, _rc, o, e, _stdin, _env in WECAP
+         for v in WEVALUES if v in (o + e)
+         or any(v in str(x) for x in _env.values())]
 _leak += [v for v in WEVALUES
           for _s in WE_SWEEP if v in _s]
-check("battery.rotate.rotate_value_leakage_scan: S14 no raw synthetic "
-      "value on any stdout/stderr/in-process/diagnostic/temp-name "
-      "surface across the whole battery",
-      _leak == [], f"leaks={_leak[:3]}")
+# (the leakage_scan primary runs once after the final-state sub-case —
+# single execution per plan 4.1)
 
 # A70: text TSV escaping — control-bearing legacy value through masked
 # rendering; sentinel '-' columns; unit rules for _rotate_escape and the
@@ -8569,7 +8577,9 @@ _s15 = "_scan_dir_files(" in _rv_src \
     and "_gitleaks_scan" not in _rv_src and "_collect_hits(" not in _rv_src \
     and "re.compile" not in _rv_src \
     and "subprocess" not in inspect.getsource(wem._rotate_scan) \
-    and _rv_src.count("for p in sorted(") == 0
+    and _rv_src.count("for p in sorted(") == 0 \
+    and list(wem._ROTATE_SCAN_DIRS) == list(wem._PREFLIGHT_DIRS)
+    # the view's corpus is EXACTLY the preflight/watch corpus (r2 MAJ-1)
 check("battery.rotate.single_sourced_detector: S15 _collect_hits AND "
       "_rotate_scan call the shared _scan_dir_files helper (shape + env + "
       "canary passes); no second traversal, gitleaks, regex, or "
@@ -8674,6 +8684,12 @@ WEVALUES.append(VDRV)
 _r = we_run("literals", "rotate", _sel["value_id"], stdin=VDRV + "\n")
 _drv_rc = _r.returncode
 _drv_ok = _drv_ok and _r.returncode == 0
+# r2 MAJ-10: prove there is NO separate `matcher build` command — the
+# only regeneration primitive is the product CLI `info-guard build` (the
+# contract phrase "matcher build" names this same operation)
+_r = we_run("matcher", "build")
+_drv_ok = _drv_ok and _r.returncode == 2 \
+    and "unknown command" in _r.stdout
 # the build needs an env source (same fixture requirement as the A36
 # fingerprint block): the deployment's .env carries the rotated value
 (WEH / ".env").write_text(f"BUILD_TOKEN={VDRV}\n")
@@ -8789,27 +8805,31 @@ check("battery.rotate.version_identity_v0_9_1: R2 package constant == CLI "
       _vid9, f"const={wem._PACKAGE_VERSION} cli={_r.stdout.strip()!r}")
 
 # FIX-14 (fold): every security reporting alias resolves to an executed
-# primary check — the aliases are reporting metadata, never extra runs.
-_alias_missing = [a for a, p in WE_SECURITY_ALIASES.items()
-                  if not any(l.startswith(p) for l in EXECUTED_LABELS)]
-check("battery.security aliases: all ten rotate_* reporting aliases "
-      "resolve to executed primary checks",
-      _alias_missing == [], f"missing={_alias_missing}")
-
+# primary check — the aliases are reporting metadata, never extra runs
+# (runs AFTER the final-state leakage sub-case below so the leakage
+# primary has executed; every primary is present by the ledger).
 # FIX-12: final-state directory-entry names swept for raw values (the
 # rotate view is byte/mtime/ctime and directory-entry stable — S12 — so
 # no entry may carry a raw value).
 _final_state_names = [p.name
                       for p in (WEH / "state/info-guard").rglob("*")]
 _leak2 = [v for v in WEVALUES for _n in _final_state_names if v in _n]
-check("battery.rotate.rotate_value_leakage_scan: FIX-12 final state-dir "
-      "entry names carry no raw synthetic value",
-      _leak2 == [], f"leaks={_leak2[:3]}")
+check("battery.rotate.rotate_value_leakage_scan: S14 no raw synthetic "
+      "value on any stdout/stderr/in-process/diagnostic/temp-name "
+      "surface across the whole battery; FIX-12 final state-dir entry "
+      "names carry no raw synthetic value",
+      _leak == [] and _leak2 == [], f"leaks={_leak[:3]} {_leak2[:3]}")
 
-# FIX-11/21 (fold): the FINAL executed-primary ledger contains the exact
-# 38 stable plan-4.1 identifiers (missing or informal names fail; the
-# honeytoken A44+A59 sub-case split and the four renamed sub-case labels
-# are reported informationally, following the E49 harness convention).
+_alias_missing = [a for a, p in WE_SECURITY_ALIASES.items()
+                  if not any(l.startswith(p) for l in EXECUTED_LABELS)]
+check("battery.security aliases: all ten rotate_* reporting aliases "
+      "resolve to executed primary checks",
+      _alias_missing == [], f"missing={_alias_missing}")
+
+# FIX-11/21 (fold, r2 MAJ-8): the FINAL executed-primary ledger contains
+# the exact 38 stable plan-4.1 identifiers — each executed EXACTLY ONCE,
+# no informal battery.rotate.* labels (every sub-case merged into its
+# primary), no missing primaries.
 _WE_LEDGER = [
     "identity_lifecycle_round_trip", "lineage_chain_no_id_reuse",
     "lineage_survives_later_writes", "rotate_failure_matrix",
@@ -8833,28 +8853,21 @@ _WE_LEDGER = [
     "single_sourced_detector", "masked_only_all_paths",
     "no_network_dependency", "version_identity_v0_9_1",
 ]
-_WE_SUBCASES = {
-    "rotate_candidates_truth_table", "rotate_candidates_clean_exit_invariants",
-    "rotate_candidates_baseline_unavailable",
-    "rotate_candidates_serialization_failure",
-}
 _missing_we = [n for n in _WE_LEDGER
                if not any(l.startswith("battery.rotate." + n)
                           for l in EXECUTED_LABELS)]
 _informal_we = [l for l in EXECUTED_LABELS
                 if l.startswith("battery.rotate.")
                 and not any(l.startswith("battery.rotate." + n)
-                            for n in _WE_LEDGER)
-                and not any(l.startswith("battery.rotate." + n)
-                            for n in _WE_SUBCASES)]
+                            for n in _WE_LEDGER)]
 _multi_we = [n for n in _WE_LEDGER
              if sum(1 for l in EXECUTED_LABELS
                     if l.startswith("battery.rotate." + n)) > 1]
-check("battery ledger: all 38 Wave E rotate primaries executed (missing/"
-      "informal fail; honeytoken + renamed sub-case splits informational)",
-      _missing_we == [] and _informal_we == [],
-      f"missing={_missing_we}; informal={_informal_we}; "
-      f"multi (sub-case splits)={_multi_we}")
+check("battery ledger: all 38 Wave E rotate primaries executed exactly "
+      "once each (missing/informal/multi fail — sub-cases merged into "
+      "their primaries)",
+      _missing_we == [] and _informal_we == [] and _multi_we == [],
+      f"missing={_missing_we}; informal={_informal_we}; multi={_multi_we}")
 
 # Battery hygiene (evidence-gate fold, run-15 EDQUOT lesson): remove the
 # throwaway fixtures — repeated runs must never accumulate toward the

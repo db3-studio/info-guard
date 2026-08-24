@@ -4791,6 +4791,8 @@ _ROTATE_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 # Exact rotate/view timestamp format (contract §3.2.3 / fold FIX-3/FIX-6):
 # ISO 8601 UTC, second precision, Z suffix, no fractional seconds.
 _ROTATE_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+# Baseline join-key format (FIX-3, r2 MAJ-3): a SHA-256 hex digest.
+_ROTATE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _rotate_ts():
@@ -4998,14 +5000,20 @@ def cmd_rotate_candidates(args):
                                                        list):
             return _rotate_view_error("baseline_unavailable", json_mode)
         # FIX-3 (fold): every present baseline row must be well-formed
-        # (dict, non-empty str value_sha256, timestamps in the exact UTC
-        # format when present) — a malformed row fails closed as
-        # baseline_unavailable instead of being silently skipped (A63).
+        # (dict, non-empty str value_sha256 in exact SHA-256 hex format,
+        # timestamps in the exact UTC format when present, unique hash —
+        # duplicate or malformed rows fail closed as baseline_unavailable
+        # instead of being silently skipped (A63, r2 MAJ-3)).
+        _seen_hashes = set()
         for brow in bdoc["values"]:
             if (not isinstance(brow, dict)
                     or not isinstance(brow.get("value_sha256"), str)
-                    or not brow.get("value_sha256")):
+                    or not _ROTATE_SHA256_RE.fullmatch(
+                        brow.get("value_sha256", ""))):
                 return _rotate_view_error("baseline_unavailable", json_mode)
+            if brow["value_sha256"] in _seen_hashes:
+                return _rotate_view_error("baseline_unavailable", json_mode)
+            _seen_hashes.add(brow["value_sha256"])
             for _tsk in ("first_seen", "last_seen"):
                 if _tsk in brow and not (
                         isinstance(brow[_tsk], str)
@@ -5261,9 +5269,13 @@ def _literals_rotate(args):
     # formats, fails closed as registry_conflict. A dangling rotated_from
     # (valid id format, severed chain) is tolerated and documented;
     # unrelated entries are never repaired.
-    if "retired" in target and not isinstance(target["retired"], bool):
+    if "retired" in target and target.get("retired") is not True:
+        # active target carrying retirement metadata (retired:false,
+        # retired:null, or a non-bool) is contradictory (FIX-6, r2)
         return _rotate_fail("registry_conflict")
-    if target.get("rotated_to") is not None:
+    if "rotated_to" in target:
+        # field PRESENCE (incl. null) on the target is a successor
+        # pointer on an active entry -> conflict (FIX-6, r2)
         return _rotate_fail("registry_conflict")
     if "retired_at" in target:
         # retirement metadata requires retired: true + exact UTC format
@@ -5272,15 +5284,18 @@ def _literals_rotate(args):
         if not (isinstance(target["retired_at"], str)
                 and _ROTATE_TS_RE.fullmatch(target["retired_at"])):
             return _rotate_fail("registry_conflict")
-    if "rotated_at" in target and target["rotated_at"] is not None:
+    if "rotated_at" in target:
+        # present rotated_at must be an exact UTC timestamp (null or any
+        # other non-string fails closed — FIX-6, r2)
         if not (isinstance(target["rotated_at"], str)
                 and _ROTATE_TS_RE.fullmatch(target["rotated_at"])):
             return _rotate_fail("registry_conflict")
-    for _lf in ("rotated_from", "rotated_to"):
-        if _lf in target and target[_lf] is not None:
-            if not (isinstance(target[_lf], str)
-                    and _ROTATE_ID_RE.fullmatch(target[_lf])):
-                return _rotate_fail("registry_conflict")
+    if "rotated_from" in target:
+        # present rotated_from must be a valid persisted id format; a
+        # valid dangling reference (severed chain) remains tolerated
+        if not (isinstance(target["rotated_from"], str)
+                and _ROTATE_ID_RE.fullmatch(target["rotated_from"])):
+            return _rotate_fail("registry_conflict")
     old_value = target.get("value")
     if not isinstance(old_value, str) or not old_value:
         return _rotate_fail("registry_conflict")
