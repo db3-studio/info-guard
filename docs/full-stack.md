@@ -67,6 +67,16 @@ rotation. The old hashed-registry design this layer used to describe is
 superseded by it (a hashed mirror is at most an optional hardening note —
 see below).
 
+| Surface | Role |
+|---|---|
+| Registry (`custom_literals.json`, chmod 600) | Identity source: exact values, opaque `value_id` join keys, kinds, lineage — CLI-managed, never hand-edited |
+| `literals add VALUE... [--mask STYLE] [--file FILE] [--json]` | Register values (bulk via `--file`, per-value mask style via `--mask`, machine-readable output via `--json`); `--from SOURCE:KEY` enrolls a discovered source value; `--kind honeytoken` plants a canary |
+| `literals list [--json]` | Inspect the registry |
+| `literals remove ID` | Remove an entry (severs the lineage chain) |
+| `literals rotate VALUE_ID [--json]` | Apply a rotation — replacement piped via stdin only, never argv |
+| `info-guard build` | Regenerate `redact_patterns.json` from `.env` sources + the registry |
+| `rotate-candidates` | Derived priority tiers (`critical > rotate-now > review > idle`) at read time — never stored |
+
 **State file** `<state>/custom_literals.json` (chmod 600) — the product's
 registry, CLI-managed (never hand-edited):
 
@@ -97,15 +107,6 @@ identity lifecycle, never string replacement.
 
 Clues for the builder:
 
-| Surface | Role |
-|---|---|
-| Registry (`custom_literals.json`, chmod 600) | Identity source: exact values, opaque `value_id` join keys, kinds, lineage — CLI-managed, never hand-edited |
-| `literals add VALUE... [--mask STYLE] [--file FILE] [--json]` | Register values (bulk via `--file`, per-value mask style via `--mask`, machine-readable output via `--json`); `--from SOURCE:KEY` enrolls a discovered source value; `--kind honeytoken` plants a canary |
-| `literals list [--json]` | Inspect the registry |
-| `literals remove ID` | Remove an entry (severs the lineage chain) |
-| `literals rotate VALUE_ID [--json]` | Apply a rotation — replacement piped via stdin only, never argv |
-| `info-guard build` | Regenerate `redact_patterns.json` from `.env` sources + the registry |
-| `rotate-candidates` | Derived priority tiers (`critical > rotate-now > review > idle`) at read time — never stored |
 - **Sources**: `.env` files (the default `build` input), `literals add`
   (explicit registration), `discover` + `literals add --from` (at-source
   enrollment), honeytokens. Nightly `build` re-runs reconcile reality.
