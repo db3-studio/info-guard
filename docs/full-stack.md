@@ -32,6 +32,15 @@ environment, the way it was built and proven in the reference deployment.
 - *Rotate*: confirmed exposure triggers rotation — vault first, then every
   consumer, then verify old-fails/new-passes.
 
+**The instruction layer.** A mechanism is only used if the deployment's
+agent-facing instructions say so — an agent that does not know
+`info-guard env` exists will `cat` the `.env`. Encode each layer's
+guardrails in the harness instruction files (`AGENTS.md` / `CLAUDE.md` /
+skills / cron prompts), not just in the CLI help; the per-layer clues below
+call out which surfaces need them. The proven pattern: a transitional
+no-dump list whose entries leave once discovery + redaction prove coverage,
+with "prefer masked viewers" as the standing default.
+
 The layers below are each proven, independent, and incremental: build them in
 order, and each one pays for itself.
 
@@ -59,6 +68,13 @@ substring), **fail-safe** (a missing or broken pattern file is a no-op —
 built-in redaction keeps running, and a broken file keeps the last-good set
 until repaired), and **per-instance** (paths resolve under `$HERMES_HOME`, so
 profiles and relocated installs each get their own set automatically).
+
+Clues for the builder:
+
+- **Agent guardrail**: an agent reads env/config/state through the masked
+  surfaces (`info-guard env`, `view`, `pipe`) — never a raw dump (the
+  no-dump doctrine). The rule has to live in the deployment's agent
+  instructions, not only in the CLI help, or the agent's default is `cat`.
 
 ## Layer 2 — Secret inventory (register)
 
@@ -120,6 +136,9 @@ Clues for the builder:
 - **Key-shape warning**: keys not matching the built-in keyword families
   (KEY/PASS/PW/TOKEN/SECRET...) rely solely on exact-value matching — the
   inventory warns on them so they get registered deliberately.
+- **Agent guardrail**: the registry is CLI-managed — agents register via
+  `literals add` / `setup`, never by hand-editing `custom_literals.json`
+  (hand-editing is unsupported).
 
 **Optional hardening (superseded design, kept as a note):** the pre-registry
 design stored a peppered sha256 of each value (`sha256(pepper + value)`) in a
@@ -166,6 +185,11 @@ Clues for the builder:
   (`password_hash =`, `set_password`), host/URL/username values, non-secret
   keys (the same exclusion list the matcher uses). Exclusions are
   *exact-hash or explicit-rule* based, never substring guessing.
+- **Agent guardrail**: agents run the product scanners (`preflight` /
+  `watch` / `discover`) rather than ad-hoc greps over transcripts —
+  pattern-only scanning is a false-positive factory (code identifiers such
+  as `password_hash =` match every time); detection is exact-value by
+  doctrine.
 
 ## Layer 4 — Response (rotate)
 
@@ -197,6 +221,9 @@ Clues for the builder:
   view and pipe the replacement; they never read or write the registry.
 - **Drill**: a quarterly scheduled full rotation proves the machinery works
   before an incident needs it.
+- **Agent guardrail**: a replacement value reaches `literals rotate` via
+  stdin only — never as a CLI argument; and never run a secret-touching
+  script under `bash -x` / `set -x` (xtrace expands values into the trace).
 
 ## Layer 5 — Watchdogs & hygiene (operate)
 
@@ -213,6 +240,12 @@ Small scheduled checks that catch drift before it becomes a leak:
 The product also ships its own update path: `info-guard update [--check]
 [--json] [--rollback]` — `--check` probes for a newer release, `--rollback`
 reverses an update.
+
+Clues for the builder:
+
+- **Agent guardrail**: `update` runs BEFORE `hermes update` — Info Guard
+  first, never after (an overwritten patch silently stops masking); `--heal`
+  is explicit-only, never automatic.
 
 ## Known failure modes (learned the hard way)
 
