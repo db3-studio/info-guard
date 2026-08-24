@@ -4778,9 +4778,11 @@ def _read_text_noatime(path: Path) -> str:
 def _rotate_escape(field) -> str:
     """Deterministic TSV text-field escaping (contract §3.1.8): backslash
     -> \\\\, tab -> \\t, LF -> \\n, CR -> \\r, other control characters ->
-    uppercase \\xNN, literal `-` -> \\-. Applied to EVERY text field
-    including value_masked (defensive: legacy control-bearing values,
-    A70)."""
+    uppercase \\xNN. Applied to EVERY text field including value_masked
+    (defensive: legacy control-bearing values, A70). The `-` sentinel
+    disambiguation lives in _rotate_tsv_field (only a field whose whole
+    value is the literal `-` renders as `\\-`; embedded dashes like
+    `rotate-now` are untouched, matching the contract's own example)."""
     out = []
     for ch in str(field):
         o = ord(ch)
@@ -4794,11 +4796,20 @@ def _rotate_escape(field) -> str:
             out.append("\\r")
         elif o < 0x20 or 0x7F <= o < 0xA0:
             out.append(f"\\x{o:02X}")
-        elif ch == "-":
-            out.append("\\-")
         else:
             out.append(ch)
     return "".join(out)
+
+
+def _rotate_tsv_field(c) -> str:
+    """One TSV column value: absent optional fields render as the `-`
+    sentinel; a field whose actual value is the literal `-` renders as
+    `\\-`; every other field is escape-processed."""
+    if c is None:
+        return "-"
+    if c == "-":
+        return "\\-"
+    return _rotate_escape(c)
 
 
 def _rotate_serialize(obj) -> str:
@@ -4835,15 +4846,15 @@ def _rotate_fail(error_class):
     return 2
 
 
-def _rotate_scan(dirs, entries):
+def _rotate_scan(dirs, raw_literals):
     """The view's ONE detector pass over the existing scan corpus
     (contract §3.1.2, S15): the shared _scan_lines shape pass
     (KEY-SHAPE/TOKEN-SHAPE) + the existing KNOWN env pass + the existing
     canary pass (HONEYTOKEN). No gitleaks engine, no second detector, no
     deployment-file read, no registry writes (the canary set comes from
-    the already-loaded read-only entries). Returns (cls, rule, rel, line,
-    value, masked, ctx) 7-tuples."""
-    ht_values = [item["value"] for item in entries
+    the already-loaded read-only raw literals). Returns (cls, rule, rel,
+    line, value, masked, ctx) 7-tuples."""
+    ht_values = [item["value"] for item in raw_literals
                  if isinstance(item, dict)
                  and _entry_kind(item) == _HONEYTOKEN_KIND
                  and isinstance(item.get("value"), str)]
@@ -4923,10 +4934,14 @@ def cmd_rotate_candidates(args):
             continue
         if not isinstance(item, dict) or not item.get("id"):
             return _rotate_view_error("registry_unavailable", json_mode)
-    # Non-canary value-to-entry scope (first-wins) + active/retired
-    # duplicate conflict detection (contract §3.1.2, A58).
+    # Non-canary value-to-entry scope built from the RAW literals — the
+    # canonical normalizer collapses same-value duplicates (first-wins),
+    # which would hide both the active/retired conflict and the
+    # honeytoken/ordinary pair (contract §3.1.2, A58). First-wins identity
+    # + active/retired duplicate conflict detection on non-canary entries.
+    raw_literals = doc.get("literals", [])
     value_map, retired_vals, conflict = {}, set(), False
-    for item in entries:
+    for item in raw_literals:
         if not isinstance(item, dict) or _entry_kind(item) == _HONEYTOKEN_KIND:
             continue
         v = item.get("value")
@@ -4965,7 +4980,7 @@ def cmd_rotate_candidates(args):
         if p.is_dir():
             scan_dirs.append(p)
     try:
-        all_hits = _rotate_scan(scan_dirs, entries)
+        all_hits = _rotate_scan(scan_dirs, raw_literals)
     except BaseException:
         return _rotate_view_error("detector_error", json_mode)
     # Closed v0.9.1 type vocabulary (plan 25/66): a non-HONEYTOKEN
@@ -4978,12 +4993,22 @@ def cmd_rotate_candidates(args):
         if cls not in ("KNOWN", "KEY-SHAPE", "TOKEN-SHAPE"):
             return _rotate_view_error("detector_error", json_mode)
     # Aggregate distinct exact values (dedup by value internally; never
-    # mask or public id as the key, A57/A58).
+    # mask or public id as the key, A57/A58). HONEYTOKEN detections are
+    # excluded; a canary-only value (registered honeytoken, no ordinary
+    # entry) never produces a row from its shape hits either (A59 — the
+    # canary is not a rotation surface). A value shared by a honeytoken
+    # and an ordinary entry keeps its ordinary row identity (plan 20.4).
+    ht_set = {item["value"] for item in raw_literals
+              if isinstance(item, dict)
+              and _entry_kind(item) == _HONEYTOKEN_KIND
+              and isinstance(item.get("value"), str)}
     det = {}
     for h in all_hits:
         cls, rule, _rel, _ln, value, _masked, _ctx = h
         if cls == "HONEYTOKEN" or not value:
             continue
+        if value in ht_set and value not in value_map:
+            continue  # canary-only value: excluded from both surfaces
         if cls != "KNOWN" and _value_class(value) != "token-format":
             continue  # key-name-only / already-masked / placeholder (A59)
         e = det.setdefault(value, {"count": 0, "types": set(),
@@ -5102,8 +5127,7 @@ def cmd_rotate_candidates(args):
                 "true" if r.get("retired") else None,
                 r.get("first_seen"), r.get("last_seen")]
         out_lines.append("\t".join(
-            _rotate_escape(c) if c is not None else "-"
-            for c in cols) + "\n")
+            _rotate_tsv_field(c) for c in cols) + "\n")
     sys.stdout.write("".join(out_lines))
     return exit_code
 
