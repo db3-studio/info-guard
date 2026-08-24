@@ -36,6 +36,28 @@ order, and each one pays for itself.
 
 ---
 
+## Layer 1 — Redaction (mask)
+
+The installed layer: the engine patch that masks at every Hermes output
+boundary, driven by the pattern file it reads. This is what makes the value
+immediate — your exact secrets stop appearing in tool output, logs, and
+transcripts the moment it is installed.
+
+| Surface | What it does |
+|---|---|
+| Pattern file (`<state>/redact_patterns.json`, chmod 600) | The compiled set the engine reads at every message boundary (tool output, logs, file reads, transcripts) |
+| `info-guard build` | Generate the pattern file from `.env` sources + the registry |
+| `info-guard pipe` | Mask any stdin stream against the pattern file (fail-closed: no matcher → exit 2, no passthrough) |
+| `info-guard view <surface> <target>` | Masked viewers — systemd unit, docker-env, compose-config, file |
+| `info-guard env [FILE] [--check\|--keys]` | Keys + lengths only (never values); `--check` non-executing grammar validation |
+
+Masking is **display-only** (a read-time transform — it can never modify
+`.env`, vault, or config files), **exact-value or key-form** (never
+substring), **fail-safe** (a missing or broken pattern file is a no-op —
+built-in redaction keeps running, and a broken file keeps the last-good set
+until repaired), and **per-instance** (paths resolve under `$HERMES_HOME`, so
+profiles and relocated installs each get their own set automatically).
+
 ## Layer 2 — Secret inventory (register)
 
 The inventory backbone is the **product's exact-value registry**
@@ -75,18 +97,15 @@ identity lifecycle, never string replacement.
 
 Clues for the builder:
 
-- **Register through the CLI only**: `literals add VALUE... [--mask STYLE]
-  [--file FILE] [--json]` (bulk via `--file`, per-value mask style via
-  `--mask`, machine-readable output via `--json`), `--from SOURCE:KEY` to
-  enroll a discovered source value, `--kind honeytoken` to plant a canary.
-  `literals list [--json]` inspects the registry; `literals remove ID`
-  removes an entry; `literals rotate VALUE_ID [--json]` applies a rotation
-  (replacement piped via stdin only — never argv). The registry is a
-  CLI-managed surface — hand-editing is unsupported; `build` regenerates
-  `redact_patterns.json` from `.env` sources + the registry.
-- **Priority tiers are derived, not stored**: the rotate-candidates view
-  derives `critical > rotate-now > review > idle` from detection + retirement
-  state at read time — no manual tier bookkeeping.
+| Surface | Role |
+|---|---|
+| Registry (`custom_literals.json`, chmod 600) | Identity source: exact values, opaque `value_id` join keys, kinds, lineage — CLI-managed, never hand-edited |
+| `literals add VALUE... [--mask STYLE] [--file FILE] [--json]` | Register values (bulk via `--file`, per-value mask style via `--mask`, machine-readable output via `--json`); `--from SOURCE:KEY` enrolls a discovered source value; `--kind honeytoken` plants a canary |
+| `literals list [--json]` | Inspect the registry |
+| `literals remove ID` | Remove an entry (severs the lineage chain) |
+| `literals rotate VALUE_ID [--json]` | Apply a rotation — replacement piped via stdin only, never argv |
+| `info-guard build` | Regenerate `redact_patterns.json` from `.env` sources + the registry |
+| `rotate-candidates` | Derived priority tiers (`critical > rotate-now > review > idle`) at read time — never stored |
 - **Sources**: `.env` files (the default `build` input), `literals add`
   (explicit registration), `discover` + `literals add --from` (at-source
   enrollment), honeytokens. Nightly `build` re-runs reconcile reality.
@@ -149,11 +168,16 @@ Clues for the builder:
 Rotation is per-credential: one script per credential class, driven by a
 driver with `--full` (all) and targeted modes.
 
+| Mechanism | Role |
+|---|---|
+| Vault (password manager) | Generates + stores new values first; every consumer picks up the new value from the vault — no value ever transits a chat or shell history |
+| Driver script (per credential class) | Consumes the view, pipes replacements, verifies old-fails/new-passes — never reads or writes the registry |
+| `rotate-candidates --json` | Selects what to rotate (read-only view, derived at read time) |
+| `literals rotate VALUE_ID` | Applies the rotation (replacement via stdin only — never argv) |
+| `info-guard build` | Regenerates the pattern file after rotation |
+
 Clues for the builder:
 
-- **Vault-first**: new values are generated and stored in the password
-  manager before anything else changes; every consumer picks up the new
-  value from the vault — no value ever transits a chat or a shell history.
 - **New-value shape**: `key_` + 28 random alphanumerics (≥32 total) —
   self-protecting, because gitleaks' generic rules and token-shape detection
   catch it even if registration is ever missed.
@@ -180,6 +204,11 @@ Small scheduled checks that catch drift before it becomes a leak:
 | Config-audit | on change | New/changed config keys in tracked files (diff-based, with an ignore list for known benign churn) |
 | Nightly refresh | daily | Re-run `info-guard build` + `discover` — the "forgot to register" safety net |
 | Release hygiene | per release | Tag + CHANGELOG entry (Keep a Changelog); related micro-fixes consolidate into the most recent entry — versions stay meaningful for pull-based consumers |
+| Product health (`info-guard check [--heal]`) | on demand / nightly | Engine marker, pattern file, custom literals, gitleaks, patch-state, supported-version floor, masking smoke — `--heal` repairs the engine via install.sh |
+
+The product also ships its own update path: `info-guard update [--check]
+[--json] [--rollback]` — `--check` probes for a newer release, `--rollback`
+reverses an update.
 
 ## Known failure modes (learned the hard way)
 
@@ -205,7 +234,7 @@ when it isn't. Any implementation of this stack should test for them:
 
 ## Building order for a new deployment
 
-1. Install this repo (redaction) — immediate value, zero dependencies.
+1. Install this repo (Layer 1 — redaction) — immediate value, zero dependencies.
 2. Register into Layer 2 (the product registry — `literals add` / `--from`;
    the registry ships with the product, so this is data entry, not build).
 3. Layer 3 detection — schedule `info-guard watch` (`preflight` on demand,
