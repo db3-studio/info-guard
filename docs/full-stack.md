@@ -1,12 +1,13 @@
 # Info Guard — the full stack (roadmap)
 
 This repo ships the **product CLI**: the redaction engine (the patch + the
-matcher), detection (`preflight`, `watch`, `discover`), rotation mechanics
-(`rotate-candidates`, `literals rotate`), the self-sustain commands
-(`check --heal`, `update`), the test battery, and this documentation. That is
-the transferable core — it works with zero other infrastructure, installs in
-minutes, and its value is immediate (your exact secrets stop appearing in
-tool output, logs, and transcripts).
+matcher), the registration CLI (`literals`, `setup`), detection (`preflight`,
+`watch`, `discover`), rotation mechanics (`rotate-candidates`,
+`literals rotate`), the self-sustain commands (`check --heal`, `update`),
+the test battery, and this documentation. That is the transferable core — it
+works with zero other infrastructure, installs in minutes, and its value is
+immediate (your exact secrets stop appearing in tool output, logs, and
+transcripts).
 
 Redaction is one layer of a five-layer lifecycle. The product supplies a
 mechanism for each layer; what this document describes building is the
@@ -47,6 +48,7 @@ transcripts the moment it is installed.
 |---|---|
 | Pattern file (`<state>/redact_patterns.json`, chmod 600) | The compiled set the engine reads at every message boundary (tool output, logs, file reads, transcripts) |
 | `info-guard build` | Generate the pattern file from `.env` sources + the registry |
+| `info-guard status` | Summary of the current pattern file — the built set, counts, and policy at a glance |
 | `info-guard pipe` | Mask any stdin stream against the pattern file (fail-closed: no matcher → exit 2, no passthrough) |
 | `info-guard view <surface> <target>` | Masked viewers — systemd unit, docker-env, compose-config, file |
 | `info-guard env [FILE] [--check\|--keys]` | Keys + lengths only (never values); `--check` non-executing grammar validation |
@@ -70,6 +72,7 @@ see below).
 | Surface | Role |
 |---|---|
 | Registry (`custom_literals.json`, chmod 600) | Identity source: exact values, opaque `value_id` join keys, kinds, lineage — CLI-managed, never hand-edited |
+| `setup [--all]` | Interactive bootstrap — reviews preflight candidates (masked only), registers the confirmed ones as literals, picks `.env` sources, builds the pattern file; `--all` accepts every candidate non-interactively |
 | `literals add VALUE... [--mask STYLE] [--file FILE] [--json]` | Register values (bulk via `--file`, per-value mask style via `--mask`, machine-readable output via `--json`); `--from SOURCE:KEY` enrolls a discovered source value; `--kind honeytoken` plants a canary |
 | `literals list [--json]` | Inspect the registry |
 | `literals remove ID` | Remove an entry (severs the lineage chain) |
@@ -205,7 +208,7 @@ Small scheduled checks that catch drift before it becomes a leak:
 | Config-audit | on change | New/changed config keys in tracked files (diff-based, with an ignore list for known benign churn) |
 | Nightly refresh | daily | Re-run `info-guard build` + `discover` — the "forgot to register" safety net |
 | Release hygiene | per release | Tag + CHANGELOG entry (Keep a Changelog); related micro-fixes consolidate into the most recent entry — versions stay meaningful for pull-based consumers |
-| Product health (`info-guard check [--heal]`) | on demand / nightly | Engine marker, pattern file, custom literals, gitleaks, patch-state, supported-version floor, masking smoke — `--heal` repairs the engine via install.sh |
+| Product health (`info-guard check [--heal] [--battery]`) | on demand / scheduled (`install.sh --cron`) | Engine marker, pattern file, custom literals, gitleaks, patch-state, supported-version floor, masking smoke — `--heal` repairs the engine via install.sh; `--battery` runs the full verification battery |
 
 The product also ships its own update path: `info-guard update [--check]
 [--json] [--rollback]` — `--check` probes for a newer release, `--rollback`
@@ -236,8 +239,9 @@ when it isn't. Any implementation of this stack should test for them:
 ## Building order for a new deployment
 
 1. Install this repo (Layer 1 — redaction) — immediate value, zero dependencies.
-2. Register into Layer 2 (the product registry — `literals add` / `--from`;
-   the registry ships with the product, so this is data entry, not build).
+2. Register into Layer 2 (the product registry — `literals add` / `--from`,
+   or the guided `setup` wizard; the registry ships with the product, so
+   this is data entry, not build).
 3. Layer 3 detection — schedule `info-guard watch` (`preflight` on demand,
    `discover` for at-source sweeps). Needed before rotation is ever triggered.
 4. Layer 4 rotation for the two highest-priority credential classes — drive
