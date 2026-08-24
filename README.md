@@ -1,8 +1,8 @@
 # Info Guard
 
 **Exact-value redaction for Hermes Agent.** Your secrets, masked —
-everywhere Hermes writes output, from a plain-JSON pattern file, with
-zero external tooling.
+everywhere Hermes writes output, from plain-JSON files, with zero
+external tooling.
 
 Hermes Agent already redacts *shapes*: any `KEY=value` whose key is in
 the secret family (`PASS`, `TOKEN`, `SECRET`, `API_KEY`, `PASSWORD`,
