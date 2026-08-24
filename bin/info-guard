@@ -64,13 +64,13 @@ Usage:
                                     --check report-only exit 1 when newer;
                                     --rollback returns to the last verified
                                     release by commit id). Run BEFORE
-                                    `hermes update` (D42 ordering contract).
+                                    `hermes update` (Info Guard first — never after).
   info-guard literals add VALUE...  Register custom literals (ids assigned;
                                     --mask STYLE, --file FILE for bulk,
                                     --json for script capture;
                                     --kind honeytoken plants a canary).
   info-guard literals list         List registered literals (masked only).
-  info-guard literals remove ID    Remove one literal by id (Wave B).
+  info-guard literals remove ID    Remove one literal by id.
   info-guard literals rotate ID    Atomic identity rotation (retire old +
                                     establish new + lineage) — the
                                     replacement value arrives ONLY through
@@ -155,7 +155,7 @@ _SUBCOMMAND_USAGE = {
     "watch": "info-guard watch [DIR ...] [--reset] [--json] [--json-out FILE]   Delta monitor vs the watch baseline (cron-friendly exits)",
     "setup": "info-guard setup [--all]            Interactive bootstrap (registers custom literals, builds patterns)",
     "check": "info-guard check [--heal] [--battery]   Health check / schedulable watchdog (fast smoke by default; --heal repairs the engine; --battery runs the full sandboxed battery)",
-    "update": "info-guard update [--check] [--json] [--rollback]   Update the package from the configured origin (run BEFORE `hermes update` — D42 ordering contract)",
+    "update": "info-guard update [--check] [--json] [--rollback]   Update the package from the configured origin (run BEFORE `hermes update` — Info Guard first, never after)",
     "literals": "info-guard literals add VALUE... [--mask STYLE] [--file FILE] [--json]   Register custom literals (ids assigned)\n"
                 "info-guard literals add --from SOURCE:KEY [--json]   Enroll ONE source value by key (sole enrollment bridge; re-reads live, fails closed)\n"
                 "info-guard literals list [--json]   List registered literals (id + masked value)\n"
@@ -3090,7 +3090,10 @@ _ENGINE_MARKERS = {
 
 # Supported Hermes release range. Bump BOTH when a rebase extends
 # the tested matrix — keep in sync with README, docs/format-spec.md and
-# .github/workflows/ci.yml. Tuples are release-tag date parts
+# .github/workflows/ci.yml; the semver name in each trailing comment is
+# the single source for battery.release.supported_range_single_source
+# (S4, docs wave v0.9.2 — the battery fails on any doc/CI drift).
+# Tuples are release-tag date parts
 # (v2026.8.18 -> (2026, 8, 18)); the .2-style suffixes compare correctly
 # via zero-padding.
 _SUPPORTED_MIN = (2026, 8, 3)     # v0.20.0 (v2026.8.3)

@@ -1151,7 +1151,9 @@ operator-supplied argument, child output, or source path:
 
 ## Version notes
 
-- Requires Hermes Agent **v0.20.0+**. One version-tolerant patch: apply-checked
+- Requires a supported Hermes Agent version — **v0.20.0 through v0.20.5**
+  (v2026.8.3–v2026.8.19; later versions are unsupported until verified).
+  One version-tolerant patch: apply-checked
   and 15/15 test suite against v0.20.0 (2026.8.3), v0.20.1 (2026.8.13),
   v0.20.2 (2026.8.16), v0.20.3 (2026.8.16.2), v0.20.4 (2026.8.18), and
   v0.20.5 (2026.8.19) —

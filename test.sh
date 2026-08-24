@@ -9059,6 +9059,37 @@ check("battery.rotate.version_identity_v0_9_1: R2 package constant == CLI "
       "the checked-out version; no stale release identity",
       _vid9, f"const={wem._PACKAGE_VERSION} cli={_r.stdout.strip()!r}")
 
+# W7/S4 (docs wave v0.9.2): supported-range SINGLE SOURCE — the canonical
+# bounds live in bin/info-guard's _SUPPORTED_MIN/_SUPPORTED_MAX (semver name
+# in each trailing comment); README, docs/format-spec.md and
+# .github/workflows/ci.yml must carry the SAME bounds — drift fails here,
+# never at a release (the v0.8.0 stale-identity lesson, applied to the range).
+_s4_src = (Path(os.getcwd()) / "bin" / "info-guard").read_text()
+_s4_min = re.search(r"_SUPPORTED_MIN = \(\d+, \d+, \d+\)\s+# (v[\d.]+)", _s4_src)
+_s4_max = re.search(r"_SUPPORTED_MAX = \(\d+, \d+, \d+\)\s+# (v[\d.]+)", _s4_src)
+_s4_ok = _s4_min is not None and _s4_max is not None
+if _s4_ok:
+    _s4_docs = {
+        "README.md": (Path(os.getcwd()) / "README.md").read_text(),
+        "docs/format-spec.md": (Path(os.getcwd()) / "docs" / "format-spec.md").read_text(),
+        ".github/workflows/ci.yml": (Path(os.getcwd()) / ".github" / "workflows" / "ci.yml").read_text(),
+    }
+    _s4_next = "v0.20." + str(int(_s4_max.group(1).split(".")[-1]) + 1)
+    _s4_ok = all(_s4_min.group(1) in t and _s4_max.group(1) in t
+                 for t in _s4_docs.values())
+    # the "vX.Y.Z+" overstatement class is banned on the public surface
+    _s4_ok = _s4_ok and "v0.20.0+" not in _s4_docs["README.md"] \
+        and "v0.20.0+" not in _s4_docs["docs/format-spec.md"]
+    # no version beyond the tested max may appear (stale-range class)
+    _s4_ok = _s4_ok and all(_s4_next not in t for t in _s4_docs.values())
+check("battery.release.supported_range_single_source: S4/W7 — the supported "
+      "range is single-sourced from bin/info-guard _SUPPORTED_MIN/_SUPPORTED_MAX "
+      "trailing comments; README, format-spec and ci.yml carry the same bounds "
+      "(no v0.20.0+ overstatement, no version beyond the tested max)",
+      _s4_ok,
+      f"min={_s4_min.group(1) if _s4_min else None} "
+      f"max={_s4_max.group(1) if _s4_max else None}")
+
 # FIX-14 (fold): every security reporting alias resolves to an executed
 # primary check — the aliases are reporting metadata, never extra runs
 # (runs AFTER the final-state leakage sub-case below so the leakage
