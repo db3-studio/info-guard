@@ -1,5 +1,9 @@
 # Rotation schema — `info-guard/rotate/v1`
 
+Applies to Info Guard **v0.9.2** (rotation contract unchanged since
+v0.9.1 — the vocabulary and enums below are locked to the v0.9.1 release
+that introduced them).
+
 This document defines the machine-readable rotation surface of Info Guard:
 the read-only `rotate-candidates` view and the `literals rotate` registry
 transaction. Rotation is an identity lifecycle — never string replacement:

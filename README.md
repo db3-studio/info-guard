@@ -302,7 +302,7 @@ reported as candidates, because they cannot be enrolled.
 More examples — value types, mask styles, key patterns — in
 `examples/redact_patterns.json.example` and `examples/custom_literals.json.example`.
 
-## Rotate secrets (v0.9.1)
+## Rotate secrets (v0.9.2)
 
 Rotation is an identity lifecycle: retire the old identity, establish a
 new one, preserve lineage, regenerate matching artifacts explicitly, and
