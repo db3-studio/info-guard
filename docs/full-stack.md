@@ -1,16 +1,19 @@
 # Info Guard — the full stack (roadmap)
 
-This repo ships the **redaction layer** only: the patch, the matcher, the
-test battery, and this documentation. That is the transferable core — it
-works with zero other infrastructure, installs in minutes, and its value is
-immediate (your exact secrets stop appearing in tool output, logs, and
-transcripts).
+This repo ships the **product CLI**: the redaction engine (the patch + the
+matcher), detection (`preflight`, `watch`, `discover`), rotation mechanics
+(`rotate-candidates`, `literals rotate`), the self-sustain commands
+(`check --heal`, `update`), the test battery, and this documentation. That is
+the transferable core — it works with zero other infrastructure, installs in
+minutes, and its value is immediate (your exact secrets stop appearing in
+tool output, logs, and transcripts).
 
-Redaction is one layer of a five-layer lifecycle. The remaining four layers
-are **deployment-specific**: they depend on where your secrets live, how you
-rotate them, and how you want to be alerted. This document is the blueprint —
-enough detail that any Hermes agent (or engineer) can build them for a given
-environment, the way they were built and proven in the reference deployment.
+Redaction is one layer of a five-layer lifecycle. The product supplies a
+mechanism for each layer; what this document describes building is the
+**deployment wiring** — where your secrets live, how rotation is driven per
+credential class, how you are alerted. This document is the blueprint —
+enough detail that any Hermes agent (or engineer) can build it for a given
+environment, the way it was built and proven in the reference deployment.
 
 ## The doctrine
 
@@ -113,10 +116,10 @@ Scheduled, silent-when-clean scanners. The reference deployment runs:
 
 | Scanner | Schedule | What it does |
 |---|---|---|
-| **Preflight (`info-guard preflight`)** | on demand, before install | Zero-config leak scan of Hermes' own transcripts/logs — key-shape regexes + gitleaks tuned ruleset; the same two passes the scheduled scanner runs, without needing a registry. This is the entry point: run it first, schedule it after. gitleaks is optional (preflight checks first and offers to install it); without it, key-shape + token-prefix passes still run |
-| Leak scan | every 6h | Scans transcripts, logs, and request dumps for registry values, key-shaped secrets, and token-shaped values |
+| **Preflight (`info-guard preflight`)** | on demand, before install | Zero-config leak scan of Hermes' own transcripts/logs — key-shape regexes + gitleaks tuned ruleset; the same passes the scheduled `watch` runs, without needing a registry. This is the entry point: run it first, schedule `watch` after. gitleaks is optional (preflight checks first and offers to install it); without it, key-shape + token-prefix passes still run |
+| `watch` (`info-guard watch [DIR ...]`) | every 6h | Scheduled delta monitor: the same detection passes as preflight over transcripts, logs, and request dumps, alerting on what changed since the baseline — cron-friendly exits, silent when clean |
 | HIBP exposed check | weekly | Compares registered values against haveibeenpwned's k-anonymity API (SHA-1 prefix only — the full value never leaves; deployment-side, not shipped in v1) |
-| gitleaks discovery | nightly | Scans new app configs/repos for unregistered secrets — at the source, where XML/INI/YAML tags name the secret, so format gaps in the transcript scanners don't block identification |
+| `discover` (`info-guard discover [PATH ...]`) | nightly | Enumerates unregistered key-shaped secrets in named source paths — repos and app configs, where XML/INI/YAML tags name the secret, so format gaps in the transcript scanners don't block identification; enroll findings via `literals add --from` |
 
 **Tiering** (what fires an alert, and at what severity):
 
@@ -175,7 +178,7 @@ Small scheduled checks that catch drift before it becomes a leak:
 |---|---|---|
 | Env-drift watchdog | weekly | `.env` files changed without `info-guard build` being re-run (registry/pattern drift) — silent when clean, email on drift |
 | Config-audit | on change | New/changed config keys in tracked files (diff-based, with an ignore list for known benign churn) |
-| Nightly refresh | daily | Re-run `info-guard build` + discovery — the "forgot to register" safety net |
+| Nightly refresh | daily | Re-run `info-guard build` + `discover` — the "forgot to register" safety net |
 | Release hygiene | per release | Tag + CHANGELOG entry (Keep a Changelog); related micro-fixes consolidate into the most recent entry — versions stay meaningful for pull-based consumers |
 
 ## Known failure modes (learned the hard way)
@@ -205,8 +208,10 @@ when it isn't. Any implementation of this stack should test for them:
 1. Install this repo (redaction) — immediate value, zero dependencies.
 2. Register into Layer 2 (the product registry — `literals add` / `--from`;
    the registry ships with the product, so this is data entry, not build).
-3. Layer 3 detection (needed before rotation is ever triggered).
-4. Layer 4 rotation for the two highest-priority credential classes.
+3. Layer 3 detection — schedule `info-guard watch` (`preflight` on demand,
+   `discover` for at-source sweeps). Needed before rotation is ever triggered.
+4. Layer 4 rotation for the two highest-priority credential classes — drive
+   it from `rotate-candidates --json` and `literals rotate VALUE_ID`.
 5. Layer 5 watchdogs, in the order above.
 
 Each layer's tests: the previous layer's pattern file + one synthetic probe
