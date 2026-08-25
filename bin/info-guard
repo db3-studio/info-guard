@@ -360,14 +360,16 @@ def _atomic_write_json(path: Path, data: dict) -> None:
 
 
 def _registry_rev(doc):
-    """Registry `rev` counter with lazy backfill (v0.9.3): missing or
-    invalid -> 0. Mirrors the A53 lazy id backfill — no migration."""
+    """Registry `rev` counter with lazy backfill (v0.9.3): only an exact
+    non-negative int is a valid rev — floats, numeric strings, booleans
+    and negative values read as 0 (malformed never passes). Mirrors the
+    A53 lazy id backfill — no migration."""
     if not isinstance(doc, dict):
         return 0
-    try:
-        return int(doc.get("rev", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
+    rev = doc.get("rev", 0)
+    if type(rev) is int and rev >= 0:
+        return rev
+    return 0
 
 
 def _commit_registry(out):
@@ -395,6 +397,14 @@ def _rebuild_pattern_doc(env_files, require_env):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if env_files is None:
         env_files = _default_sources()
+    if not env_files and require_env:
+        # cmd_build's historical contract (pre-v0.9.3, preserved by the
+        # extraction): a bare `build` with no sources is a hard error —
+        # never a silent registry-only matcher (would replace a
+        # populated one). Only --registry-only may proceed without env.
+        raise SystemExit(
+            "[info-guard] ✗ no .env sources found — pass env files "
+            "explicitly, or run from a directory with a .env")
     raw_lits, key_patterns, val_masks, env_values = [], {}, {}, set()
     export_warnings = []
     for path in env_files:
@@ -450,7 +460,20 @@ def _rebuild_pattern_doc(env_files, require_env):
     }
     _atomic_write_json(MATCHER, doc)
     os.chmod(MATCHER, 0o600)
-    return doc, env_values
+    # Read-back (build-diff fold CRIT-2): the activation handshake
+    # verifies the PERSISTED matcher, never the in-memory doc — a write
+    # seam or post-write corruption must fail the handshake, not be
+    # masked by the object we just built. Raise on any read/parse/shape
+    # failure (callers normalize to the fail-loud message).
+    try:
+        persisted = json.loads(MATCHER.read_text())
+    except (OSError, ValueError) as exc:
+        raise OSError(f"matcher read-back failed: {exc}") from exc
+    if not isinstance(persisted, dict) \
+            or not isinstance(persisted.get("literals"), list) \
+            or not isinstance(persisted.get("key_patterns"), dict):
+        raise OSError("matcher read-back failed: invalid persisted shape")
+    return persisted, env_values
 
 
 def _activate_mutation(committed_rev, expect_present=(), expect_absent=(),
@@ -462,18 +485,17 @@ def _activate_mutation(committed_rev, expect_present=(), expect_absent=(),
     Never raises — every failure path normalizes to a value-free message
     the caller emits (fail-loud, never silent)."""
     try:
-        doc, env_values = _rebuild_pattern_doc(
-            _default_sources() if env_files is None else env_files,
-            require_env=False)
+        _resolved = _default_sources() if env_files is None else env_files
+        doc, env_values = _rebuild_pattern_doc(_resolved, require_env=False)
     except BaseException as exc:
-        return None, set(), f"activation failed ({type(exc).__name__})"
+        return None, set(), [], f"activation failed ({type(exc).__name__})"
     if doc.get("derived_rev") != committed_rev:
-        return doc, env_values, (
+        return doc, env_values, [], (
             f"activation verification failed: pattern derived_rev "
             f"{doc.get('derived_rev')!r} != committed rev {committed_rev}")
     _entries, _ok, reg_doc = _load_registry()
     if not _ok or _registry_rev(reg_doc) != committed_rev:
-        return doc, env_values, (
+        return doc, env_values, [], (
             "registry changed during activation — rerun the operation")
     if committed_sha is not None:
         # Content comparison: catches same-rev races (two writers both
@@ -484,8 +506,16 @@ def _activate_mutation(committed_rev, expect_present=(), expect_absent=(),
         except OSError:
             cur_sha = None
         if cur_sha != committed_sha:
-            return doc, env_values, (
+            return doc, env_values, [], (
                 "registry changed during activation — rerun the operation")
+    reg_vals = {x.get("value") if isinstance(x, dict) else x
+                for x in _entries if isinstance(x, dict)
+                or isinstance(x, str)}
+    for v in expect_absent:
+        if v in reg_vals:
+            return doc, env_values, [], (
+                "activation verification failed: removed value still "
+                "present in the registry")
     doc_values = set()
     for lit in doc.get("literals", []) or []:
         if isinstance(lit, str) and lit:
@@ -494,29 +524,31 @@ def _activate_mutation(committed_rev, expect_present=(), expect_absent=(),
             doc_values.add(lit["value"])
     for v in expect_present:
         if v not in doc_values:
-            return doc, env_values, (
+            return doc, env_values, [], (
                 "activation verification failed: value not present "
                 "in the pattern file")
     for v in expect_absent:
         if v in doc_values and v not in env_values:
-            return doc, env_values, (
+            return doc, env_values, [], (
                 "activation verification failed: removed value still "
                 "present (not env-supplied)")
-    return doc, env_values, None
+    return doc, env_values, None, _resolved
 
 
-def _activation_report(act_err):
+def _activation_report(act_err, env_sources=()):
     """Emit the activation handshake outcome (v0.9.3). Success is SILENT
     (exit 0) — the confirmation rides the JSON `activated` field and the
     at-rest rev/derived_rev state, and the mutation commands keep their
     value-free, zero-chatter diagnostics contract (the Wave E rotate
     contract asserts stderr == \"\" on success). Failure stays loud: the
     repair message on stderr + exit 1 (the identity mutation stands; the
-    stale artifact is detectable via check)."""
+    stale artifact is detectable via check). The repair command is chosen
+    from the CAPTURED source state of the failed activation, never a
+    fresh resolution (build-diff fold NIT-1)."""
     if act_err is None:
         return 0
     repair = ("run `info-guard build --registry-only`"
-              if not _default_sources() else "run `info-guard build`")
+              if not env_sources else "run `info-guard build`")
     print(f"[info-guard] ✗ {act_err}; {repair}", file=sys.stderr)
     return 1
 
@@ -559,11 +591,11 @@ def cmd_status():
     if _rok:
         reg_rev = _registry_rev(reg_doc)
         der_rev = data.get("derived_rev")
-        if isinstance(der_rev, int) and der_rev == reg_rev:
+        if type(der_rev) is int and der_rev == reg_rev:
             act = "current"
-        elif isinstance(der_rev, int) and der_rev < reg_rev:
+        elif type(der_rev) is int and der_rev < reg_rev:
             act = f"stale ({reg_rev - der_rev} mutation(s) since last build)"
-        elif isinstance(der_rev, int):
+        elif type(der_rev) is int:
             act = "ahead/invalid (rev mismatch)"
         else:
             act = "unverifiable (no derivation stamp — run build)"
@@ -4459,7 +4491,7 @@ def _literals_add_from(selector, json_mode):
                 # cleaned by the writer.
                 return fail("cannot write registry — unchanged "
                             "(permissions? disk?)")
-            _adoc, _aenv, act_err = _activate_mutation(
+            _adoc, _aenv, act_err, _asrc = _activate_mutation(
                 committed_rev, expect_present=[value],
                 committed_sha=committed_sha)
             for item in entries2:
@@ -4473,7 +4505,7 @@ def _literals_add_from(selector, json_mode):
                     "rev": committed_rev}, indent=2))
             else:
                 print(f"value {vid}")
-            return _activation_report(act_err)
+            return _activation_report(act_err, _asrc)
         finally:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -4728,7 +4760,7 @@ def _literals_add(args):
             print(f"[info-guard] ✗ cannot write {CUSTOM_LITERALS} — "
                   f"registry unchanged (permissions? disk?)", file=sys.stderr)
             return 2
-        _adoc, _aenv, act_err = _activate_mutation(
+        _adoc, _aenv, act_err, _asrc = _activate_mutation(
             committed_rev, expect_present=[value],
             committed_sha=committed_sha)
         vid = None
@@ -4750,7 +4782,7 @@ def _literals_add(args):
                               "rev": committed_rev}, indent=2))
         else:
             print(f"planted {_mask_value(value)} (id {vid})")
-        return _activation_report(act_err)
+        return _activation_report(act_err, _asrc)
     if any(not v.strip() for v in values):
         print("[info-guard] usage: empty values rejected — literal values "
               "must be non-empty strings", file=sys.stderr)
@@ -4794,7 +4826,7 @@ def _literals_add(args):
                   f"registry unchanged (permissions? disk?)",
                   file=sys.stderr)
             return 2
-        _adoc, _aenv, act_err = _activate_mutation(
+        _adoc, _aenv, act_err, _asrc = _activate_mutation(
             committed_rev, expect_present=new_values,
             committed_sha=committed_sha)
     else:
@@ -4818,7 +4850,7 @@ def _literals_add(args):
         for rec in added + duplicates:
             print(f"value {rec['id']}")
     if committed_rev is not None:
-        return _activation_report(act_err)
+        return _activation_report(act_err, _asrc)
     return 0
 
 
@@ -4948,7 +4980,7 @@ def _literals_remove(args):
         print(f"[info-guard] ✗ cannot write {CUSTOM_LITERALS} — "
               f"registry unchanged (permissions? disk?)", file=sys.stderr)
         return 2
-    _adoc, _aenv, act_err = _activate_mutation(
+    _adoc, _aenv, act_err, _asrc = _activate_mutation(
         committed_rev, expect_absent=[removed_value],
         committed_sha=committed_sha)
     if json_mode:
@@ -4957,7 +4989,7 @@ def _literals_remove(args):
                          indent=2))
     else:
         print(f"removed {target}")
-    return _activation_report(act_err)
+    return _activation_report(act_err, _asrc)
 
 
 # ── Wave E (W5+W14) — rotate-candidates view + literals rotate ─────────
@@ -5769,14 +5801,14 @@ def _literals_rotate(args):
     # pre-serialized (plan 52) and stays byte-identical; the activation
     # outcome rides stderr + the exit code (1 = committed but activation
     # failed — the new-value identity is registered but not yet masked).
-    _adoc, _aenv, act_err = _activate_mutation(
+    _adoc, _aenv, act_err, _asrc = _activate_mutation(
         committed_rev, expect_present=[new_value],
         committed_sha=committed_sha)
     if json_mode:
         print(resp)
     else:
         sys.stdout.write(resp)
-    return _activation_report(act_err)
+    return _activation_report(act_err, _asrc)
 
 
 def _self_fill_mask_style(value):
@@ -5945,17 +5977,30 @@ def cmd_setup(args):
     elif not env_sources:
         print("[info-guard] nothing new to register — no changes made")
         return 0
-    # build / activation (v0.9.3): env sources -> full derivation via
-    # cmd_build (the end-of-setup activation, verified by cmd_status
-    # below); no env sources -> registry-only verified activation so
-    # registration is live immediately.
+    # build / activation (v0.9.3): every setup registration activates
+    # immediately AND the outcome is PROPAGATED — a committed but
+    # unactivated registration must fail setup loudly, never exit 0
+    # (build-diff fold CRIT-1). The env branch rebuilds via cmd_build
+    # (its output is setup's documented stdout) and then runs the
+    # verified handshake on top (idempotent rebuild; the read-back
+    # verification is the point).
     if env_sources:
         cmd_build(env_sources)
+        if added:
+            _adoc, _aenv, act_err, _asrc = _activate_mutation(
+                committed_rev, expect_present=[v for v, _m in added],
+                env_files=[Path(p) for p in env_sources],
+                committed_sha=committed_sha)
+            _act_rc = _activation_report(act_err, _asrc)
+            if _act_rc:
+                return _act_rc
     elif added:
-        _adoc, _aenv, act_err = _activate_mutation(
+        _adoc, _aenv, act_err, _asrc = _activate_mutation(
             committed_rev, expect_present=[v for v, _m in added],
             env_files=[], committed_sha=committed_sha)
-        _activation_report(act_err)
+        _act_rc = _activation_report(act_err, _asrc)
+        if _act_rc:
+            return _act_rc
     if skipped_short:
         print(f"[info-guard] note: {skipped_short} short value(s) skipped — their "
               f"keys are covered if present in an env source")
@@ -6929,25 +6974,51 @@ def _check_battery() -> int:
         # working tree and committing it made the fixtures re-apply the
         # patch onto a patched tree ("patch does not apply") and die
         # before the summary line.
-        for rel in _PATCHED_FILES + _TARGET_IMPORT_CHAIN:
-            if not (real_checkout / rel).is_file():
-                continue  # import-chain files are is_file-guarded (D138)
-            dst = target / rel
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            clean = subprocess.run(
-                ["git", "-C", str(real_checkout), "show", f"HEAD:{rel}"],
-                capture_output=True, check=True, timeout=60)
-            dst.write_bytes(clean.stdout)
-        for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
-                    ["git", "-c", "user.email=ig@test",
-                     "-c", "user.name=ig-test", "commit", "-q", "-m", "base"]):
-            subprocess.run(cmd, cwd=str(target), capture_output=True,
-                           check=True, timeout=60)
-        subprocess.run(["git", "-C", str(target), "apply",
-                        str(pkg / "patch" / "redactor-registry-patterns.patch")],
-                       capture_output=True, check=True, timeout=60)
-        subprocess.run(["git", "-C", str(target), "tag", "v2026.8.18"],
-                       capture_output=True, check=True, timeout=60)
+        try:
+            for rel in _PATCHED_FILES + _TARGET_IMPORT_CHAIN:
+                if not (real_checkout / rel).is_file():
+                    continue  # import-chain files are is_file-guarded (D138)
+                dst = target / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                clean = subprocess.run(
+                    ["git", "-C", str(real_checkout), "show", f"HEAD:{rel}"],
+                    capture_output=True, check=True, timeout=60)
+                dst.write_bytes(clean.stdout)
+            for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
+                        ["git", "-c", "user.email=ig@test",
+                         "-c", "user.name=ig-test", "commit", "-q", "-m", "base"]):
+                subprocess.run(cmd, cwd=str(target), capture_output=True,
+                               check=True, timeout=60)
+            subprocess.run(["git", "-C", str(target), "apply",
+                            str(pkg / "patch" / "redactor-registry-patterns.patch")],
+                           capture_output=True, check=True, timeout=60)
+            subprocess.run(["git", "-C", str(target), "tag", "v2026.8.18"],
+                           capture_output=True, check=True, timeout=60)
+            # Construction invariants (build-diff fold MIN-1): the
+            # required patched files exist at HEAD, the patch markers
+            # are in the working tree, and the supported-release tag
+            # exists — fail with a direct diagnostic, never the opaque
+            # "no summary captured" failure of the original defect.
+            for rel in _PATCHED_FILES:
+                subprocess.run(["git", "-C", str(target), "cat-file", "-e",
+                                f"HEAD:{rel}"], capture_output=True,
+                               check=True, timeout=60)
+            _mk = subprocess.run(
+                ["grep", "-c", "_redact_registry_patterns",
+                 str(target / "agent" / "redact.py")],
+                capture_output=True, text=True, timeout=60)
+            if int(_mk.stdout.strip() or "0") < 2:
+                raise subprocess.CalledProcessError(1, "marker-count")
+            subprocess.run(["git", "-C", str(target), "rev-parse", "-q",
+                            "--verify", "refs/tags/v2026.8.18"],
+                           capture_output=True, check=True, timeout=60)
+        except subprocess.CalledProcessError as _cexc:
+            print("[info-guard] ✗ check --battery: sandbox construction "
+                  "failed — the battery cannot run "
+                  f"({_cexc.cmd} rc={_cexc.returncode}) — inspect the "
+                  "package patch + target checkout (operational)",
+                  file=sys.stderr)
+            return 2
         home = scratch / "home"
         home.mkdir()
         log = scratch / "battery.log"
@@ -7116,7 +7187,7 @@ def cmd_check(args):
             _rent, _rok, reg_doc = _load_registry()
             reg_rev = _registry_rev(reg_doc) if _rok else None
             der_rev = data.get("derived_rev")
-            if reg_rev is not None and not isinstance(der_rev, int):
+            if reg_rev is not None and type(der_rev) is not int:
                 problems += 1
                 print("[info-guard] ✗ activation: pattern file derivation "
                       "stamp invalid or missing (legacy artifact) — run "

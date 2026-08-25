@@ -2206,6 +2206,112 @@ _v3x = _r.returncode == 0 and "export-style" in _r.stderr \
     and "ok_value_1234567890" in json.dumps(_mat)
 check("v093.b2: build warns on skipped export-style .env lines (NOT protected)",
       _v3x, f"err={_r.stderr[:160]!r}")
+# 11. --from enrollment activates immediately (the sole enrollment bridge)
+v3f2_home = os.path.join(tmp, "v093-from-home")
+os.makedirs(v3f2_home, exist_ok=True)
+v3f2_env = dict(os.environ)
+v3f2_env["HERMES_HOME"] = v3f2_home
+V3F2 = "v093-from-secret-" + "123456"
+open(os.path.join(v3f2_home, "s.env"), "w").write(f"SRC_KEY={V3F2}\n")
+_r = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "literals", "add", "--from", os.path.join(v3f2_home, "s.env") + ":SRC_KEY",
+     "--json"], env=v3f2_env, capture_output=True, text=True, timeout=300)
+_p = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "pipe"],
+    env=v3f2_env, input=V3F2 + "\n", capture_output=True, text=True,
+    timeout=300)
+_v311 = _r.returncode == 0 and json.loads(_r.stdout).get("activated") is True \
+    and V3F2 not in _p.stdout and "..." in _p.stdout
+check("v093.a2: literals add --from activates immediately (enrollment bridge)",
+      _v311, f"out={_r.stdout[:120]!r} pipe={_p.stdout[:80]!r}")
+# 12. setup --all registration stamps the matcher (derived_rev == rev)
+v3s_home = os.path.join(tmp, "v093-setup-home")
+for _sub in ("sessions", "logs", "cron/output"):
+    os.makedirs(os.path.join(v3s_home, _sub), exist_ok=True)
+os.makedirs(os.path.join(v3s_home, "state", "info-guard"), exist_ok=True)
+V3S = "v093-setup-secret-" + "123456"
+open(os.path.join(v3s_home, "sessions", "s.jsonl"), "w").write(
+    f"SETUP_TOKEN={V3S}\n")
+open(os.path.join(v3s_home, "state", "info-guard", "custom_literals.json"),
+     "w").write(json.dumps({"version": 2, "literals": []}))
+v3s_env = dict(os.environ)
+v3s_env["HERMES_HOME"] = v3s_home
+_r = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "setup", "--all"], env=v3s_env, capture_output=True, text=True,
+    timeout=300)
+_sreg = json.load(open(os.path.join(v3s_home, "state", "info-guard",
+                                    "custom_literals.json")))
+_smat = json.load(open(os.path.join(v3s_home, "state", "info-guard",
+                                    "redact_patterns.json")))
+_v312 = _r.returncode == 0 and _smat.get("derived_rev") == _sreg.get("rev") \
+    and _sreg.get("rev", 0) >= 1
+check("v093.a2: setup registration activates (derived_rev == rev)",
+      _v312, f"rc={_r.returncode} rev={_sreg.get('rev')} "
+             f"derived={_smat.get('derived_rev')}")
+# 13. build --registry-only is the no-env repair path
+v3r_home = os.path.join(tmp, "v093-regonly-home")
+os.makedirs(v3r_home, exist_ok=True)
+v3r_env = dict(os.environ)
+v3r_env["HERMES_HOME"] = v3r_home
+V3R2 = "v093-regonly-secret-" + "123456"
+_r1 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "literals", "add", V3R2], env=v3r_env, capture_output=True, text=True,
+    timeout=300)
+_r2 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "build", "--registry-only"], env=v3r_env, capture_output=True,
+    text=True, timeout=300)
+_r3 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "check"], env=v3r_env, capture_output=True, text=True, timeout=300)
+_rreg = json.load(open(os.path.join(v3r_home, "state", "info-guard",
+                                    "custom_literals.json")))
+_rmat = json.load(open(os.path.join(v3r_home, "state", "info-guard",
+                                    "redact_patterns.json")))
+_v313 = _r1.returncode == 0 and _r2.returncode == 0 \
+    and _rmat.get("derived_rev") == _rreg.get("rev") \
+    and "mutation(s) since last build" not in _r3.stdout
+check("v093.a2: build --registry-only is the no-env repair path",
+      _v313, f"rc1={_r1.returncode} rc2={_r2.returncode} "
+             f"rev={_rreg.get('rev')} derived={_rmat.get('derived_rev')}")
+# 14. legacy registry without rev backfills and stays current
+v3l_home = os.path.join(tmp, "v093-legacy-home")
+os.makedirs(v3l_home, exist_ok=True)
+v3l_env = dict(os.environ)
+v3l_env["HERMES_HOME"] = v3l_home
+open(os.path.join(v3l_home, "state", "info-guard", "custom_literals.json"),
+     "w").write(json.dumps({"version": 2, "literals": []}))   # no rev field
+V3L = "v093-legacy-secret-" + "123456"
+_r = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "literals", "add", V3L, "--json"], env=v3l_env, capture_output=True,
+    text=True, timeout=300)
+_lreg = json.load(open(os.path.join(v3l_home, "state", "info-guard",
+                                    "custom_literals.json")))
+_lmat = json.load(open(os.path.join(v3l_home, "state", "info-guard",
+                                    "redact_patterns.json")))
+_r2 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "check"], env=v3l_env, capture_output=True, text=True, timeout=300)
+_v314 = _r.returncode == 0 and _lreg.get("rev") == 1 \
+    and _lmat.get("derived_rev") == 1 \
+    and "mutation(s) since last build" not in _r2.stdout
+check("v093.a2: legacy registry (no rev) backfills and stays current",
+      _v314, f"rc={_r.returncode} rev={_lreg.get('rev')} "
+             f"derived={_lmat.get('derived_rev')}")
+# 15. --json output is pure JSON on stdout (chatter stays on stderr)
+_r = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "literals", "add", V3L + "x", "--json"], env=v3l_env,
+    capture_output=True, text=True, timeout=300)
+_js = _r.stdout.strip()
+_v315 = _r.returncode == 0 and _js.startswith("{") and _js.endswith("}") \
+    and json.loads(_js) is not None and _js.splitlines()
+check("v093.a2: --json output is pure JSON on stdout (chatter on stderr)",
+      _v315, f"out={_r.stdout[:100]!r}")
 vid10_home = os.path.join(tmp, "vid-home10")
 for sub in ("sessions", "logs", "cron/output"):
     os.makedirs(os.path.join(vid10_home, sub), exist_ok=True)
