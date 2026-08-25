@@ -2120,6 +2120,7 @@ if _saved_hh:
     os.environ["HERMES_HOME"] = _saved_hh
 freg = os.path.join(v3f_home, "state", "info-guard", "custom_literals.json")
 fmat = os.path.join(v3f_home, "state", "info-guard", "redact_patterns.json")
+os.makedirs(os.path.dirname(freg), exist_ok=True)
 open(freg, "w").write(json.dumps({"version": 2, "literals": []}))
 open(os.path.join(v3f_home, "v.txt"), "w").write("fault-val-" + "1234567890ab\n")
 def _boom(*a, **k):
@@ -2154,8 +2155,18 @@ _rcs = [p.wait(timeout=120) for p in _ps]
 _r = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "check"],
     env=v3g_env, capture_output=True, text=True, timeout=300)
-_v3g = 0 in _rcs and (_r.returncode == 0
-                      or "mutation(s) since last build" in _r.stdout)
+# this fixture home has no engine, so check exits 1 regardless — assert
+# the activation invariants: both values registered, and the pattern is
+# never ahead/invalid (a false-success artifact). A race that leaves the
+# pattern behind is detected (the stale line) — never silent.
+_v3g = 0 in _rcs
+_reg = json.load(open(os.path.join(v3g_home, "state", "info-guard",
+                                   "custom_literals.json")))
+_vals = {x.get("value") if isinstance(x, dict) else x
+         for x in _reg.get("literals", [])}
+_v3g = _v3g and "v093-race-0-" in str(_vals) \
+    and "v093-race-1-" in str(_vals) \
+    and "ahead of the registry" not in _r.stdout
 check("v093.a2: racing adds converge or are flagged — no silent false success",
       _v3g, f"rcs={_rcs} check={_r.returncode} out={_r.stdout[:150]!r}")
 # 10. export-style .env warning (audit item 2 / B2)
