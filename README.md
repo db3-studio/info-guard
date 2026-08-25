@@ -21,7 +21,7 @@ After:   "the token is 7f...3c and the PIN is ***"
 
 | Setting | Value |
 |---|---|
-| Current Info Guard version | `0.9.2` |
+| Current Info Guard version | `0.9.3` |
 | Supported Hermes Agent versions | `v0.20.0` – `v0.20.5` |
 | Install location (canonical) | `~/.info-guard` |
 | Hermes home (`$HERMES_HOME`) | `~/.hermes` when unset |
@@ -171,6 +171,10 @@ The agent will read `docs/format-spec.md` for the file format and
 ~/.info-guard/bin/info-guard build   # pulls every secret-shaped KEY=value from your .env sources
 ```
 
+Only `KEY=value` lines are read; `export KEY=...` lines are skipped and
+`build` warns per source (values not protected). See `docs/format-spec.md`
+for the full `.env` grammar.
+
 Masking is live immediately; a restart of running Hermes processes (gateway,
 web UI) picks it up on next start.
 
@@ -196,7 +200,7 @@ accepts every candidate non-interactively (agent-assisted installs).
 
 | Command | Description |
 |---|---|
-| `info-guard build [ENV_FILE ...]` | Build `redact_patterns.json` from `.env` sources (default: `$HERMES_HOME/.env`) |
+| `info-guard build [ENV_FILE ...] [--registry-only]` | Build `redact_patterns.json` from `.env` sources (default: `$HERMES_HOME/.env`); `--registry-only` derives from the registry alone (no `.env` required) |
 | `info-guard status` | Summary of the current pattern file |
 | `info-guard preflight [DIR ...] [--full] [--json] [--json-out FILE]` | Zero-config leak scan of Hermes' own data (read-only, output masked) |
 | `info-guard watch [DIR ...] [--reset] [--json] [--json-out FILE]` | Delta monitor vs the watch baseline (cron-friendly exits) |
@@ -302,7 +306,7 @@ reported as candidates, because they cannot be enrolled.
 More examples — value types, mask styles, key patterns — in
 `examples/redact_patterns.json.example` and `examples/custom_literals.json.example`.
 
-## Rotate secrets (v0.9.2)
+## Rotate secrets (v0.9.3)
 
 Rotation is an identity lifecycle: retire the old identity, establish a
 new one, preserve lineage, and activate the new identity automatically
