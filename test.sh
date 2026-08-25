@@ -2006,6 +2006,173 @@ m10 = os.stat(vid_cl).st_mtime_ns
 vid_run("literals", "add", "sk-topkey-probe-value-1234567890")
 check("value_id D10: duplicate-only add never rewrites the file",
       os.stat(vid_cl).st_mtime_ns == m10)
+# ── v0.9.3 verified activation (A2 handshake) ─────────────────────────
+# Every real registry mutation rebuilds the pattern file and read-back
+# verifies it (rev/derived_rev handshake); staleness is detected at rest
+# by check; no-op adds never rewrite; rebuild failures are loud.
+v3_home = os.path.join(tmp, "v093-home")
+os.makedirs(v3_home, exist_ok=True)
+v3_env = dict(os.environ)
+v3_env["HERMES_HOME"] = v3_home
+V3A = "v093-alpha-" + "1234567890ab"
+V3B = "v093-beta-" + "1234567890ab"
+V3R = "v093-rot-" + "1234567890ab"
+def v3_run(*args, stdin=None, env=None):
+    return subprocess.run(
+        [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), *args],
+        env=env or v3_env, input=stdin, capture_output=True, text=True,
+        timeout=300)
+v3_reg = os.path.join(v3_home, "state", "info-guard", "custom_literals.json")
+v3_mat = os.path.join(v3_home, "state", "info-guard", "redact_patterns.json")
+# 1. add -> pipe immediately = masked (the A2 killer)
+_r = v3_run("literals", "add", V3A, "--json")
+_v3a = _r.returncode == 0 and json.loads(_r.stdout).get("activated") is True
+_p = v3_run("pipe", stdin=V3A + "\n")
+_v3a = _v3a and _p.returncode == 0 and V3A not in _p.stdout \
+    and V3A[:3] in _p.stdout
+check("v093.a2: literals add activates immediately — pipe masks the new value",
+      _v3a, f"add={_r.stdout[:120]!r} pipe={_p.stdout[:80]!r}")
+# 2. rotate -> new value masked WITHOUT explicit build (audit item 3 gone)
+_r = v3_run("literals", "add", V3B, "--json")
+_vid = json.loads(_r.stdout)["added"][0]["id"] if _r.returncode == 0 else ""
+_r = v3_run("literals", "rotate", _vid, stdin=V3R + "\n")
+_p = v3_run("pipe", stdin=V3R + "\n")
+check("v093.a2: rotate activates immediately — new value masked without build",
+      _r.returncode == 0 and V3R not in _p.stdout and V3R[:3] in _p.stdout,
+      f"rot={_r.stdout[:120]!r} pipe={_p.stdout[:80]!r}")
+# 3. duplicate-only add = no rewrite, no rebuild, no activated key
+_pre_reg = open(v3_reg, "rb").read()
+_pre_mat = open(v3_mat, "rb").read()
+_r = v3_run("literals", "add", V3A, "--json")
+check("v093.a2: duplicate-only add never rewrites registry or matcher",
+      _r.returncode == 0 and open(v3_reg, "rb").read() == _pre_reg
+      and open(v3_mat, "rb").read() == _pre_mat
+      and "activated" not in json.loads(_r.stdout),
+      f"out={_r.stdout[:160]!r}")
+# 4. failure/no-op cases leave the matcher byte-unchanged
+_pre_mat = open(v3_mat, "rb").read()
+_r1 = v3_run("literals", "remove", "9999999999999999")     # no-op (exit 0)
+_r2 = v3_run("literals", "rotate", "9999999999999999", stdin="x\n")  # usage 2
+check("v093.a2: no-op/failure cases leave the matcher byte-unchanged",
+      _r1.returncode == 0 and _r2.returncode == 2
+      and open(v3_mat, "rb").read() == _pre_mat, "")
+# 5. check drift detection: unbuilt mutations -> exit 1 + stale; build heals
+_doc = json.load(open(v3_reg))
+_doc["rev"] = _doc["rev"] + 3
+json.dump(_doc, open(v3_reg, "w"))
+_r = v3_run("check")
+_v3c = _r.returncode == 1 and "mutation(s) since last build" in _r.stdout
+_r = v3_run("build")
+_v3c = _v3c and _r.returncode == 0
+_r = v3_run("check")
+_v3c = _v3c and _r.returncode == 0
+check("v093.a2: check flags unbuilt mutations and self-heals after build",
+      _v3c, f"check={_r.stdout[:200]!r}")
+# 6. legacy pattern file (no derived_rev) is unverifiable -> check exit 1
+_bak = v3_mat + ".bak"
+shutil.copyfile(v3_mat, _bak)
+_doc = json.load(open(v3_mat))
+_doc.pop("derived_rev", None)
+json.dump(_doc, open(v3_mat, "w"))
+_r = v3_run("check")
+_v3c = _r.returncode == 1 and "derivation stamp" in _r.stdout
+shutil.move(_bak, v3_mat)
+check("v093.a2: legacy pattern file (no derived_rev) flagged unverifiable",
+      _v3c, f"check={_r.stdout[:200]!r}")
+# 7. source-model overlap: mutation rebuild never drops env-sourced values
+v3e_home = os.path.join(tmp, "v093-env-home")
+os.makedirs(v3e_home, exist_ok=True)
+v3e_env = dict(os.environ)
+v3e_env["HERMES_HOME"] = v3e_home
+EV = "v093-env-secret-" + "123456"
+open(os.path.join(v3e_home, ".env"), "w").write(
+    f"ENV_KEY={EV}\nREG_KEY={V3A}\n")   # V3A overlaps env + registry
+def v3e_run(*args, stdin=None):
+    return subprocess.run(
+        [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), *args],
+        env=v3e_env, input=stdin, capture_output=True, text=True, timeout=300)
+_r = v3e_run("build")
+_l1 = json.load(open(os.path.join(v3e_home, "state", "info-guard",
+                                  "redact_patterns.json")))["literals"]
+_r = v3e_run("literals", "add", V3A, "--json")
+_l2 = json.load(open(os.path.join(v3e_home, "state", "info-guard",
+                                  "redact_patterns.json")))["literals"]
+def _lit_set(lst):
+    return {x.get("value") if isinstance(x, dict) else x for x in lst}
+check("v093.a2: mutation rebuild keeps env-sourced values (overlap safe)",
+      _r.returncode == 0 and _lit_set(_l1) == _lit_set(_l2) == {EV, V3A},
+      f"l1={_l1} l2={_l2}")
+# 8. post-commit rebuild failure: mutation stands, loud, exit 1 (fault
+#    injection via the module-level writer seam, in-process)
+v3f_home = os.path.join(tmp, "v093-fault-home")
+os.makedirs(v3f_home, exist_ok=True)
+import importlib.util, contextlib, io as _io
+_saved_hh = os.environ.get("HERMES_HOME")
+os.environ["HERMES_HOME"] = v3f_home
+ig_spec = importlib.util.spec_from_file_location(
+    "ig_cli_v093", os.path.join(os.getcwd(), "bin", "info-guard"))
+ig_mod = importlib.util.module_from_spec(ig_spec)
+ig_spec.loader.exec_module(ig_mod)
+if _saved_hh:
+    os.environ["HERMES_HOME"] = _saved_hh
+freg = os.path.join(v3f_home, "state", "info-guard", "custom_literals.json")
+fmat = os.path.join(v3f_home, "state", "info-guard", "redact_patterns.json")
+open(freg, "w").write(json.dumps({"version": 2, "literals": []}))
+open(os.path.join(v3f_home, "v.txt"), "w").write("fault-val-" + "1234567890ab\n")
+def _boom(*a, **k):
+    raise OSError("injected matcher write failure")
+ig_mod._rebuild_pattern_doc = _boom
+_buf_out, _buf_err = _io.StringIO(), _io.StringIO()
+with contextlib.redirect_stdout(_buf_out), contextlib.redirect_stderr(_buf_err):
+    _rc = ig_mod._literals_add(
+        ["--file", os.path.join(v3f_home, "v.txt"), "--json"])
+_v3f = _rc == 1 and "activation failed" in _buf_err.getvalue() \
+    and json.load(open(freg)).get("rev") == 1 \
+    and "fault-val-" in [x.get("value") if isinstance(x, dict) else x
+                         for x in json.load(open(freg))["literals"]] \
+    and not os.path.exists(fmat)
+check("v093.a2: post-commit rebuild failure is loud, mutation stands, exit 1",
+      _v3f, f"rc={_rc} err={_buf_err.getvalue()[:200]!r}")
+# 9. concurrency: racing adds converge or are flagged — never silent
+v3g_home = os.path.join(tmp, "v093-race-home")
+os.makedirs(v3g_home, exist_ok=True)
+v3g_env = dict(os.environ)
+v3g_env["HERMES_HOME"] = v3g_home
+_ps = []
+for _i in range(2):
+    _v = f"v093-race-{_i}-" + "1234567890ab"
+    open(os.path.join(v3g_home, f"r{_i}.txt"), "w").write(_v + "\n")
+    _ps.append(subprocess.Popen(
+        [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+         "literals", "add", "--file", os.path.join(v3g_home, f"r{_i}.txt"),
+         "--json"], env=v3g_env, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True))
+_rcs = [p.wait(timeout=120) for p in _ps]
+_r = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "check"],
+    env=v3g_env, capture_output=True, text=True, timeout=300)
+_v3g = 0 in _rcs and (_r.returncode == 0
+                      or "mutation(s) since last build" in _r.stdout)
+check("v093.a2: racing adds converge or are flagged — no silent false success",
+      _v3g, f"rcs={_rcs} check={_r.returncode} out={_r.stdout[:150]!r}")
+# 10. export-style .env warning (audit item 2 / B2)
+v3x_home = os.path.join(tmp, "v093-export-home")
+os.makedirs(v3x_home, exist_ok=True)
+v3x_env = dict(os.environ)
+v3x_env["HERMES_HOME"] = v3x_home
+open(os.path.join(v3x_home, ".env"), "w").write(
+    "OK_KEY=ok_value_1234567890\n"
+    "export EXPORTED_TOKEN=exported_secret_99999999\n")
+_r = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "build"],
+    env=v3x_env, capture_output=True, text=True, timeout=300)
+_mat = json.load(open(os.path.join(v3x_home, "state", "info-guard",
+                                   "redact_patterns.json")))["literals"]
+_v3x = _r.returncode == 0 and "export-style" in _r.stderr \
+    and "EXPORTED_TOKEN" not in json.dumps(_mat) \
+    and "ok_value_1234567890" in json.dumps(_mat)
+check("v093.b2: build warns on skipped export-style .env lines (NOT protected)",
+      _v3x, f"err={_r.stderr[:160]!r}")
 vid10_home = os.path.join(tmp, "vid-home10")
 for sub in ("sessions", "logs", "cron/output"):
     os.makedirs(os.path.join(vid10_home, sub), exist_ok=True)
