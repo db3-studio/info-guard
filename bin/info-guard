@@ -374,10 +374,14 @@ def _commit_registry(out):
     """Canonical registry COMMIT for REAL mutations (v0.9.3): bump the
     monotonic `rev` counter, then the atomic 0600 write. Raises OSError
     exactly like the inline writer the callers previously used — each
-    caller keeps its own failure handling (loud, registry unchanged)."""
+    caller keeps its own failure handling (loud, registry unchanged).
+    Returns (rev, content_sha256) — the content hash powers the
+    activation guard's mid-activation change detection (catches
+    same-rev races, not just rev differences)."""
     out["rev"] = _registry_rev(out) + 1
+    payload = json.dumps(out, indent=2) + "\n"
     _atomic_write_json(CUSTOM_LITERALS, out)
-    return out["rev"]
+    return out["rev"], hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _rebuild_pattern_doc(env_files, require_env):
@@ -450,7 +454,7 @@ def _rebuild_pattern_doc(env_files, require_env):
 
 
 def _activate_mutation(committed_rev, expect_present=(), expect_absent=(),
-                       env_files=None):
+                       env_files=None, committed_sha=None):
     """Verified activation (the handshake, v0.9.3): rebuild the pattern
     doc from the committed registry, read back, and verify provenance
     (derived_rev == committed rev), the changed-value set, and no
@@ -471,6 +475,17 @@ def _activate_mutation(committed_rev, expect_present=(), expect_absent=(),
     if not _ok or _registry_rev(reg_doc) != committed_rev:
         return doc, env_values, (
             "registry changed during activation — rerun the operation")
+    if committed_sha is not None:
+        # Content comparison: catches same-rev races (two writers both
+        # committing rev N) that a rev comparison alone would miss — a
+        # false success report must never be possible.
+        try:
+            cur_sha = hashlib.sha256(CUSTOM_LITERALS.read_bytes()).hexdigest()
+        except OSError:
+            cur_sha = None
+        if cur_sha != committed_sha:
+            return doc, env_values, (
+                "registry changed during activation — rerun the operation")
     doc_values = set()
     for lit in doc.get("literals", []) or []:
         if isinstance(lit, str) and lit:
@@ -4437,7 +4452,7 @@ def _literals_add_from(selector, json_mode):
             out["literals"] = entries2
             try:
                 STATE_DIR.mkdir(parents=True, exist_ok=True)
-                committed_rev = _commit_registry(out)
+                committed_rev, committed_sha = _commit_registry(out)
             except OSError:
                 # Canonical write failure: exit 2, loud, registry
                 # unchanged (Wave A A2/MAJ-5); temp artifacts are
@@ -4445,7 +4460,8 @@ def _literals_add_from(selector, json_mode):
                 return fail("cannot write registry — unchanged "
                             "(permissions? disk?)")
             _adoc, _aenv, act_err = _activate_mutation(
-                committed_rev, expect_present=[value])
+                committed_rev, expect_present=[value],
+                committed_sha=committed_sha)
             for item in entries2:
                 if isinstance(item, dict) and item.get("value") == value:
                     vid = item.get("id")
@@ -4707,13 +4723,14 @@ def _literals_add(args):
         out["literals"] = entries
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            committed_rev = _commit_registry(out)
+            committed_rev, committed_sha = _commit_registry(out)
         except OSError:
             print(f"[info-guard] ✗ cannot write {CUSTOM_LITERALS} — "
                   f"registry unchanged (permissions? disk?)", file=sys.stderr)
             return 2
         _adoc, _aenv, act_err = _activate_mutation(
-            committed_rev, expect_present=[value])
+            committed_rev, expect_present=[value],
+            committed_sha=committed_sha)
         vid = None
         for item in entries:
             if isinstance(item, dict) and item.get("value") == value:
@@ -4767,7 +4784,7 @@ def _literals_add(args):
         out["literals"] = entries
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            committed_rev = _commit_registry(out)
+            committed_rev, committed_sha = _commit_registry(out)
         except OSError:
             # Canonical write failure (Wave A A2/MAJ-5): exit 2, never a
             # traceback, never a silent no-op — the registry is the
@@ -4778,7 +4795,8 @@ def _literals_add(args):
                   file=sys.stderr)
             return 2
         _adoc, _aenv, act_err = _activate_mutation(
-            committed_rev, expect_present=new_values)
+            committed_rev, expect_present=new_values,
+            committed_sha=committed_sha)
     else:
         entries = existing  # no-op: never rewrite (evidence MIN-1)
         committed_rev, act_err = None, None
@@ -4925,13 +4943,14 @@ def _literals_remove(args):
     out["literals"] = kept
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        committed_rev = _commit_registry(out)
+        committed_rev, committed_sha = _commit_registry(out)
     except OSError:
         print(f"[info-guard] ✗ cannot write {CUSTOM_LITERALS} — "
               f"registry unchanged (permissions? disk?)", file=sys.stderr)
         return 2
     _adoc, _aenv, act_err = _activate_mutation(
-        committed_rev, expect_absent=[removed_value])
+        committed_rev, expect_absent=[removed_value],
+        committed_sha=committed_sha)
     if json_mode:
         print(json.dumps({"removed": True, "id": target,
                           "activated": act_err is None, "rev": committed_rev},
@@ -5743,7 +5762,7 @@ def _literals_rotate(args):
     # exception path unlinks it).
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        committed_rev = _commit_registry(out)
+        committed_rev, committed_sha = _commit_registry(out)
     except BaseException:
         return _rotate_fail("internal_error")
     # Verified activation (v0.9.3): rotate's stdout response is
@@ -5751,7 +5770,8 @@ def _literals_rotate(args):
     # outcome rides stderr + the exit code (1 = committed but activation
     # failed — the new-value identity is registered but not yet masked).
     _adoc, _aenv, act_err = _activate_mutation(
-        committed_rev, expect_present=[new_value])
+        committed_rev, expect_present=[new_value],
+        committed_sha=committed_sha)
     if json_mode:
         print(resp)
     else:
@@ -5920,7 +5940,7 @@ def cmd_setup(args):
         out["version"] = 2
         out["literals"] = entries
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        committed_rev = _commit_registry(out)
+        committed_rev, committed_sha = _commit_registry(out)
         print(f"[info-guard] wrote {len(added)} new literal(s) → {CUSTOM_LITERALS}")
     elif not env_sources:
         print("[info-guard] nothing new to register — no changes made")
@@ -5934,7 +5954,7 @@ def cmd_setup(args):
     elif added:
         _adoc, _aenv, act_err = _activate_mutation(
             committed_rev, expect_present=[v for v, _m in added],
-            env_files=[])
+            env_files=[], committed_sha=committed_sha)
         _activation_report(act_err)
     if skipped_short:
         print(f"[info-guard] note: {skipped_short} short value(s) skipped — their "

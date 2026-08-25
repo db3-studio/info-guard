@@ -2142,9 +2142,14 @@ except (OSError, ValueError) as _e8:
     _c8_exc = repr(_e8)
 _v3f_mat = not os.path.exists(fmat)
 _v3f = _v3f_rc and _v3f_err and _v3f_rev and _v3f_val and _v3f_mat
+try:
+    _c8_reg = json.dumps(json.load(open(freg)))
+except (OSError, ValueError):
+    _c8_reg = "<unreadable>"
 check("v093.a2: post-commit rebuild failure is loud, mutation stands, exit 1",
       _v3f, f"rc={_v3f_rc} err={_v3f_err} rev={_v3f_rev} val={_v3f_val} "
-           f"mat={_v3f_mat} {_c8_exc} {_buf_err.getvalue()[:120]!r}")
+           f"mat={_v3f_mat} {_c8_exc} reg={_c8_reg[:160]!r} "
+           f"{_buf_err.getvalue()[:80]!r}")
 # 9. concurrency: racing adds converge or are flagged — never silent
 v3g_home = os.path.join(tmp, "v093-race-home")
 os.makedirs(v3g_home, exist_ok=True)
@@ -2167,17 +2172,21 @@ _r = subprocess.run(
 # the activation invariants: both values registered, and the pattern is
 # never ahead/invalid (a false-success artifact). A race that leaves the
 # pattern behind is detected (the stale line) — never silent.
-_v3g = 0 in _rcs
+# last-writer-wins is the documented no-lock semantics: a racing add may
+# lose its value to the winner — the guard must make that LOSS LOUD
+# (exit 1), never a silent false success. Accept: both values present
+# (no race) OR the guard fired (race detected); never an "ahead" artifact.
 _reg = json.load(open(os.path.join(v3g_home, "state", "info-guard",
                                    "custom_literals.json")))
 _vals = {x.get("value") if isinstance(x, dict) else x
          for x in _reg.get("literals", [])}
 _v3g_vals = "v093-race-0-" in str(_vals) and "v093-race-1-" in str(_vals)
+_v3g_guard = 1 in _rcs
 _v3g_ahead = "ahead of the registry" not in _r.stdout
-_v3g = _v3g and _v3g_vals and _v3g_ahead
+_v3g = (_v3g_vals or _v3g_guard) and _v3g_ahead
 check("v093.a2: racing adds converge or are flagged — no silent false success",
-      _v3g, f"rcs={_rcs} vals={_v3g_vals} ahead={_v3g_ahead} "
-           f"check={_r.returncode} out={_r.stdout[:200]!r}")
+      _v3g, f"rcs={_rcs} vals={_v3g_vals} guard={_v3g_guard} "
+           f"ahead={_v3g_ahead} check={_r.returncode} out={_r.stdout[:200]!r}")
 # 10. export-style .env warning (audit item 2 / B2)
 v3x_home = os.path.join(tmp, "v093-export-home")
 os.makedirs(v3x_home, exist_ok=True)
@@ -6582,7 +6591,8 @@ try:
     _reg4 = os.path.join(_e4home, "state", "info-guard",
                          "custom_literals.json")
     _e4ok = _e4ok and os.path.isfile(_reg4) \
-        and json.load(open(_reg4)) == {"version": 2, "literals": []}
+        and json.load(open(_reg4)) == {"version": 2, "rev": 0,
+                                       "literals": []}
     _inst4 = os.path.join(_e4home, "state", "info-guard", "install.json")
     _e4ok = _e4ok and os.path.isfile(_inst4) \
         and json.load(open(_inst4)).get("version") == _PKG_VER
