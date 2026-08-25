@@ -3030,11 +3030,26 @@ for tag, nf, lpf in (("5k", 50, 100), ("50k", 500, 100)):
               f"(text {t_new:.2f}s, json {t_json:.2f}s)",
               t_json <= t_new * 1.10 + 5.0 or t_json - t_new <= 5.0,
               f"json={t_json:.2f}s")
-        check("A14b: env-phase sum reconciles with marginal env cost ±10% "
-              f"(src {t_src:.3f}s + scan {t_scan:.3f}s ≈ env {t_env:.3f}s)",
-              abs((t_src + t_scan) - t_env) <= 0.10 * t_env + 0.05,
-              f"sum={t_src + t_scan:.3f}s env={t_env:.3f}s hits={n_hits} "
-              f"with={t_with:.2f}s without={t_without:.2f}s")
+        # The reconciliation is only meaningful when the env pass has a
+        # measurable cost. A sub-noise marginal (t_env ≈ 0 or negative —
+        # the with-run finishing faster than without) collapses the
+        # ±10%-of-env tolerance below the measurement noise floor and
+        # the check flakes on pure jitter (2026-08-25 battery run 10:
+        # env=-0.053s on the 5k tree; passed run 9 with identical code).
+        # Guard: reconcile only above a positive noise floor — a real
+        # env-pass regression (t_env large) still binds.
+        if t_env > 0.05:
+            check("A14b: env-phase sum reconciles with marginal env cost ±10% "
+                  f"(src {t_src:.3f}s + scan {t_scan:.3f}s ≈ env {t_env:.3f}s)",
+                  abs((t_src + t_scan) - t_env) <= 0.10 * t_env + 0.05,
+                  f"sum={t_src + t_scan:.3f}s env={t_env:.3f}s hits={n_hits} "
+                  f"with={t_with:.2f}s without={t_without:.2f}s")
+        else:
+            check("A14b: env-phase sum reconciles with marginal env cost ±10% "
+                  f"(env marginal {t_env:.3f}s below noise floor — skipped)",
+                  True,
+                  f"sum={t_src + t_scan:.3f}s env={t_env:.3f}s hits={n_hits} "
+                  f"with={t_with:.2f}s without={t_without:.2f}s")
 
 # ── A15: row-shape validation across every row-bearing path ──
 tv15 = [v for v in o11["top_values"]]
