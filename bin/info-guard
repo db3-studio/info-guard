@@ -484,19 +484,20 @@ def _activate_mutation(committed_rev, expect_present=(), expect_absent=(),
     mid-activation commit. Returns (doc, env_values, error_msg_or_None).
     Never raises — every failure path normalizes to a value-free message
     the caller emits (fail-loud, never silent)."""
+    _resolved = []
     try:
         _resolved = _default_sources() if env_files is None else env_files
         doc, env_values = _rebuild_pattern_doc(_resolved, require_env=False)
     except BaseException as exc:
-        return None, set(), [], f"activation failed ({type(exc).__name__})"
+        return None, set(), f"activation failed ({type(exc).__name__})", _resolved
     if doc.get("derived_rev") != committed_rev:
-        return doc, env_values, [], (
+        return doc, env_values, (
             f"activation verification failed: pattern derived_rev "
-            f"{doc.get('derived_rev')!r} != committed rev {committed_rev}")
+            f"{doc.get('derived_rev')!r} != committed rev {committed_rev}"), _resolved
     _entries, _ok, reg_doc = _load_registry()
     if not _ok or _registry_rev(reg_doc) != committed_rev:
-        return doc, env_values, [], (
-            "registry changed during activation — rerun the operation")
+        return doc, env_values, (
+            "registry changed during activation — rerun the operation"), _resolved
     if committed_sha is not None:
         # Content comparison: catches same-rev races (two writers both
         # committing rev N) that a rev comparison alone would miss — a
@@ -506,16 +507,16 @@ def _activate_mutation(committed_rev, expect_present=(), expect_absent=(),
         except OSError:
             cur_sha = None
         if cur_sha != committed_sha:
-            return doc, env_values, [], (
-                "registry changed during activation — rerun the operation")
+            return doc, env_values, (
+                "registry changed during activation — rerun the operation"), _resolved
     reg_vals = {x.get("value") if isinstance(x, dict) else x
                 for x in _entries if isinstance(x, dict)
                 or isinstance(x, str)}
     for v in expect_absent:
         if v in reg_vals:
-            return doc, env_values, [], (
+            return doc, env_values, (
                 "activation verification failed: removed value still "
-                "present in the registry")
+                "present in the registry"), _resolved
     doc_values = set()
     for lit in doc.get("literals", []) or []:
         if isinstance(lit, str) and lit:
@@ -524,14 +525,14 @@ def _activate_mutation(committed_rev, expect_present=(), expect_absent=(),
             doc_values.add(lit["value"])
     for v in expect_present:
         if v not in doc_values:
-            return doc, env_values, [], (
+            return doc, env_values, (
                 "activation verification failed: value not present "
-                "in the pattern file")
+                "in the pattern file"), _resolved
     for v in expect_absent:
         if v in doc_values and v not in env_values:
-            return doc, env_values, [], (
+            return doc, env_values, (
                 "activation verification failed: removed value still "
-                "present (not env-supplied)")
+                "present (not env-supplied)"), _resolved
     return doc, env_values, None, _resolved
 
 

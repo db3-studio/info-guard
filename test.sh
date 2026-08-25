@@ -2062,7 +2062,10 @@ _doc["rev"] = _doc["rev"] + 3
 json.dump(_doc, open(v3_reg, "w"))
 _r = v3_run("check")
 _v3c = _r.returncode == 1 and "mutation(s) since last build" in _r.stdout
-_r = v3_run("build")
+# env-less fixture home: the no-source build guard (build-diff MAJ-1
+# fold) makes plain `build` fatal here — the registry-only path is the
+# designated repair for homes without .env sources.
+_r = v3_run("build", "--registry-only")
 _v3c = _v3c and _r.returncode == 0
 _r = v3_run("check")
 # the stale line is gone after build (rc stays 1 on this fixture home
@@ -2212,10 +2215,10 @@ os.makedirs(v3f2_home, exist_ok=True)
 v3f2_env = dict(os.environ)
 v3f2_env["HERMES_HOME"] = v3f2_home
 V3F2 = "v093-from-secret-" + "123456"
-open(os.path.join(v3f2_home, "s.env"), "w").write(f"SRC_KEY={V3F2}\n")
+open(os.path.join(v3f2_home, "s.env"), "w").write(f"SRC_TOKEN={V3F2}\n")
 _r = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
-     "literals", "add", "--from", os.path.join(v3f2_home, "s.env") + ":SRC_KEY",
+     "literals", "add", "--from", os.path.join(v3f2_home, "s.env") + ":SRC_TOKEN",
      "--json"], env=v3f2_env, capture_output=True, text=True, timeout=300)
 _p = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"), "pipe"],
@@ -2282,6 +2285,7 @@ v3l_home = os.path.join(tmp, "v093-legacy-home")
 os.makedirs(v3l_home, exist_ok=True)
 v3l_env = dict(os.environ)
 v3l_env["HERMES_HOME"] = v3l_home
+os.makedirs(os.path.join(v3l_home, "state", "info-guard"), exist_ok=True)
 open(os.path.join(v3l_home, "state", "info-guard", "custom_literals.json"),
      "w").write(json.dumps({"version": 2, "literals": []}))   # no rev field
 V3L = "v093-legacy-secret-" + "123456"
