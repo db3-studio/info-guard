@@ -576,6 +576,16 @@ def cmd_build(env_files):
               file=sys.stderr)
         return 2
     if registry_only:
+        _implicit = _default_sources()
+        if _implicit:
+            # DeepSeek evidence MAJ-4: `--registry-only` with default
+            # .env sources present silently excludes them — the loud,
+            # never-silent posture requires the warning (the repair
+            # message only points here when no env sources exist).
+            print("[info-guard] ⚠ --registry-only with .env sources "
+                  "present — env-sourced values NOT included "
+                  f"(found: {', '.join(str(p) for p in _implicit)})",
+                  file=sys.stderr)
         doc, _ev = _rebuild_pattern_doc([], require_env=False)
     else:
         doc, _ev = _rebuild_pattern_doc(paths if paths else None,
@@ -606,7 +616,13 @@ def cmd_status():
     if _rok:
         reg_rev = _registry_rev(reg_doc)
         der_rev = data.get("derived_rev")
-        if type(der_rev) is int and der_rev < 0:
+        raw_rev = (reg_doc or {}).get("rev")
+        if raw_rev is not None and (type(raw_rev) is not int
+                                    or raw_rev < 0):
+            # DeepSeek evidence MAJ-5: a malformed registry rev must
+            # never read as "current" (the lazy backfill reads it as 0).
+            act = "unverifiable (registry rev malformed)"
+        elif type(der_rev) is int and der_rev < 0:
             act = "invalid (negative stamp)"
         elif type(der_rev) is int and der_rev == reg_rev:
             act = "current"
@@ -7229,13 +7245,29 @@ def cmd_check(args):
             # pattern file's derived_rev — directional, never silent.
             _rent, _rok, reg_doc = _load_registry()
             reg_rev = _registry_rev(reg_doc) if _rok else None
+            raw_rev = (reg_doc or {}).get("rev") if _rok else None
             der_rev = data.get("derived_rev")
-            if reg_rev is not None and type(der_rev) is not int:
+            if not _rok:
+                # DeepSeek evidence MAJ-1/MIN-4: an unreadable registry
+                # must be loud, never a silent skip of the activation
+                # state (the pattern-file OSError path names the wrong
+                # file for a registry failure).
+                problems += 1
+                print("[info-guard] ✗ activation: registry unreadable — "
+                      "activation state unverifiable", file=sys.stderr)
+            elif raw_rev is not None and (type(raw_rev) is not int
+                                          or raw_rev < 0):
+                # DeepSeek evidence MAJ-5: malformed registry rev reads
+                # as 0 via the lazy backfill — never "current".
+                problems += 1
+                print("[info-guard] ✗ activation: registry rev malformed "
+                      "(not an integer) — run `info-guard build`")
+            elif type(der_rev) is not int:
                 problems += 1
                 print("[info-guard] ✗ activation: pattern file derivation "
                       "stamp invalid or missing (legacy artifact) — run "
                       "`info-guard build`")
-            elif reg_rev is not None:
+            else:
                 if der_rev < 0:
                     problems += 1
                     print("[info-guard] ✗ activation: pattern file "

@@ -2084,6 +2084,26 @@ _v3c = _r.returncode == 1 and "derivation stamp" in _r.stdout
 shutil.move(_bak, v3_mat)
 check("v093.a2: legacy pattern file (no derived_rev) flagged unverifiable",
       _v3c, f"check={_r.stdout[:200]!r}")
+# 6b. BOTH-legacy combo (registry without rev + pattern without
+# derived_rev) — check exits 1 with the derivation-stamp line
+# (evidence DeepSeek MIN-2).
+v3l2_home = os.path.join(tmp, "v093-legacy2-home")
+os.makedirs(os.path.join(v3l2_home, "state", "info-guard"), exist_ok=True)
+v3l2_env = dict(os.environ)
+v3l2_env["HERMES_HOME"] = v3l2_home
+open(os.path.join(v3l2_home, "state", "info-guard",
+                  "custom_literals.json"), "w").write(
+    json.dumps({"version": 2, "literals": []}))          # no rev
+open(os.path.join(v3l2_home, "state", "info-guard",
+                  "redact_patterns.json"), "w").write(
+    json.dumps({"version": 2, "literals": [],
+                "key_patterns": {}}))                    # no derived_rev
+_r = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "check"], env=v3l2_env, capture_output=True, text=True, timeout=300)
+check("v093.a2: both-legacy registry+pattern flagged unverifiable (exit 1)",
+      _r.returncode == 1 and "derivation stamp" in _r.stdout,
+      f"rc={_r.returncode} out={_r.stdout[:160]!r}")
 # 7. source-model overlap: mutation rebuild never drops env-sourced values
 v3e_home = os.path.join(tmp, "v093-env-home")
 os.makedirs(v3e_home, exist_ok=True)
