@@ -491,13 +491,14 @@ def _activate_mutation(committed_rev, expect_present=(), expect_absent=(),
 
 
 def _activation_report(act_err):
-    """Emit the activation handshake outcome (v0.9.3). Success -> a
-    stderr confirmation line, exit 0; failure -> the loud repair
-    message with the correct repair command, exit 1 (the identity
-    mutation stands; the stale artifact is detectable via check)."""
+    """Emit the activation handshake outcome (v0.9.3). Success is SILENT
+    (exit 0) — the confirmation rides the JSON `activated` field and the
+    at-rest rev/derived_rev state, and the mutation commands keep their
+    value-free, zero-chatter diagnostics contract (the Wave E rotate
+    contract asserts stderr == \"\" on success). Failure stays loud: the
+    repair message on stderr + exit 1 (the identity mutation stands; the
+    stale artifact is detectable via check)."""
     if act_err is None:
-        print("[info-guard] ✓ activation: pattern file rebuilt + verified",
-              file=sys.stderr)
         return 0
     repair = ("run `info-guard build --registry-only`"
               if not _default_sources() else "run `info-guard build`")

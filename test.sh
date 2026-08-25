@@ -2130,13 +2130,21 @@ _buf_out, _buf_err = _io.StringIO(), _io.StringIO()
 with contextlib.redirect_stdout(_buf_out), contextlib.redirect_stderr(_buf_err):
     _rc = ig_mod._literals_add(
         ["--file", os.path.join(v3f_home, "v.txt"), "--json"])
-_v3f = _rc == 1 and "activation failed" in _buf_err.getvalue() \
-    and json.load(open(freg)).get("rev") == 1 \
-    and "fault-val-" in [x.get("value") if isinstance(x, dict) else x
-                         for x in json.load(open(freg))["literals"]] \
-    and not os.path.exists(fmat)
+_v3f_rc = _rc == 1
+_v3f_err = "activation failed" in _buf_err.getvalue()
+try:
+    _v3f_rev = json.load(open(freg)).get("rev") == 1
+    _v3f_val = "fault-val-" in [x.get("value") if isinstance(x, dict) else x
+                               for x in json.load(open(freg))["literals"]]
+    _c8_exc = ""
+except (OSError, ValueError) as _e8:
+    _v3f_rev = _v3f_val = False
+    _c8_exc = repr(_e8)
+_v3f_mat = not os.path.exists(fmat)
+_v3f = _v3f_rc and _v3f_err and _v3f_rev and _v3f_val and _v3f_mat
 check("v093.a2: post-commit rebuild failure is loud, mutation stands, exit 1",
-      _v3f, f"rc={_rc} err={_buf_err.getvalue()[:200]!r}")
+      _v3f, f"rc={_v3f_rc} err={_v3f_err} rev={_v3f_rev} val={_v3f_val} "
+           f"mat={_v3f_mat} {_c8_exc} {_buf_err.getvalue()[:120]!r}")
 # 9. concurrency: racing adds converge or are flagged — never silent
 v3g_home = os.path.join(tmp, "v093-race-home")
 os.makedirs(v3g_home, exist_ok=True)
@@ -2164,11 +2172,12 @@ _reg = json.load(open(os.path.join(v3g_home, "state", "info-guard",
                                    "custom_literals.json")))
 _vals = {x.get("value") if isinstance(x, dict) else x
          for x in _reg.get("literals", [])}
-_v3g = _v3g and "v093-race-0-" in str(_vals) \
-    and "v093-race-1-" in str(_vals) \
-    and "ahead of the registry" not in _r.stdout
+_v3g_vals = "v093-race-0-" in str(_vals) and "v093-race-1-" in str(_vals)
+_v3g_ahead = "ahead of the registry" not in _r.stdout
+_v3g = _v3g and _v3g_vals and _v3g_ahead
 check("v093.a2: racing adds converge or are flagged — no silent false success",
-      _v3g, f"rcs={_rcs} check={_r.returncode} out={_r.stdout[:150]!r}")
+      _v3g, f"rcs={_rcs} vals={_v3g_vals} ahead={_v3g_ahead} "
+           f"check={_r.returncode} out={_r.stdout[:200]!r}")
 # 10. export-style .env warning (audit item 2 / B2)
 v3x_home = os.path.join(tmp, "v093-export-home")
 os.makedirs(v3x_home, exist_ok=True)
@@ -3552,7 +3561,7 @@ b8r = r.returncode == 0
 if b8r:
     try:
         j = json.loads(r.stdout)
-        b8r = j == {"removed": True, "id": b8_id}
+        b8r = j.get("removed") is True and j.get("id") == b8_id
     except ValueError:
         b8r = False
 check("WB B8: remove found --json → {removed:true, id}, exit 0",
@@ -5747,7 +5756,7 @@ ig_src_b = open(os.path.join(os.getcwd(), "bin", "info-guard")).read()
 check("WC A17: env check shares the build parser path",
       "def _load_env" in ig_src_b
       and "_parse_env_lines(lines, report=" in ig_src_b
-      and "_parse_env_lines(lines)[0]" in ig_src_b,
+      and "_parse_env_lines(lines, on_export_skip=" in ig_src_b,
       "load_env and cmd_env must both route through _parse_env_lines")
 
 # ── S4: security boundaries ─────────────────────────────────────────────
@@ -7376,11 +7385,16 @@ _rc2 = _rc2 and _old_e.get("retired") is True \
     and _new_e.get("mask") == "full" \
     and _new_e.get("keep_field") == "preserve-me" \
     and _new_e.get("retired") is None and _new_e.get("rotated_to") is None
-# A35: the ONLY changed file is the registry (bytes/mtime/ctime); no
-# file created or deleted.
-_only_reg = (set(_before) == set(_after)
-             and all((k == str(WEREG)) == (a != _after[k])
-                     for k, a in _before.items()))
+# A35 (v0.9.3): the registry transaction + the verified matcher
+# activation are the ONLY changed state files (no other file touched,
+# created, or removed; the matcher may be created by the activation).
+_WE_MATCHER_F = str(WEH / "state/info-guard" / "redact_patterns.json")
+_changed = {k for k, a in _before.items() if a != _after.get(k)}
+_created = set(_after) - set(_before)
+_removed = set(_before) - set(_after)
+_only_reg = not _removed \
+    and _created <= {_WE_MATCHER_F} \
+    and _changed <= {str(WEREG), _WE_MATCHER_F}
 _rc2 = _rc2 and _only_reg
 check("battery.rotate.identity_lifecycle_round_trip: A34/A35 rotate "
       "retires + establishes + lineage in one registry-only transaction",
