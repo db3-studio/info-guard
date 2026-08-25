@@ -299,7 +299,8 @@ if [ ! -f "$PATTERNS_FILE" ]; then
   "mask": {"head": 2, "tail": 2, "floor": 12},
   "literals": [],
   "key_patterns": {},
-  "generated": "seed — run `info-guard build` to populate from your .env files"
+  "generated": "seed — run `info-guard build` to populate from your .env files",
+  "derived_rev": 0
 }
 EOF
     chmod 600 "$PATTERNS_FILE"
@@ -308,9 +309,9 @@ else
     say "pattern file exists — left untouched"
 fi
 if [ ! -f "$STATE_DIR/custom_literals.json" ]; then
-    echo '{"version": 2, "literals": []}' > "$STATE_DIR/custom_literals.json"
+    echo '{"version": 2, "rev": 0, "literals": []}' > "$STATE_DIR/custom_literals.json"
     chmod 600 "$STATE_DIR/custom_literals.json"
-    say "seeded $STATE_DIR/custom_literals.json (edit it, then \`info-guard build\`)"
+    say "seeded $STATE_DIR/custom_literals.json (CLI-managed — register via \`literals add\`)"
 fi
 
 # ── 6. point Hermes at the pattern file ─────────────────────────────────

@@ -4,6 +4,38 @@ All notable changes to Info Guard are documented here. Format follows [Keep a Ch
 
 > Convention: micro-version fixes within the same workstream are consolidated into the latest entry of that release, not captured per tag.
 
+## [v0.9.3] - 2026-08-25
+
+Verified-activation release — registry mutations activate masking immediately.
+
+### Added
+- **Verified activation** — every registry mutation (`literals add`, `add --from`,
+  `remove`, `rotate`, `setup` registration) rebuilds and read-back-verifies the
+  pattern file: new values are masked immediately, no manual `build` needed.
+  JSON mutation output gains `activated`/`rev` fields; activation failures are
+  loud with the exact repair command.
+- **`build --registry-only`** — rebuild the pattern file from the registry
+  alone (the repair path for installations without `.env` sources).
+- **Activation state at rest** — the pattern file carries a `derived_rev`
+  stamp; `check` reports activation staleness directionally (stale, ahead,
+  invalid, unverifiable) and exits non-zero until the next build.
+- **`build` warns on skipped `export KEY=...` lines** — export-style `.env`
+  lines are not parsed (values not protected); the warning is per source on
+  stderr.
+
+### Fixed
+- **`check --battery` sandbox construction** — the battery's scratch target is
+  built from clean `HEAD` sources with the patch applied uncommitted and a
+  supported-release tag, so `check --battery` reports the real battery verdict
+  instead of failing on construction.
+- **Stale-pattern seam** — a value registered or rotated is masked immediately;
+  previously the pattern file was only refreshed by an explicit `build`.
+
+### Notes
+- Run `info-guard build` once after upgrading to v0.9.3 to stamp the pattern
+  file with the activation state (existing installations heal on their next
+  build or scheduled refresh).
+
 ## [v0.9.2] - 2026-08-24
 
 Documentation and verification hardening release.

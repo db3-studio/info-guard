@@ -1,15 +1,15 @@
 # Rotation schema — `info-guard/rotate/v1`
 
-Applies to Info Guard **v0.9.2** (rotation contract unchanged since
-v0.9.1 — the vocabulary and enums below are locked to the v0.9.1 release
-that introduced them).
+Applies to Info Guard **v0.9.3** (rotation contract updated with the
+verified-activation handshake — the vocabulary and enums below are
+locked to the v0.9.1 release that introduced them).
 
 This document defines the machine-readable rotation surface of Info Guard:
 the read-only `rotate-candidates` view and the `literals rotate` registry
 transaction. Rotation is an identity lifecycle — never string replacement:
-retire the old identity, establish a new identity, preserve lineage,
-regenerate matching artifacts explicitly, and expose the resulting
-candidate explicitly.
+retire the old identity, establish a new identity, preserve lineage, and
+activate the new identity (the pattern file is rebuilt and read-back
+verified — v0.9.3), exposing the resulting candidate explicitly.
 
 All contract timestamps are ISO 8601 UTC, second precision, with a `Z`
 suffix and no fractional seconds.
@@ -451,10 +451,12 @@ sorted unique SHA-256 digests of the exact unique literal values
 ```
 
 The registry document itself carries no fingerprint field. `literals
-rotate` changes the registry only; it performs no fingerprint or baseline
-write. On the next watch run the protection snapshot contains both the
-retired old value and the new value, and no stale fingerprint can remain
-because the list is derived from the current registry snapshot.
+rotate` changes the registry and rebuilds the pattern file (v0.9.3
+verified activation — the new value is masked immediately, read-back
+verified); it performs no fingerprint or baseline write. On the next
+watch run the protection snapshot contains both the retired old value
+and the new value, and no stale fingerprint can remain because the list
+is derived from the current registry snapshot.
 
 ---
 

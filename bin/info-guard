@@ -106,7 +106,7 @@ Sources merged by `build`:
          those keys are still covered by the key-pattern pass below)
   2. A curated key list (PIN, x_passphrase, client_secret, ...) whose
      values are masked regardless of length (KEY= form).
-  3. <state>/custom_literals.json — hand-edited exact values (PII, emails,
+  3. <state>/custom_literals.json — CLI-managed exact values (PII, emails,
      names, anything you decide is sensitive). Optional; survives rebuilds;
      masking only. Entries: plain strings, or {"value": ..., "mask": "full"}
      for full masking.
@@ -143,13 +143,13 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.9.2"
+_PACKAGE_VERSION = "0.9.3"
 
 # Per-subcommand usage lines (v0.4.1, IG D55): printed by
 # `info-guard <cmd> --help` (exit 0). Mirror the __doc__ usage block —
 # keep both in sync when a command's options change.
 _SUBCOMMAND_USAGE = {
-    "build": "info-guard build [ENV_FILE ...]    Build redact_patterns.json from .env sources",
+    "build": "info-guard build [ENV_FILE ...] [--registry-only]    Build redact_patterns.json from .env sources (--registry-only: registry alone)",
     "status": "info-guard status                  Show a summary of the current pattern file",
     "preflight": "info-guard preflight [DIR ...] [--full] [--json] [--json-out FILE]   Zero-config leak scan (read-only, masked)",
     "watch": "info-guard watch [DIR ...] [--reset] [--json] [--json-out FILE]   Delta monitor vs the watch baseline (cron-friendly exits)",
@@ -209,7 +209,7 @@ def _is_non_secret_key(k: str) -> bool:
             or NON_SECRET_FLAG_RE.search(k))
 
 
-def _parse_env_lines(lines, report=None):
+def _parse_env_lines(lines, report=None, on_export_skip=None):
     """Pure parser: [KEY: value] from already-split lines. Returns
     (entries, saw_content, saw_valid_entry). NO I/O — read/decode errors
     are the caller's job (_load_env raises SystemExit with a path-only
@@ -257,6 +257,8 @@ def _parse_env_lines(lines, report=None):
         k, _, v = line.partition("=")
         k = k.strip().strip('"').strip("'")
         if not VALID_KEY_RE.match(k):
+            if on_export_skip is not None and _EXPORT_STYLE_RE.match(line):
+                on_export_skip()
             if report is not None:
                 report(lineno, "bad-key-form", None)
             continue
@@ -301,8 +303,15 @@ def _report_env_violations(report, lineno, key, raw_value):
 _SHELL_PAYLOAD_RE = re.compile(
     r"\$\(|`|[;|><&]|\bsource\s+|(?:^|[\s=;|&])\.\s+")
 
+# Export-style assignment lines (`export KEY=value`) — deliberately
+# UNSUPPORTED .env grammar (format-spec): the parser skips them
+# silently. v0.9.3 counts them so build can warn (the value is NOT
+# protected — audit item 2 / B2).
+_EXPORT_STYLE_RE = re.compile(
+    r"^export\s+[A-Za-z_][A-Za-z0-9_]*\s*=")
 
-def _load_env(path: Path):
+
+def _load_env(path: Path, on_export_skip=None):
     """Parse a .env file into {KEY: value}. Errors on a path are fatal
     (a source you named must exist); missing default sources are skipped.
     Parsing delegates to _parse_env_lines (identical semantics)."""
@@ -310,7 +319,7 @@ def _load_env(path: Path):
         lines = path.read_text().splitlines()
     except OSError:
         raise SystemExit(f"[info-guard] ✗ cannot read env source: {path}")
-    return _parse_env_lines(lines)[0]
+    return _parse_env_lines(lines, on_export_skip=on_export_skip)[0]
 
 
 def _default_sources():
@@ -350,32 +359,83 @@ def _atomic_write_json(path: Path, data: dict) -> None:
         raise
 
 
-def cmd_build(env_files):
+def _registry_rev(doc):
+    """Registry `rev` counter with lazy backfill (v0.9.3): only an exact
+    non-negative int is a valid rev — floats, numeric strings, booleans
+    and negative values read as 0 (malformed never passes). Mirrors the
+    A53 lazy id backfill — no migration."""
+    if not isinstance(doc, dict):
+        return 0
+    rev = doc.get("rev", 0)
+    if type(rev) is int and rev >= 0:
+        return rev
+    return 0
+
+
+def _commit_registry(out):
+    """Canonical registry COMMIT for REAL mutations (v0.9.3): bump the
+    monotonic `rev` counter, then the atomic 0600 write. Raises OSError
+    exactly like the inline writer the callers previously used — each
+    caller keeps its own failure handling (loud, registry unchanged).
+    Returns (rev, content_sha256) — the content hash powers the
+    activation guard's mid-activation change detection (catches
+    same-rev races, not just rev differences)."""
+    out["rev"] = _registry_rev(out) + 1
+    payload = json.dumps(out, indent=2) + "\n"
+    _atomic_write_json(CUSTOM_LITERALS, out)
+    return out["rev"], hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _rebuild_pattern_doc(env_files, require_env):
+    """Canonical MATCHER regeneration (extracted from cmd_build,
+    v0.9.3): env sources (when present) + registry literals ->
+    redact_patterns.json, stamped with the registry rev consumed
+    (`derived_rev` — the activation handshake at rest). Returns
+    (doc, env_values). require_env=True reproduces cmd_build's contract
+    (no sources -> SystemExit); require_env=False tolerates absent
+    sources (registry-only derivation — the mutation path)."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    sources = [Path(p) for p in env_files] if env_files else _default_sources()
-    if not sources:
-        raise SystemExit("[info-guard] ✗ no .env sources found — pass env files "
-                         "explicitly, or run from a directory with a .env")
-    raw_lits, key_patterns, val_masks = [], {}, {}
-    for path in sources:
+    if env_files is None:
+        env_files = _default_sources()
+    if not env_files and require_env:
+        # cmd_build's historical contract (pre-v0.9.3, preserved by the
+        # extraction): a bare `build` with no sources is a hard error —
+        # never a silent registry-only matcher (would replace a
+        # populated one). Only --registry-only may proceed without env.
+        raise SystemExit(
+            "[info-guard] ✗ no .env sources found — pass env files "
+            "explicitly, or run from a directory with a .env")
+    raw_lits, key_patterns, val_masks, env_values = [], {}, {}, set()
+    export_warnings = []
+    for path in env_files:
         if not path.exists():
-            raise SystemExit(f"[info-guard] ✗ env source not found: {path}")
-        for k, v in _load_env(path).items():
+            if require_env:
+                raise SystemExit(
+                    f"[info-guard] ✗ env source not found: {path}")
+            continue
+        skip_count = [0]
+        def _count_export():
+            skip_count[0] += 1
+        for k, v in _load_env(path, on_export_skip=_count_export).items():
             if _is_non_secret_key(k):
                 continue
-            if len(v) >= 8:                    # literal floor = precision optimization
+            if len(v) >= 8:              # literal floor = precision optimization
                 raw_lits.append(v)
             key_patterns[k] = True
+            env_values.add(v)
+        if skip_count[0]:
+            export_warnings.append((path, skip_count[0]))
+    for path, n in export_warnings:
+        print(f"[info-guard] ⚠ {path}: {n} export-style line(s) skipped "
+              f"(unsupported grammar) — values NOT protected",
+              file=sys.stderr)
     for k in EXTRA_KEY_PATTERNS:
         key_patterns[k] = True
-    # Hand-edited custom literals (PII — emails, names, numbers, anything the
-    # user decides is sensitive). The file is a SOURCE, never clobbered by
-    # rebuilds: edit it, then `info-guard build` picks it up. Read through
-    # the canonical loader (v0.4.2, MAJ-1) — build also triggers the lazy
-    # registry migration, so a v1 registry cannot linger for build-only users.
-    entries, ok, _doc = _load_registry()
+    entries, ok, reg_doc = _load_registry()
+    rev = _registry_rev(reg_doc)
     if not ok:
-        print(f"[info-guard] ⚠ {CUSTOM_LITERALS.name} unreadable — skipped (fail-safe)")
+        print(f"[info-guard] ⚠ {CUSTOM_LITERALS.name} unreadable — "
+              f"skipped (fail-safe)")
     else:
         for item in entries:
             if isinstance(item, dict):
@@ -389,17 +449,152 @@ def cmd_build(env_files):
     # Longest-first so overlapping literals mask deterministically
     literals = []
     for v in sorted(set(raw_lits), key=len, reverse=True):
-        literals.append({"value": v, "mask": val_masks[v]} if v in val_masks else v)
-    _atomic_write_json(MATCHER, {
+        literals.append({"value": v, "mask": val_masks[v]}
+                        if v in val_masks else v)
+    doc = {
         "mask": {"head": 2, "tail": 2, "floor": 12},
         "literals": literals,
         "key_patterns": key_patterns,
         "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    })
+        "derived_rev": rev,
+    }
+    _atomic_write_json(MATCHER, doc)
     os.chmod(MATCHER, 0o600)
-    n_full = sum(1 for l in literals if isinstance(l, dict))
-    print(f"[info-guard] matcher: {len(literals)} literals ({n_full} full-mask), "
-          f"{len(key_patterns)} key patterns → {MATCHER}")
+    # Read-back (build-diff fold CRIT-2): the activation handshake
+    # verifies the PERSISTED matcher, never the in-memory doc — a write
+    # seam or post-write corruption must fail the handshake, not be
+    # masked by the object we just built. Raise on any read/parse/shape
+    # failure (callers normalize to the fail-loud message).
+    try:
+        persisted = json.loads(MATCHER.read_text())
+    except (OSError, ValueError) as exc:
+        raise OSError(f"matcher read-back failed: {exc}") from exc
+    if not isinstance(persisted, dict) \
+            or not isinstance(persisted.get("literals"), list) \
+            or not isinstance(persisted.get("key_patterns"), dict):
+        raise OSError("matcher read-back failed: invalid persisted shape")
+    return persisted, env_values
+
+
+def _activate_mutation(committed_rev, expect_present=(), expect_absent=(),
+                       env_files=None, committed_sha=None):
+    """Verified activation (the handshake, v0.9.3): rebuild the pattern
+    doc from the committed registry, read back, and verify provenance
+    (derived_rev == committed rev), the changed-value set, and no
+    mid-activation commit. Returns (doc, env_values, error_msg_or_None).
+    Never raises — every failure path normalizes to a value-free message
+    the caller emits (fail-loud, never silent)."""
+    _resolved = []
+    try:
+        _resolved = _default_sources() if env_files is None else env_files
+        doc, env_values = _rebuild_pattern_doc(_resolved, require_env=False)
+    except Exception as exc:
+        return None, set(), f"activation failed ({type(exc).__name__})", _resolved
+    # Exact-int stamp check (evidence MAJ-3): `True == 1` would let a
+    # corrupted boolean stamp pass the equality read-back — the stamp
+    # type must be int exactly (check/status treat non-int as invalid).
+    if type(doc.get("derived_rev")) is not int \
+            or doc.get("derived_rev") != committed_rev:
+        return doc, env_values, (
+            f"activation verification failed: pattern derived_rev "
+            f"{doc.get('derived_rev')!r} != committed rev {committed_rev}"), _resolved
+    _entries, _ok, reg_doc = _load_registry()
+    if not _ok or _registry_rev(reg_doc) != committed_rev:
+        return doc, env_values, (
+            "registry changed during activation — rerun the operation"), _resolved
+    if committed_sha is not None:
+        # Content comparison: catches same-rev races (two writers both
+        # committing rev N) that a rev comparison alone would miss — a
+        # false success report must never be possible.
+        try:
+            cur_sha = hashlib.sha256(CUSTOM_LITERALS.read_bytes()).hexdigest()
+        except OSError:
+            cur_sha = None
+        if cur_sha != committed_sha:
+            return doc, env_values, (
+                "registry changed during activation — rerun the operation"), _resolved
+    reg_vals = {x.get("value") if isinstance(x, dict) else x
+                for x in _entries if isinstance(x, dict)
+                or isinstance(x, str)}
+    for v in expect_absent:
+        if v in reg_vals:
+            return doc, env_values, (
+                "activation verification failed: removed value still "
+                "present in the registry"), _resolved
+    doc_values = set()
+    for lit in doc.get("literals", []) or []:
+        if isinstance(lit, str) and lit:
+            doc_values.add(lit)
+        elif isinstance(lit, dict) and isinstance(lit.get("value"), str):
+            doc_values.add(lit["value"])
+    for v in expect_present:
+        if v not in doc_values:
+            return doc, env_values, (
+                "activation verification failed: value not present "
+                "in the pattern file"), _resolved
+    for v in expect_absent:
+        if v in doc_values and v not in env_values:
+            return doc, env_values, (
+                "activation verification failed: removed value still "
+                "present (not env-supplied)"), _resolved
+    return doc, env_values, None, _resolved
+
+
+def _activation_report(act_err, env_sources=(), op="mutation"):
+    """Emit the activation handshake outcome (v0.9.3). Success is SILENT
+    (exit 0) — the confirmation rides the JSON `activated` field and the
+    at-rest rev/derived_rev state, and the mutation commands keep their
+    value-free, zero-chatter diagnostics contract (the Wave E rotate
+    contract asserts stderr == \"\" on success). Failure stays loud: the
+    repair message on stderr + exit 1 (the identity mutation stands; the
+    stale artifact is detectable via check). The repair command is chosen
+    from the CAPTURED source state of the failed activation, never a
+    fresh resolution (build-diff fold NIT-1)."""
+    if act_err is None:
+        return 0
+    repair = ("run `info-guard build --registry-only`"
+              if not env_sources else "run `info-guard build`")
+    # Failure diagnostic (evidence MAJ-6): operation name + committed-
+    # but-stale semantics + the reason + the repair command, value-free.
+    print(f"[info-guard] ✗ {op} committed but activation FAILED — "
+          f"pattern file stale ({act_err}); {repair}", file=sys.stderr)
+    return 1
+
+
+def cmd_build(env_files):
+    """Build redact_patterns.json from .env sources + the registry.
+    `--registry-only` (v0.9.3) derives from the registry alone — the
+    repair path for registry-only installs (no .env sources required)."""
+    args = list(env_files)
+    registry_only = "--registry-only" in args
+    paths = [Path(p) for p in args if p != "--registry-only"]
+    if registry_only and paths:
+        # build-diff MIN-4: `build --registry-only foo.env` would
+        # silently drop the env file — reject the combination loud.
+        print("[info-guard] usage: --registry-only takes no env files "
+              "(registry-only derives from the registry alone)",
+              file=sys.stderr)
+        return 2
+    if registry_only:
+        _implicit = _default_sources()
+        if _implicit:
+            # DeepSeek evidence MAJ-4: `--registry-only` with default
+            # .env sources present silently excludes them — the loud,
+            # never-silent posture requires the warning (the repair
+            # message only points here when no env sources exist).
+            print("[info-guard] ⚠ --registry-only with .env sources "
+                  "present — env-sourced values NOT included "
+                  f"(found: {', '.join(str(p) for p in _implicit)})",
+                  file=sys.stderr)
+        doc, _ev = _rebuild_pattern_doc([], require_env=False)
+    else:
+        doc, _ev = _rebuild_pattern_doc(paths if paths else None,
+                                        require_env=True)
+    lits = doc.get("literals", [])
+    n_full = sum(1 for l in lits if isinstance(l, dict))
+    print(f"[info-guard] matcher: {len(lits)} literals ({n_full} full-mask), "
+          f"{len(doc.get('key_patterns', {}))} key patterns → {MATCHER}")
+    return 0
 
 
 def cmd_status():
@@ -413,6 +608,32 @@ def cmd_status():
           f"{len(data.get('key_patterns', {}))} key patterns, "
           f"mask default {data.get('mask')}, generated {data.get('generated')}")
     print(f"[info-guard] file: {MATCHER} (mode {oct(MATCHER.stat().st_mode & 0o777)})")
+    # Activation handshake at rest (v0.9.3)
+    try:
+        _rent, _rok, reg_doc = _load_registry()
+    except Exception:
+        _rok = False
+    if _rok:
+        reg_rev = _registry_rev(reg_doc)
+        der_rev = data.get("derived_rev")
+        raw_rev = (reg_doc or {}).get("rev")
+        if raw_rev is not None and (type(raw_rev) is not int
+                                    or raw_rev < 0):
+            # DeepSeek evidence MAJ-5: a malformed registry rev must
+            # never read as "current" (the lazy backfill reads it as 0).
+            act = "unverifiable (registry rev malformed)"
+        elif type(der_rev) is int and der_rev < 0:
+            act = "invalid (negative stamp)"
+        elif type(der_rev) is int and der_rev == reg_rev:
+            act = "current"
+        elif type(der_rev) is int and der_rev < reg_rev:
+            act = f"stale ({reg_rev - der_rev} mutation(s) since last build)"
+        elif type(der_rev) is int:
+            act = "ahead/invalid (rev mismatch)"
+        else:
+            act = "unverifiable (no derivation stamp — run build)"
+        print(f"[info-guard] activation: registry rev {reg_rev}, pattern "
+              f"derived_rev {der_rev} — {act}")
     return 0
 
 
@@ -3098,6 +3319,10 @@ _ENGINE_MARKERS = {
 # via zero-padding.
 _SUPPORTED_MIN = (2026, 8, 3)     # v0.20.0 (v2026.8.3)
 _SUPPORTED_MAX = (2026, 8, 19)    # v0.20.5 (v2026.8.19)
+# Scratch-target supported-release tag (build-diff MIN-3): derived from
+# _SUPPORTED_MAX so a range bump never strands the check --battery /
+# E4 fixtures on a stale tag outside the supported window.
+_SCRATCH_TAG = f"v{_SUPPORTED_MAX[0]}.{_SUPPORTED_MAX[1]}.{_SUPPORTED_MAX[2]}"
 
 
 def _fmt_version(t):
@@ -4296,13 +4521,16 @@ def _literals_add_from(selector, json_mode):
             out["literals"] = entries2
             try:
                 STATE_DIR.mkdir(parents=True, exist_ok=True)
-                _atomic_write_json(CUSTOM_LITERALS, out)
+                committed_rev, committed_sha = _commit_registry(out)
             except OSError:
                 # Canonical write failure: exit 2, loud, registry
                 # unchanged (Wave A A2/MAJ-5); temp artifacts are
                 # cleaned by the writer.
                 return fail("cannot write registry — unchanged "
                             "(permissions? disk?)")
+            _adoc, _aenv, act_err, _asrc = _activate_mutation(
+                committed_rev, expect_present=[value],
+                committed_sha=committed_sha)
             for item in entries2:
                 if isinstance(item, dict) and item.get("value") == value:
                     vid = item.get("id")
@@ -4310,10 +4538,11 @@ def _literals_add_from(selector, json_mode):
             if json_mode:
                 print(json.dumps({"added": [
                     {"value_masked": _mask_value(value), "id": vid}],
-                    "duplicates": []}, indent=2))
+                    "duplicates": [], "activated": act_err is None,
+                    "rev": committed_rev}, indent=2))
             else:
                 print(f"value {vid}")
-            return 0
+            return _activation_report(act_err, _asrc, op="literals add --from")
         finally:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -4563,11 +4792,14 @@ def _literals_add(args):
         out["literals"] = entries
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            _atomic_write_json(CUSTOM_LITERALS, out)
+            committed_rev, committed_sha = _commit_registry(out)
         except OSError:
             print(f"[info-guard] ✗ cannot write {CUSTOM_LITERALS} — "
                   f"registry unchanged (permissions? disk?)", file=sys.stderr)
             return 2
+        _adoc, _aenv, act_err, _asrc = _activate_mutation(
+            committed_rev, expect_present=[value],
+            committed_sha=committed_sha)
         vid = None
         for item in entries:
             if isinstance(item, dict) and item.get("value") == value:
@@ -4582,10 +4814,12 @@ def _literals_add(args):
                   file=sys.stderr)
         if json_mode:
             print(json.dumps({"added": [{"value_masked": _mask_value(value),
-                                         "id": vid}]}, indent=2))
+                                         "id": vid}],
+                              "activated": act_err is None,
+                              "rev": committed_rev}, indent=2))
         else:
             print(f"planted {_mask_value(value)} (id {vid})")
-        return 0
+        return _activation_report(act_err, _asrc, op="literals add")
     if any(not v.strip() for v in values):
         print("[info-guard] usage: empty values rejected — literal values "
               "must be non-empty strings", file=sys.stderr)
@@ -4619,7 +4853,7 @@ def _literals_add(args):
         out["literals"] = entries
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            _atomic_write_json(CUSTOM_LITERALS, out)
+            committed_rev, committed_sha = _commit_registry(out)
         except OSError:
             # Canonical write failure (Wave A A2/MAJ-5): exit 2, never a
             # traceback, never a silent no-op — the registry is the
@@ -4629,8 +4863,12 @@ def _literals_add(args):
                   f"registry unchanged (permissions? disk?)",
                   file=sys.stderr)
             return 2
+        _adoc, _aenv, act_err, _asrc = _activate_mutation(
+            committed_rev, expect_present=new_values,
+            committed_sha=committed_sha)
     else:
         entries = existing  # no-op: never rewrite (evidence MIN-1)
+        committed_rev, act_err = None, None
     by_value = {}
     for item in entries:
         if isinstance(item, dict) and isinstance(item.get("value"), str):
@@ -4640,10 +4878,16 @@ def _literals_add(args):
         rec = {"value_masked": _mask_value(v), "id": by_value.get(v)}
         (duplicates if v in pre else added).append(rec)
     if json_mode:
-        print(json.dumps({"added": added, "duplicates": duplicates}, indent=2))
+        resp = {"added": added, "duplicates": duplicates}
+        if committed_rev is not None:
+            resp["activated"] = act_err is None
+            resp["rev"] = committed_rev
+        print(json.dumps(resp, indent=2))
     else:
         for rec in added + duplicates:
             print(f"value {rec['id']}")
+    if committed_rev is not None:
+        return _activation_report(act_err, _asrc, op="literals add")
     return 0
 
 
@@ -4749,12 +4993,13 @@ def _literals_remove(args):
         print(f"[info-guard] ⚠ existing {CUSTOM_LITERALS.name} unreadable "
               f"— will not overwrite", file=sys.stderr)
         return 1
-    kept, found = [], False
+    kept, found, removed_value = [], False, None
     for item in entries:
         sig = item if isinstance(item, str) else item.get("value")
         ident = item.get("id") if isinstance(item, dict) else None
         if ident == target:
             found = True
+            removed_value = sig
             continue  # drop exactly this entry
         kept.append(item)
     if not found:
@@ -4767,16 +5012,21 @@ def _literals_remove(args):
     out["literals"] = kept
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        _atomic_write_json(CUSTOM_LITERALS, out)
+        committed_rev, committed_sha = _commit_registry(out)
     except OSError:
         print(f"[info-guard] ✗ cannot write {CUSTOM_LITERALS} — "
               f"registry unchanged (permissions? disk?)", file=sys.stderr)
         return 2
+    _adoc, _aenv, act_err, _asrc = _activate_mutation(
+        committed_rev, expect_absent=[removed_value],
+        committed_sha=committed_sha)
     if json_mode:
-        print(json.dumps({"removed": True, "id": target}, indent=2))
+        print(json.dumps({"removed": True, "id": target,
+                          "activated": act_err is None, "rev": committed_rev},
+                         indent=2))
     else:
         print(f"removed {target}")
-    return 0
+    return _activation_report(act_err, _asrc, op="literals remove")
 
 
 # ── Wave E (W5+W14) — rotate-candidates view + literals rotate ─────────
@@ -5581,14 +5831,21 @@ def _literals_rotate(args):
     # exception path unlinks it).
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        _atomic_write_json(CUSTOM_LITERALS, out)
-    except BaseException:
+        committed_rev, committed_sha = _commit_registry(out)
+    except Exception:
         return _rotate_fail("internal_error")
+    # Verified activation (v0.9.3): rotate's stdout response is
+    # pre-serialized (plan 52) and stays byte-identical; the activation
+    # outcome rides stderr + the exit code (1 = committed but activation
+    # failed — the new-value identity is registered but not yet masked).
+    _adoc, _aenv, act_err, _asrc = _activate_mutation(
+        committed_rev, expect_present=[new_value],
+        committed_sha=committed_sha)
     if json_mode:
         print(resp)
     else:
         sys.stdout.write(resp)
-    return 0
+    return _activation_report(act_err, _asrc, op="literals rotate")
 
 
 def _self_fill_mask_style(value):
@@ -5618,7 +5875,7 @@ def cmd_setup(args):
         print("[info-guard] setup is interactive — run it in a terminal, or use:\n"
               "    info-guard preflight            review candidates manually\n"
               "    info-guard build [ENV_FILE...]  build from your .env files\n"
-              "    edit <state>/custom_literals.json, then `info-guard build`")
+              "    info-guard literals add <value>  register exact values")
         return 2
     dirs = _scan_dirs()
     if not dirs:
@@ -5752,18 +6009,44 @@ def cmd_setup(args):
         out["version"] = 2
         out["literals"] = entries
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        _atomic_write_json(CUSTOM_LITERALS, out)
+        committed_rev, committed_sha = _commit_registry(out)
         print(f"[info-guard] wrote {len(added)} new literal(s) → {CUSTOM_LITERALS}")
     elif not env_sources:
         print("[info-guard] nothing new to register — no changes made")
         return 0
-    # build
+    # build / activation (v0.9.3): every setup registration activates
+    # immediately AND the outcome is PROPAGATED — a committed but
+    # unactivated registration must fail setup loudly, never exit 0
+    # (build-diff fold CRIT-1). The env branch rebuilds via cmd_build
+    # (its output is setup's documented stdout) and then runs the
+    # verified handshake on top (idempotent rebuild; the read-back
+    # verification is the point).
     if env_sources:
-        cmd_build(env_sources)
+        try:
+            cmd_build(env_sources)
+        except Exception as _se:
+            # Normalize setup's env-build failures (evidence MAJ-2): a
+            # writer/read-back exception must never escape as a
+            # traceback — committed-but-stale, fail-loud.
+            print(f"[info-guard] ✗ setup committed {len(added)} literal(s) "
+                  f"but activation FAILED — pattern file stale; "
+                  f"run `info-guard build`", file=sys.stderr)
+            return 1
+        if added:
+            _adoc, _aenv, act_err, _asrc = _activate_mutation(
+                committed_rev, expect_present=[v for v, _m in added],
+                env_files=[Path(p) for p in env_sources],
+                committed_sha=committed_sha)
+            _act_rc = _activation_report(act_err, _asrc, op="setup")
+            if _act_rc:
+                return _act_rc
     elif added:
-        print("[info-guard] no env sources selected — pattern file will contain "
-              "only the custom literals (add sources later with "
-              "`info-guard build ENV_FILE...`)")
+        _adoc, _aenv, act_err, _asrc = _activate_mutation(
+            committed_rev, expect_present=[v for v, _m in added],
+            env_files=[], committed_sha=committed_sha)
+        _act_rc = _activation_report(act_err, _asrc, op="setup")
+        if _act_rc:
+            return _act_rc
     if skipped_short:
         print(f"[info-guard] note: {skipped_short} short value(s) skipped — their "
               f"keys are covered if present in an env source")
@@ -5811,6 +6094,11 @@ _UPDATE_ERROR_CLASSES = ("none", "usage", "network", "dirty_tree", "not_git",
 _RELEASE_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 _PATCHED_FILES = ("agent/redact.py", "cli.py", "gateway/run.py",
                   "hermes_cli/config.py", "hermes_cli/main.py")
+# Engine import chain the scratch battery target needs so engine-import
+# subprocesses resolve inside the fixture (D138 leg-1 — without them:
+# ModuleNotFoundError agent.file_safety). is_file-guarded at copy time.
+_TARGET_IMPORT_CHAIN = ("agent/file_safety.py", "agent/__init__.py",
+                        "agent/jiter_preload.py")
 _CRON_MARKER_PREFIX = "info-guard-managed:"
 
 
@@ -6723,16 +7011,73 @@ def _check_battery() -> int:
             print("[info-guard] ✗ check --battery: no target checkout — "
                   "cannot run the battery (operational)", file=sys.stderr)
             return 2
-        for rel in _PATCHED_FILES:
-            src = real_checkout / rel
-            dst = target / rel
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-        for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
-                    ["git", "-c", "user.email=ig@test",
-                     "-c", "user.name=ig-test", "commit", "-q", "-m", "base"]):
-            subprocess.run(cmd, cwd=str(target), capture_output=True,
-                           check=True, timeout=60)
+        # Scratch checkout construction (v0.9.3, IG D138 _wc_target
+        # pattern): HEAD must be CLEAN — the battery's E2/E4 fixtures
+        # derive their install-scratch from `git show HEAD:` and apply
+        # the package patch themselves — while the WORKING TREE carries
+        # the patch UNCOMMITTED (both the startup gate and the fixtures
+        # require the patched state). Copying the already-patched
+        # working tree and committing it made the fixtures re-apply the
+        # patch onto a patched tree ("patch does not apply") and die
+        # before the summary line.
+        try:
+            for rel in _PATCHED_FILES + _TARGET_IMPORT_CHAIN:
+                if not (real_checkout / rel).is_file():
+                    continue  # import-chain files are is_file-guarded (D138)
+                dst = target / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                clean = subprocess.run(
+                    ["git", "-C", str(real_checkout), "show", f"HEAD:{rel}"],
+                    capture_output=True, check=True, timeout=60)
+                dst.write_bytes(clean.stdout)
+            for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
+                        ["git", "-c", "user.email=ig@test",
+                         "-c", "user.name=ig-test", "commit", "-q", "-m", "base"]):
+                subprocess.run(cmd, cwd=str(target), capture_output=True,
+                               check=True, timeout=60)
+            subprocess.run(["git", "-C", str(target), "apply",
+                            str(pkg / "patch" / "redactor-registry-patterns.patch")],
+                           capture_output=True, check=True, timeout=60)
+            subprocess.run(["git", "-C", str(target), "tag", _SCRATCH_TAG],
+                           capture_output=True, check=True, timeout=60)
+            # Construction invariants (build-diff fold MIN-1): the
+            # required patched files exist at HEAD, the patch markers
+            # are in the working tree, and the supported-release tag
+            # exists — fail with a direct diagnostic, never the opaque
+            # "no summary captured" failure of the original defect.
+            for rel in _PATCHED_FILES:
+                subprocess.run(["git", "-C", str(target), "cat-file", "-e",
+                                f"HEAD:{rel}"], capture_output=True,
+                               check=True, timeout=60)
+                # Clean-HEAD invariant (evidence MIN-1): the HEAD copies
+                # carry no registry-hook marker (clean sources — the
+                # patch is applied to the working tree only).
+                _ch = subprocess.run(
+                    ["git", "-C", str(target), "show", f"HEAD:{rel}"],
+                    capture_output=True, text=True, timeout=60)
+                if "_redact_registry_patterns" in _ch.stdout:
+                    raise subprocess.CalledProcessError(1, "head-not-clean")
+                _wt = (target / rel).read_text(errors="replace")
+                if rel == "agent/redact.py":
+                    if _wt.count("_redact_registry_patterns") < 2:
+                        raise subprocess.CalledProcessError(1, "marker-count")
+                elif _wt == _ch.stdout:
+                    # Every other patched file must differ from its clean
+                    # HEAD copy (the patch is the only modification in the
+                    # scratch target) — a partially-applied patch fails
+                    # here with a direct diagnostic.
+                    raise subprocess.CalledProcessError(1, "patch-not-applied")
+            subprocess.run(["git", "-C", str(target), "rev-parse", "-q",
+                            "--verify", f"refs/tags/{_SCRATCH_TAG}"],
+                           capture_output=True, check=True, timeout=60)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                OSError) as _cexc:
+            print("[info-guard] ✗ check --battery: sandbox construction "
+                  "failed — the battery cannot run "
+                  f"({_cexc.cmd} rc={_cexc.returncode}) — inspect the "
+                  "package patch + target checkout (operational)",
+                  file=sys.stderr)
+            return 2
         home = scratch / "home"
         home.mkdir()
         log = scratch / "battery.log"
@@ -6896,6 +7241,48 @@ def cmd_check(args):
             print(f"[info-guard] ✓ pattern file: present ({len(lits)} literals, "
                   f"{n_full} full-mask, {len(data.get('key_patterns', {}))} "
                   f"key patterns)")
+            # Activation handshake at rest (v0.9.3): registry rev vs the
+            # pattern file's derived_rev — directional, never silent.
+            _rent, _rok, reg_doc = _load_registry()
+            reg_rev = _registry_rev(reg_doc) if _rok else None
+            raw_rev = (reg_doc or {}).get("rev") if _rok else None
+            der_rev = data.get("derived_rev")
+            if not _rok:
+                # DeepSeek evidence MAJ-1/MIN-4: an unreadable registry
+                # must be loud, never a silent skip of the activation
+                # state (the pattern-file OSError path names the wrong
+                # file for a registry failure).
+                problems += 1
+                print("[info-guard] ✗ activation: registry unreadable — "
+                      "activation state unverifiable", file=sys.stderr)
+            elif raw_rev is not None and (type(raw_rev) is not int
+                                          or raw_rev < 0):
+                # DeepSeek evidence MAJ-5: malformed registry rev reads
+                # as 0 via the lazy backfill — never "current".
+                problems += 1
+                print("[info-guard] ✗ activation: registry rev malformed "
+                      "(not an integer) — run `info-guard build`")
+            elif type(der_rev) is not int:
+                problems += 1
+                print("[info-guard] ✗ activation: pattern file derivation "
+                      "stamp invalid or missing (legacy artifact) — run "
+                      "`info-guard build`")
+            else:
+                if der_rev < 0:
+                    problems += 1
+                    print("[info-guard] ✗ activation: pattern file "
+                          "derivation stamp invalid (negative) — run "
+                          "`info-guard build`")
+                elif der_rev < reg_rev:
+                    problems += 1
+                    print(f"[info-guard] ✗ activation: "
+                          f"{reg_rev - der_rev} mutation(s) since last "
+                          f"build — run `info-guard build`")
+                elif der_rev > reg_rev:
+                    problems += 1
+                    print("[info-guard] ✗ activation: pattern file ahead of "
+                          "the registry (rev mismatch) — run `info-guard "
+                          "build`")
         except OSError:
             operational = True
             print(f"[info-guard] ✗ pattern file: UNREADABLE at {MATCHER} — "
@@ -7234,8 +7621,10 @@ def main(argv):
         print(_SUBCOMMAND_USAGE[cmd])
         return 0
     if cmd == "build":
-        cmd_build(rest)
-        return 0
+        # return, not discard: build's usage errors (MIN-4 combo) and
+        # failure paths must reach the exit code (uniform pattern —
+        # every other cmd_* return propagates).
+        return cmd_build(rest)
     if cmd == "status":
         return cmd_status()
     if cmd == "preflight":

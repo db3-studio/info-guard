@@ -21,7 +21,7 @@ After:   "the token is 7f...3c and the PIN is ***"
 
 | Setting | Value |
 |---|---|
-| Current Info Guard version | `0.9.2` |
+| Current Info Guard version | `0.9.3` |
 | Supported Hermes Agent versions | `v0.20.0` – `v0.20.5` |
 | Install location (canonical) | `~/.info-guard` |
 | Hermes home (`$HERMES_HOME`) | `~/.hermes` when unset |
@@ -171,6 +171,10 @@ The agent will read `docs/format-spec.md` for the file format and
 ~/.info-guard/bin/info-guard build   # pulls every secret-shaped KEY=value from your .env sources
 ```
 
+Only `KEY=value` lines are read; `export KEY=...` lines are skipped and
+`build` warns per source (values not protected). See `docs/format-spec.md`
+for the full `.env` grammar.
+
 Masking is live immediately; a restart of running Hermes processes (gateway,
 web UI) picks it up on next start.
 
@@ -196,7 +200,7 @@ accepts every candidate non-interactively (agent-assisted installs).
 
 | Command | Description |
 |---|---|
-| `info-guard build [ENV_FILE ...]` | Build `redact_patterns.json` from `.env` sources (default: `$HERMES_HOME/.env`) |
+| `info-guard build [ENV_FILE ...] [--registry-only]` | Build `redact_patterns.json` from `.env` sources (default: `$HERMES_HOME/.env`); `--registry-only` derives from the registry alone (no `.env` required) |
 | `info-guard status` | Summary of the current pattern file |
 | `info-guard preflight [DIR ...] [--full] [--json] [--json-out FILE]` | Zero-config leak scan of Hermes' own data (read-only, output masked) |
 | `info-guard watch [DIR ...] [--reset] [--json] [--json-out FILE]` | Delta monitor vs the watch baseline (cron-friendly exits) |
@@ -302,11 +306,11 @@ reported as candidates, because they cannot be enrolled.
 More examples — value types, mask styles, key patterns — in
 `examples/redact_patterns.json.example` and `examples/custom_literals.json.example`.
 
-## Rotate secrets (v0.9.2)
+## Rotate secrets (v0.9.3)
 
 Rotation is an identity lifecycle: retire the old identity, establish a
-new one, preserve lineage, regenerate matching artifacts explicitly, and
-expose the candidate explicitly.
+new one, preserve lineage, and activate the new identity automatically
+(verified — the pattern file is rebuilt and read-back checked).
 
 ```bash
 # 1. see rotation candidates (read-only; exit 0 clean / 1 candidates / 2 error)
@@ -317,7 +321,8 @@ expose the candidate explicitly.
 #    value into any shell command or producer-process argument)
 <vault-read-command> | ~/.info-guard/bin/info-guard literals rotate <value_id>
 
-# 3. regenerate the matcher explicitly
+# 3. (optional) refresh .env-sourced values — rotation itself already
+#    activated the matcher (v0.9.3 verified activation)
 ~/.info-guard/bin/info-guard build
 ```
 
@@ -330,10 +335,15 @@ Safety rules:
 - **Do not run concurrent `literals rotate` invocations against one
   registry** — there is no registry lock; concurrent writers are
   last-writer-wins.
+- **Registry mutations activate masking immediately and verify it** —
+  `literals add`/`remove`/`rotate` rebuild the pattern file and verify
+  the change landed (the activation handshake); a failed activation is
+  loud (non-zero exit) and `check`/`status` surface any staleness.
+  `build` remains for `.env` changes, install, and scheduled refresh.
 - `.env` and deployment configuration remain deployment-side; the product
   never reads or writes them. A deployment driver obtains the replacement
-  out of band (e.g. a vault), pipes it, runs `info-guard build`, and updates
-  the deployment-owned files itself.
+  out of band (e.g. a vault), pipes it — masking activates immediately —
+  and updates the deployment-owned files itself.
 - Honeytokens are not rotation candidates; a fired canary is an incident,
   handled by remove + replant.
 - A retired identity stays registered and detectable until explicitly
@@ -575,7 +585,7 @@ order, one at a time; each layer is independent and pays for itself:
 
 | Layer | What it does | Why it matters |
 |---|---|---|
-| **1. Redaction** (this package) | Masks your exact values + key forms at every message boundary | Prevention — leaks never exist in the first place |
+| **1. Redaction** (this package) | Masks your exact values + key forms at every message boundary | Prevention — leaks never exist in the first place (for registered exact values, at the Hermes output boundary) |
 | **2. Inventory** | Exact-value registry of every secret **beyond `.env`** — app configs, compose envs, vault items, honeytokens — with ids, mask styles, kinds, and rotation lineage (`.env` is already the default source for `info-guard build`) | You can't protect what you haven't found; feeds detection and full-mask decisions |
 | **3. Detection** | Scheduled scans — `watch` delta monitor, `discover` source sweeps, HIBP (deployment-side) | Finds what slipped through — including residue that predates redaction |
 | **4. Rotation** | Per-credential rotation, vault-first, old-fails/new-passes verification | An exposed credential is only an incident while it still works |
