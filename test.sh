@@ -2134,8 +2134,9 @@ _v3f_rc = _rc == 1
 _v3f_err = "activation failed" in _buf_err.getvalue()
 try:
     _v3f_rev = json.load(open(freg)).get("rev") == 1
-    _v3f_val = "fault-val-" in [x.get("value") if isinstance(x, dict) else x
-                               for x in json.load(open(freg))["literals"]]
+    _v3f_val = any(isinstance(v, str) and "fault-val-" in v
+                   for v in [x.get("value") if isinstance(x, dict) else x
+                             for x in json.load(open(freg))["literals"]])
     _c8_exc = ""
 except (OSError, ValueError) as _e8:
     _v3f_rev = _v3f_val = False
