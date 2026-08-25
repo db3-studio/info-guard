@@ -2251,11 +2251,11 @@ check("v093.b2: build warns on skipped export-style .env lines (NOT protected)",
 v3x2_home = os.path.join(tmp, "v093-export2-home")
 os.makedirs(v3x2_home, exist_ok=True)
 open(os.path.join(v3x2_home, ".env"), "w").write(
-    "OK_KEY=ok_a_1234567890\n"
-    "export EXP_A=exported_a_99999999\n")
+    "OK_KEY=ok_a_" + "1234567890\n"
+    "export EXP_A=exported_a_" + "99999999\n")
 open(os.path.join(v3x2_home, "b.env"), "w").write(
-    "OK_KEY2=ok_b_1234567890\n"
-    "export EXP_B=exported_b_99999999\n")
+    "OK_KEY2=ok_b_" + "1234567890\n"
+    "export EXP_B=exported_b_" + "99999999\n")
 v3x2_env = dict(os.environ)
 v3x2_env["HERMES_HOME"] = v3x2_home
 _r1 = subprocess.run(
