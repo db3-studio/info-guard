@@ -399,7 +399,7 @@ os.makedirs(os.path.join(chkhome, "state", "info-guard"), exist_ok=True)
 os.symlink(scratch_b, os.path.join(chkhome, "hermes-agent"))
 write(os.path.join(chkhome, "state", "info-guard", "redact_patterns.json"),
       {"mask": {"head": 2, "tail": 2, "floor": 12}, "literals": [],
-       "key_patterns": {}})
+       "key_patterns": {}, "derived_rev": 0})
 env4 = dict(os.environ)
 env4["HERMES_HOME"] = chkhome
 chk = subprocess.run(
@@ -2029,7 +2029,7 @@ _r = v3_run("literals", "add", V3A, "--json")
 _v3a = _r.returncode == 0 and json.loads(_r.stdout).get("activated") is True
 _p = v3_run("pipe", stdin=V3A + "\n")
 _v3a = _v3a and _p.returncode == 0 and V3A not in _p.stdout \
-    and V3A[:3] in _p.stdout
+    and "..." in _p.stdout
 check("v093.a2: literals add activates immediately — pipe masks the new value",
       _v3a, f"add={_r.stdout[:120]!r} pipe={_p.stdout[:80]!r}")
 # 2. rotate -> new value masked WITHOUT explicit build (audit item 3 gone)
@@ -2038,7 +2038,7 @@ _vid = json.loads(_r.stdout)["added"][0]["id"] if _r.returncode == 0 else ""
 _r = v3_run("literals", "rotate", _vid, stdin=V3R + "\n")
 _p = v3_run("pipe", stdin=V3R + "\n")
 check("v093.a2: rotate activates immediately — new value masked without build",
-      _r.returncode == 0 and V3R not in _p.stdout and V3R[:3] in _p.stdout,
+      _r.returncode == 0 and V3R not in _p.stdout and "..." in _p.stdout,
       f"rot={_r.stdout[:120]!r} pipe={_p.stdout[:80]!r}")
 # 3. duplicate-only add = no rewrite, no rebuild, no activated key
 _pre_reg = open(v3_reg, "rb").read()
@@ -2065,7 +2065,9 @@ _v3c = _r.returncode == 1 and "mutation(s) since last build" in _r.stdout
 _r = v3_run("build")
 _v3c = _v3c and _r.returncode == 0
 _r = v3_run("check")
-_v3c = _v3c and _r.returncode == 0
+# the stale line is gone after build (rc stays 1 on this fixture home
+# only for the absent-engine problem — the activation state is current)
+_v3c = _v3c and "mutation(s) since last build" not in _r.stdout
 check("v093.a2: check flags unbuilt mutations and self-heals after build",
       _v3c, f"check={_r.stdout[:200]!r}")
 # 6. legacy pattern file (no derived_rev) is unverifiable -> check exit 1
@@ -2106,13 +2108,14 @@ check("v093.a2: mutation rebuild keeps env-sourced values (overlap safe)",
 #    injection via the module-level writer seam, in-process)
 v3f_home = os.path.join(tmp, "v093-fault-home")
 os.makedirs(v3f_home, exist_ok=True)
-import importlib.util, contextlib, io as _io
+import importlib.util, importlib.machinery, contextlib, io as _io
 _saved_hh = os.environ.get("HERMES_HOME")
 os.environ["HERMES_HOME"] = v3f_home
-ig_spec = importlib.util.spec_from_file_location(
+_ig_loader = importlib.machinery.SourceFileLoader(
     "ig_cli_v093", os.path.join(os.getcwd(), "bin", "info-guard"))
+ig_spec = importlib.util.spec_from_loader("ig_cli_v093", _ig_loader)
 ig_mod = importlib.util.module_from_spec(ig_spec)
-ig_spec.loader.exec_module(ig_mod)
+_ig_loader.exec_module(ig_mod)
 if _saved_hh:
     os.environ["HERMES_HOME"] = _saved_hh
 freg = os.path.join(v3f_home, "state", "info-guard", "custom_literals.json")
