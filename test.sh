@@ -2216,6 +2216,12 @@ v3f2_env = dict(os.environ)
 v3f2_env["HERMES_HOME"] = v3f2_home
 V3F2 = "v093-from-secret-" + "123456"
 open(os.path.join(v3f2_home, "s.env"), "w").write(f"SRC_TOKEN={V3F2}\n")
+# The --from preflight is TOCTOU-hardened and snapshots the registry —
+# it fails closed on a missing registry (install.sh seeds one; this
+# fixture tests the activation bridge, not fresh-home bootstrap).
+os.makedirs(os.path.join(v3f2_home, "state", "info-guard"), exist_ok=True)
+open(os.path.join(v3f2_home, "state", "info-guard", "custom_literals.json"),
+     "w").write(json.dumps({"version": 2, "literals": []}))
 _r = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
      "literals", "add", "--from", os.path.join(v3f2_home, "s.env") + ":SRC_TOKEN",
