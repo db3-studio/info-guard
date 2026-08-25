@@ -2286,6 +2286,16 @@ _v313 = _r1.returncode == 0 and _r2.returncode == 0 \
 check("v093.a2: build --registry-only is the no-env repair path",
       _v313, f"rc1={_r1.returncode} rc2={_r2.returncode} "
              f"rev={_rreg.get('rev')} derived={_rmat.get('derived_rev')}")
+# 13b. bare `build` on an env-less home is a HARD error — the
+# no-source guard (build-diff Sonnet CRIT-1 regression): never a silent
+# registry-only matcher (would replace a populated one); --registry-only
+# is the only no-env path.
+_r4 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "build"], env=v3r_env, capture_output=True, text=True, timeout=300)
+check("v093.a2: bare build on an env-less home is a hard error (no-source guard)",
+      _r4.returncode != 0 and "no .env sources found" in _r4.stderr,
+      f"rc={_r4.returncode} err={_r4.stderr[:120]!r}")
 # 14. legacy registry without rev backfills and stays current
 v3l_home = os.path.join(tmp, "v093-legacy-home")
 os.makedirs(v3l_home, exist_ok=True)

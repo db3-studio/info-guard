@@ -106,7 +106,7 @@ Sources merged by `build`:
          those keys are still covered by the key-pattern pass below)
   2. A curated key list (PIN, x_passphrase, client_secret, ...) whose
      values are masked regardless of length (KEY= form).
-  3. <state>/custom_literals.json — hand-edited exact values (PII, emails,
+  3. <state>/custom_literals.json — CLI-managed exact values (PII, emails,
      names, anything you decide is sensitive). Optional; survives rebuilds;
      masking only. Entries: plain strings, or {"value": ..., "mask": "full"}
      for full masking.
@@ -488,7 +488,7 @@ def _activate_mutation(committed_rev, expect_present=(), expect_absent=(),
     try:
         _resolved = _default_sources() if env_files is None else env_files
         doc, env_values = _rebuild_pattern_doc(_resolved, require_env=False)
-    except BaseException as exc:
+    except Exception as exc:
         return None, set(), f"activation failed ({type(exc).__name__})", _resolved
     if doc.get("derived_rev") != committed_rev:
         return doc, env_values, (
@@ -561,6 +561,13 @@ def cmd_build(env_files):
     args = list(env_files)
     registry_only = "--registry-only" in args
     paths = [Path(p) for p in args if p != "--registry-only"]
+    if registry_only and paths:
+        # build-diff MIN-4: `build --registry-only foo.env` would
+        # silently drop the env file — reject the combination loud.
+        print("[info-guard] usage: --registry-only takes no env files "
+              "(registry-only derives from the registry alone)",
+              file=sys.stderr)
+        return 2
     if registry_only:
         doc, _ev = _rebuild_pattern_doc([], require_env=False)
     else:
@@ -587,7 +594,7 @@ def cmd_status():
     # Activation handshake at rest (v0.9.3)
     try:
         _rent, _rok, reg_doc = _load_registry()
-    except BaseException:
+    except Exception:
         _rok = False
     if _rok:
         reg_rev = _registry_rev(reg_doc)
@@ -3287,6 +3294,10 @@ _ENGINE_MARKERS = {
 # via zero-padding.
 _SUPPORTED_MIN = (2026, 8, 3)     # v0.20.0 (v2026.8.3)
 _SUPPORTED_MAX = (2026, 8, 19)    # v0.20.5 (v2026.8.19)
+# Scratch-target supported-release tag (build-diff MIN-3): derived from
+# _SUPPORTED_MAX so a range bump never strands the check --battery /
+# E4 fixtures on a stale tag outside the supported window.
+_SCRATCH_TAG = f"v{_SUPPORTED_MAX[0]}.{_SUPPORTED_MAX[1]}.{_SUPPORTED_MAX[2]}"
 
 
 def _fmt_version(t):
@@ -5839,7 +5850,7 @@ def cmd_setup(args):
         print("[info-guard] setup is interactive — run it in a terminal, or use:\n"
               "    info-guard preflight            review candidates manually\n"
               "    info-guard build [ENV_FILE...]  build from your .env files\n"
-              "    edit <state>/custom_literals.json, then `info-guard build`")
+              "    info-guard literals add <value>  register exact values")
         return 2
     dirs = _scan_dirs()
     if not dirs:
@@ -6993,7 +7004,7 @@ def _check_battery() -> int:
             subprocess.run(["git", "-C", str(target), "apply",
                             str(pkg / "patch" / "redactor-registry-patterns.patch")],
                            capture_output=True, check=True, timeout=60)
-            subprocess.run(["git", "-C", str(target), "tag", "v2026.8.18"],
+            subprocess.run(["git", "-C", str(target), "tag", _SCRATCH_TAG],
                            capture_output=True, check=True, timeout=60)
             # Construction invariants (build-diff fold MIN-1): the
             # required patched files exist at HEAD, the patch markers
@@ -7011,7 +7022,7 @@ def _check_battery() -> int:
             if int(_mk.stdout.strip() or "0") < 2:
                 raise subprocess.CalledProcessError(1, "marker-count")
             subprocess.run(["git", "-C", str(target), "rev-parse", "-q",
-                            "--verify", "refs/tags/v2026.8.18"],
+                            "--verify", f"refs/tags/{_SCRATCH_TAG}"],
                            capture_output=True, check=True, timeout=60)
         except subprocess.CalledProcessError as _cexc:
             print("[info-guard] ✗ check --battery: sandbox construction "
@@ -7542,8 +7553,10 @@ def main(argv):
         print(_SUBCOMMAND_USAGE[cmd])
         return 0
     if cmd == "build":
-        cmd_build(rest)
-        return 0
+        # return, not discard: build's usage errors (MIN-4 combo) and
+        # failure paths must reach the exit code (uniform pattern —
+        # every other cmd_* return propagates).
+        return cmd_build(rest)
     if cmd == "status":
         return cmd_status()
     if cmd == "preflight":

@@ -281,8 +281,8 @@ baseline stores sha256 fingerprints; diffs are set differences
 (duplicates = one, order-insensitive).
 
 - `status` — `"unchanged"` | `"changed"`.
-- `custom_literals` — `{added, removed}` from the hand-edited
-  `<state>/custom_literals.json` source file (per-literal fingerprint
+- `custom_literals` — `{added, removed}` from the CLI-managed
+  `<state>/custom_literals.json` registry (per-literal fingerprint
   diff).
 - `key_patterns` — `{added, removed}` from the enforcement artifact's
   key-pattern set (per-pattern fingerprint diff; baseline v2 stores the
@@ -294,8 +294,8 @@ baseline stores sha256 fingerprints; diffs are set differences
   `{head, tail, floor}`).
 
 A custom-literal add followed by `build` fires BOTH `custom_literals`
-and `redact_patterns` deltas **by design**: the first confirms the
-hand-edit landed in the source, the second that it landed in the
+and `redact_patterns` deltas **by design**: the first confirms the CLI
+mutation landed in the registry, the second that it landed in the
 enforcement artifact (the duplication is deliberate).
 
 **Wording contract:** watch reports configuration deltas —

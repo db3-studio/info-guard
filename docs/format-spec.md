@@ -185,7 +185,7 @@ contract). Unknown `kind` values are treated as normal literals with
 one stderr warning per load/invocation (never a crash, never an
 escalation). `kind` does NOT participate in deduplication (dedup stays
 by value) and does not affect matching. literal ↔ honeytoken
-transitions are hand-edits (per-entry metadata; next run reclassifies);
+transitions are CLI mutations (per-entry metadata; next run reclassifies);
 removal + re-add = fresh `value_id`.
 
 **File contract (add-only):** the app may normalize the file to add
