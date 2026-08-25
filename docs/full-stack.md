@@ -9,19 +9,17 @@ works with zero other infrastructure, installs in minutes, and its value is
 immediate (your exact secrets stop appearing in tool output, logs, and
 transcripts).
 
-Redaction is one layer of a five-layer lifecycle. The product supplies a
-mechanism for each layer; what this document describes building is the
-**deployment wiring** — where your secrets live, how rotation is driven per
-credential class, how you are alerted. This document is the blueprint —
-enough detail that any Hermes agent (or engineer) can build it for a given
-environment, the way it was built and proven in the reference deployment.
+Redaction is one layer of a five-layer lifecycle, and every layer below
+lists **only what the product ships**. Deployment wiring — where your
+secrets live, how rotation is driven per credential class, how you are
+alerted — is a deployment concern, not a product feature.
 
 ## The doctrine
 
 **Discover → register → mask → detect → rotate.**
 
 - *Discover*: inventory every secret source (`.env` files, docker compose
-  envs, app configs, vault).
+  envs, app configs).
 - *Register*: every discovered secret gets a registry entry (exact value,
   CLI-managed — the registry file is chmod 600, and masking is display-only)
   before its first config read.
@@ -29,8 +27,8 @@ environment, the way it was built and proven in the reference deployment.
   `info-guard build`); masking is display-only and can never corrupt sources.
 - *Detect*: scheduled scans watch transcripts, logs, and repos for registered
   values appearing where they shouldn't.
-- *Rotate*: confirmed exposure triggers rotation — vault first, then every
-  consumer, then verify old-fails/new-passes.
+- *Rotate*: confirmed exposure triggers rotation — retire the exposed
+  identity, register the new value, verify old-fails/new-passes.
 
 **The instruction layer.** A mechanism is only used if the deployment's
 agent-facing instructions say so — an agent that does not know
@@ -63,7 +61,7 @@ transcripts the moment it is installed.
 | `info-guard env [FILE] [--check\|--keys]` | Keys + lengths only (never values); `--check` non-executing grammar validation |
 
 Masking is **display-only** (a read-time transform — it can never modify
-`.env`, vault, or config files), **exact-value or key-form** (never
+`.env` or config files), **exact-value or key-form** (never
 substring), **fail-safe** (a missing or broken pattern file is a no-op —
 built-in redaction keeps running, and a broken file keeps the last-good set
 until repaired), and **per-instance** (paths resolve under `$HERMES_HOME`, so
@@ -93,7 +91,7 @@ see below).
 | `literals list [--json]` | Inspect the registry |
 | `literals remove ID` | Remove an entry (severs the lineage chain) |
 | `literals rotate VALUE_ID [--json]` | Apply a rotation — replacement piped via stdin only, never argv |
-| `info-guard build` | Regenerate `redact_patterns.json` from `.env` sources + the registry |
+| `info-guard build` | Regenerate `redact_patterns.json` from `.env` sources + the registry (registry mutations already activate automatically — `build` refreshes `.env`-sourced values) |
 | `rotate-candidates` | Derived priority tiers (`critical > rotate-now > review > idle`) at read time — never stored |
 
 **State file** `<state>/custom_literals.json` (chmod 600) — the product's
@@ -102,6 +100,7 @@ registry, CLI-managed (never hand-edited):
 ```json
 {
   "version": 2,
+  "rev": 3,
   "literals": [
     {
       "id": "9f3c1e7a2b8d4f60",
@@ -118,6 +117,11 @@ registry, CLI-managed (never hand-edited):
 }
 ```
 
+`rev` (v0.9.3) is the monotonic mutation counter — the identity half of
+the activation handshake: the pattern file records the `rev` it was
+derived from (`derived_rev`), and `check`/`status` compare the two so an
+unbuilt mutation is never silent.
+
 The identity fields matter: `id` is the opaque `value_id` join key across
 every surface (watch JSON, rotate candidates); `kind` distinguishes ordinary
 literals from honeytokens (canaries); the lineage fields (`rotated_from` /
@@ -128,7 +132,7 @@ Clues for the builder:
 
 - **Sources**: `.env` files (the default `build` input), `literals add`
   (explicit registration), `discover` + `literals add --from` (at-source
-  enrollment), honeytokens. Nightly `build` re-runs reconcile reality.
+  enrollment), honeytokens. Periodic `build` re-runs reconcile reality.
 - **Retention**: retired identities stay registered and detectable until
   explicitly removed (`literals remove`) — a retired credential must still
   be caught if it appears; removal severs the lineage chain, leaving
@@ -160,7 +164,6 @@ Scheduled, silent-when-clean scanners. The reference deployment runs:
 |---|---|---|
 | **Preflight (`info-guard preflight`)** | on demand, before install | Zero-config leak scan of Hermes' own transcripts/logs — key-shape regexes + gitleaks tuned ruleset; the same passes the scheduled `watch` runs, without needing a registry. This is the entry point: run it first, schedule `watch` after. gitleaks is optional (preflight checks first and offers to install it); without it, key-shape + token-prefix passes still run |
 | `watch` (`info-guard watch [DIR ...]`) | every 6h | Scheduled delta monitor: the same detection passes as preflight over transcripts, logs, and request dumps, alerting on what changed since the baseline — cron-friendly exits, silent when clean |
-| HIBP exposed check | weekly | Compares registered values against haveibeenpwned's k-anonymity API (SHA-1 prefix only — the full value never leaves; deployment-side, not shipped in v1) |
 | `discover` (`info-guard discover [PATH ...]`) | nightly | Enumerates unregistered key-shaped secrets in named source paths — repos and app configs, where XML/INI/YAML tags name the secret, so format gaps in the transcript scanners don't block identification; enroll findings via `literals add --from` |
 
 **Tiering** (what fires an alert, and at what severity):
@@ -174,13 +177,12 @@ Scheduled, silent-when-clean scanners. The reference deployment runs:
 
 Clues for the builder:
 
-- **Honeytokens**: 3 unique token-shaped canaries seeded into the pattern
-  file (so they're masked) AND the registry (so their appearance fires).
-  They are also the live proof that masking + detection both work.
-- **Alert shape**: silent when clean (a cron tick with no findings produces
-  zero output — no alert fatigue), descriptive email subject lines when it
-  fires. Delivery target must be a real platform (email), never a session
-  that may not exist — a lost alert is worse than none.
+- **Honeytokens**: plant canaries with `literals add --kind honeytoken`
+  (they're masked, and their appearance fires detection) — live proof that
+  masking + detection both work.
+- **Exit shape**: silent when clean (a cron tick with no findings produces
+  zero output — no alert fatigue), cron-friendly exit codes; the deployment
+  wires delivery to a stable platform.
 - **False-positive classes to exclude by design**: code identifiers
   (`password_hash =`, `set_password`), host/URL/username values, non-secret
   keys (the same exclusion list the matcher uses). Exclusions are
@@ -193,16 +195,14 @@ Clues for the builder:
 
 ## Layer 4 — Response (rotate)
 
-Rotation is per-credential: one script per credential class, driven by a
-driver with `--full` (all) and targeted modes.
+The product supplies the rotation mechanics; a deployment drives them per
+credential class.
 
 | Mechanism | Role |
 |---|---|
-| Vault (password manager) | Generates + stores new values first; every consumer picks up the new value from the vault — no value ever transits a chat or shell history |
-| Driver script (per credential class) | Consumes the view, pipes replacements, verifies old-fails/new-passes — never reads or writes the registry |
 | `rotate-candidates --json` | Selects what to rotate (read-only view, derived at read time) |
-| `literals rotate VALUE_ID` | Applies the rotation (replacement via stdin only — never argv) |
-| `info-guard build` | Regenerates the pattern file after rotation |
+| `literals rotate VALUE_ID` | Applies the rotation (replacement via stdin only — never argv); activates the new identity immediately (verified) |
+| `info-guard build` | Refreshes the pattern file from `.env` sources (rotation itself already activated) |
 
 Clues for the builder:
 
@@ -212,30 +212,25 @@ Clues for the builder:
 - **Classes**: agent-automatable (API/script credentials) vs user-touch
   (SSO/UI passwords — the user changes them in the UI; the agent verifies).
 - **Order**: change the source first, then consumers, then verify
-  old-fails / new-passes, then update inventory + pattern file, then
-  re-scan to confirm the old value no longer appears anywhere. The product's
-  sanctioned handoff: `rotate-candidates --json` selects what to rotate,
-  `literals rotate VALUE_ID` applies it (replacement via stdin only — the
-  replacement value must never appear as a CLI argument), and
-  `build` regenerates the pattern file — deployment drivers consume the
-  view and pipe the replacement; they never read or write the registry.
-- **Drill**: a quarterly scheduled full rotation proves the machinery works
-  before an incident needs it.
+  old-fails / new-passes, then re-scan to confirm the old value no longer
+  appears anywhere. The product's sanctioned handoff:
+  `rotate-candidates --json` selects what to rotate, `literals rotate
+  VALUE_ID` applies it (replacement via stdin only — the replacement value
+  must never appear as a CLI argument) and activates the new identity
+  immediately; deployment drivers consume the view and pipe the
+  replacement; they never read or write the registry.
 - **Agent guardrail**: a replacement value reaches `literals rotate` via
   stdin only — never as a CLI argument; and never run a secret-touching
   script under `bash -x` / `set -x` (xtrace expands values into the trace).
 
 ## Layer 5 — Watchdogs & hygiene (operate)
 
-Small scheduled checks that catch drift before it becomes a leak:
+The product ships the health and update surfaces; a deployment schedules
+them (`install.sh --cron` wires the scheduler).
 
 | Check | Schedule | Detects |
 |---|---|---|
-| Env-drift watchdog | weekly | `.env` files changed without `info-guard build` being re-run (registry/pattern drift) — silent when clean, email on drift |
-| Config-audit | on change | New/changed config keys in tracked files (diff-based, with an ignore list for known benign churn) |
-| Nightly refresh | daily | Re-run `info-guard build` + `discover` — the "forgot to register" safety net |
-| Release hygiene | per release | Tag + CHANGELOG entry (Keep a Changelog); related micro-fixes consolidate into the most recent entry — versions stay meaningful for pull-based consumers |
-| Product health (`info-guard check [--heal] [--battery]`) | on demand / scheduled (`install.sh --cron`) | Engine marker, pattern file, custom literals, gitleaks, patch-state, supported-version floor, masking smoke — `--heal` repairs the engine via install.sh; `--battery` runs the full verification battery |
+| Product health (`info-guard check [--heal] [--battery]`) | on demand / scheduled (`install.sh --cron`) | Engine marker, pattern file, custom literals, gitleaks, patch-state, supported-version floor, masking smoke, activation state (registry rev vs pattern `derived_rev`) — `--heal` repairs the engine via install.sh; `--battery` runs the full verification battery |
 
 The product also ships its own update path: `info-guard update [--check]
 [--json] [--rollback]` — `--check` probes for a newer release, `--rollback`
@@ -279,7 +274,8 @@ when it isn't. Any implementation of this stack should test for them:
    `discover` for at-source sweeps). Needed before rotation is ever triggered.
 4. Layer 4 rotation for the two highest-priority credential classes — drive
    it from `rotate-candidates --json` and `literals rotate VALUE_ID`.
-5. Layer 5 watchdogs, in the order above.
+5. Layer 5 health + update — schedule `check` (and refresh `build` +
+   `discover` on a cadence that fits the deployment).
 
 Each layer's tests: the previous layer's pattern file + one synthetic probe
-through the full path (mask → detect → alert → rotate → verify).
+through the full path (mask → detect → rotate → verify).

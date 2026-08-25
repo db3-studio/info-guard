@@ -305,8 +305,8 @@ More examples — value types, mask styles, key patterns — in
 ## Rotate secrets (v0.9.2)
 
 Rotation is an identity lifecycle: retire the old identity, establish a
-new one, preserve lineage, regenerate matching artifacts explicitly, and
-expose the candidate explicitly.
+new one, preserve lineage, and activate the new identity automatically
+(verified — the pattern file is rebuilt and read-back checked).
 
 ```bash
 # 1. see rotation candidates (read-only; exit 0 clean / 1 candidates / 2 error)
@@ -317,7 +317,8 @@ expose the candidate explicitly.
 #    value into any shell command or producer-process argument)
 <vault-read-command> | ~/.info-guard/bin/info-guard literals rotate <value_id>
 
-# 3. regenerate the matcher explicitly
+# 3. (optional) refresh .env-sourced values — rotation itself already
+#    activated the matcher (v0.9.3 verified activation)
 ~/.info-guard/bin/info-guard build
 ```
 
@@ -330,10 +331,15 @@ Safety rules:
 - **Do not run concurrent `literals rotate` invocations against one
   registry** — there is no registry lock; concurrent writers are
   last-writer-wins.
+- **Registry mutations activate masking immediately and verify it** —
+  `literals add`/`remove`/`rotate` rebuild the pattern file and verify
+  the change landed (the activation handshake); a failed activation is
+  loud (non-zero exit) and `check`/`status` surface any staleness.
+  `build` remains for `.env` changes, install, and scheduled refresh.
 - `.env` and deployment configuration remain deployment-side; the product
   never reads or writes them. A deployment driver obtains the replacement
-  out of band (e.g. a vault), pipes it, runs `info-guard build`, and updates
-  the deployment-owned files itself.
+  out of band (e.g. a vault), pipes it — masking activates immediately —
+  and updates the deployment-owned files itself.
 - Honeytokens are not rotation candidates; a fired canary is an incident,
   handled by remove + replant.
 - A retired identity stays registered and detectable until explicitly
@@ -575,7 +581,7 @@ order, one at a time; each layer is independent and pays for itself:
 
 | Layer | What it does | Why it matters |
 |---|---|---|
-| **1. Redaction** (this package) | Masks your exact values + key forms at every message boundary | Prevention — leaks never exist in the first place |
+| **1. Redaction** (this package) | Masks your exact values + key forms at every message boundary | Prevention — leaks never exist in the first place (for registered exact values, at the Hermes output boundary) |
 | **2. Inventory** | Exact-value registry of every secret **beyond `.env`** — app configs, compose envs, vault items, honeytokens — with ids, mask styles, kinds, and rotation lineage (`.env` is already the default source for `info-guard build`) | You can't protect what you haven't found; feeds detection and full-mask decisions |
 | **3. Detection** | Scheduled scans — `watch` delta monitor, `discover` source sweeps, HIBP (deployment-side) | Finds what slipped through — including residue that predates redaction |
 | **4. Rotation** | Per-credential rotation, vault-first, old-fails/new-passes verification | An exposed credential is only an incident while it still works |

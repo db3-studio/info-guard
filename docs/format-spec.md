@@ -24,12 +24,22 @@ Path *changes* apply at the next process start.
   "mask": {"head": 2, "tail": 2, "floor": 12},
   "literals": ["exact-value", {"value": "...", "mask": "full"}],
   "key_patterns": {"PIN": true, "MY_CUSTOM_SECRET": true},
-  "generated": "2026-08-16T17:40:00+00:00"
+  "generated": "2026-08-16T17:40:00+00:00",
+  "derived_rev": 3
 }
 ```
 
 All sections optional. A missing or unreadable file is a **no-op** — the
 built-in redactor keeps running; nothing ever crashes because of this file.
+
+`derived_rev` (v0.9.3) is the registry `rev` the pattern file was built
+from — the activation handshake at rest. `check`/`status` compare it to
+the registry's current `rev`; a mismatch means unbuilt registry
+mutations (stale artifact), a missing value means a legacy/unverifiable
+artifact. Registry mutations (`literals add`/`remove`/`rotate`) rebuild
+the pattern file and verify the change landed (immediate, verified
+activation); `build` remains for `.env` changes, install, and scheduled
+refresh.
 
 ## Sections
 
@@ -144,13 +154,20 @@ unacceptable in your threat model, keep the registry under your own
 (never part of detection). Registry v2 shape:
 
 ```json
-{"version": 2, "literals": [
+{"version": 2, "rev": 3, "literals": [
   "someone@example.com",
   {"value": "anything-you-want", "mask": "full", "id": "3f2a91c4e8b6d705"},
   {"value": "ht-3f9c2a1b8e4d5c6a7b8c9d0e", "mask": "full",
    "id": "7c1d9e2f3a4b5c6d", "kind": "honeytoken"}
 ]}
 ```
+
+**`rev`** (v0.9.3) — a monotonic mutation counter bumped by every real
+registry write (duplicate-only adds never rewrite and never bump it;
+missing/invalid reads as 0 — lazy, no migration). It is the identity
+half of the activation handshake: the pattern file records the `rev` it
+was derived from (`derived_rev`), and `check`/`status` compare the two
+so an unbuilt mutation is never silent.
 
 **`id`** — an opaque 16-hex random registration id (v0.4.2). The app
 assigns it: plain-string entries and id-less dicts get one on the next
