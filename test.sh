@@ -2126,6 +2126,12 @@ fmat = os.path.join(v3f_home, "state", "info-guard", "redact_patterns.json")
 os.makedirs(os.path.dirname(freg), exist_ok=True)
 open(freg, "w").write(json.dumps({"version": 2, "literals": []}))
 open(os.path.join(v3f_home, "v.txt"), "w").write("fault-val-" + "1234567890ab\n")
+# Seed a last-good matcher (evidence MIN-5): the fault injection must
+# preserve it byte-for-byte — a failed activation never clobbers the
+# working pattern file; check then detects the stale state.
+open(fmat, "w").write(json.dumps({"version": 2, "derived_rev": 0,
+                                  "literals": [], "key_patterns": {}}))
+_pre_mat = open(fmat, "rb").read()
 def _boom(*a, **k):
     raise OSError("injected matcher write failure")
 ig_mod._rebuild_pattern_doc = _boom
@@ -2134,7 +2140,7 @@ with contextlib.redirect_stdout(_buf_out), contextlib.redirect_stderr(_buf_err):
     _rc = ig_mod._literals_add(
         ["--file", os.path.join(v3f_home, "v.txt"), "--json"])
 _v3f_rc = _rc == 1
-_v3f_err = "activation failed" in _buf_err.getvalue()
+_v3f_err = "activation FAILED" in _buf_err.getvalue()
 try:
     _v3f_rev = json.load(open(freg)).get("rev") == 1
     _v3f_val = any(isinstance(v, str) and "fault-val-" in v
@@ -2144,7 +2150,7 @@ try:
 except (OSError, ValueError) as _e8:
     _v3f_rev = _v3f_val = False
     _c8_exc = repr(_e8)
-_v3f_mat = not os.path.exists(fmat)
+_v3f_mat = open(fmat, "rb").read() == _pre_mat  # last-good preserved
 _v3f = _v3f_rc and _v3f_err and _v3f_rev and _v3f_val and _v3f_mat
 try:
     _c8_reg = json.dumps(json.load(open(freg)))
@@ -2185,11 +2191,20 @@ _reg = json.load(open(os.path.join(v3g_home, "state", "info-guard",
 _vals = {x.get("value") if isinstance(x, dict) else x
          for x in _reg.get("literals", [])}
 _v3g_vals = "v093-race-0-" in str(_vals) and "v093-race-1-" in str(_vals)
+# Matcher/registry consistency (evidence MAJ-5): the pattern's literal
+# set AND derived_rev must agree with the committed registry — a
+# same-rev incomplete matcher is never an acceptable pass.
+_v3g_mat = json.load(open(os.path.join(v3g_home, "state", "info-guard",
+                                       "redact_patterns.json")))
+_v3g_mset = {x.get("value") if isinstance(x, dict) else x
+             for x in _v3g_mat.get("literals", [])}
+_v3g_cons = _v3g_mat.get("derived_rev") == _reg.get("rev") \
+    and _v3g_mset == _vals
 _v3g_guard = 1 in _rcs
 _v3g_ahead = "ahead of the registry" not in _r.stdout
-_v3g = (_v3g_vals or _v3g_guard) and _v3g_ahead
+_v3g = (_v3g_cons or _v3g_guard) and _v3g_ahead
 check("v093.a2: racing adds converge or are flagged — no silent false success",
-      _v3g, f"rcs={_rcs} vals={_v3g_vals} guard={_v3g_guard} "
+      _v3g, f"rcs={_rcs} cons={_v3g_cons} guard={_v3g_guard} "
            f"ahead={_v3g_ahead} check={_r.returncode} out={_r.stdout[:200]!r}")
 # 10. export-style .env warning (audit item 2 / B2)
 v3x_home = os.path.join(tmp, "v093-export-home")
@@ -2209,6 +2224,34 @@ _v3x = _r.returncode == 0 and "export-style" in _r.stderr \
     and "ok_value_1234567890" in json.dumps(_mat)
 check("v093.b2: build warns on skipped export-style .env lines (NOT protected)",
       _v3x, f"err={_r.stderr[:160]!r}")
+# 10b. B2 multi-source + mutation JSON purity (evidence MIN-3): export
+# lines in TWO sources → per-source stderr warnings; a JSON mutation on
+# a home whose default .env carries an export line keeps stdout pure
+# JSON with the warning on stderr.
+v3x2_home = os.path.join(tmp, "v093-export2-home")
+os.makedirs(v3x2_home, exist_ok=True)
+open(os.path.join(v3x2_home, ".env"), "w").write(
+    "OK_KEY=ok_a_1234567890\n"
+    "export EXP_A=exported_a_99999999\n")
+open(os.path.join(v3x2_home, "b.env"), "w").write(
+    "OK_KEY2=ok_b_1234567890\n"
+    "export EXP_B=exported_b_99999999\n")
+v3x2_env = dict(os.environ)
+v3x2_env["HERMES_HOME"] = v3x2_home
+_r1 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "build", os.path.join(v3x2_home, ".env"),
+     os.path.join(v3x2_home, "b.env")],
+    env=v3x2_env, capture_output=True, text=True, timeout=300)
+_r2 = subprocess.run(
+    [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
+     "literals", "add", "v093-jsonpure-" + "123456", "--json"],
+    env=v3x2_env, capture_output=True, text=True, timeout=300)
+_v3x2 = _r1.returncode == 0 and _r1.stderr.count("export-style") == 2 \
+    and _r2.returncode == 0 and json.loads(_r2.stdout) is not None \
+    and "export-style" in _r2.stderr
+check("v093.b2: export warnings per-source (2 sources) + mutation JSON purity",
+      _v3x2, f"b1={_r1.stderr[:160]!r} b2={_r2.stderr[:160]!r}")
 # 11. --from enrollment activates immediately (the sole enrollment bridge)
 v3f2_home = os.path.join(tmp, "v093-from-home")
 os.makedirs(v3f2_home, exist_ok=True)
@@ -2296,6 +2339,20 @@ _r4 = subprocess.run(
 check("v093.a2: bare build on an env-less home is a hard error (no-source guard)",
       _r4.returncode != 0 and "no .env sources found" in _r4.stderr,
       f"rc={_r4.returncode} err={_r4.stderr[:120]!r}")
+# 13c. remove deactivates immediately (evidence MAJ-4): the removed
+# value leaves the matcher — pipe passes it through unmasked (no .env
+# source supplies it); the stamp stays current.
+_vrem = "v093-rem-" + "1234567890ab"
+_r5 = v3_run("literals", "add", _vrem, "--json")
+_vid5 = json.loads(_r5.stdout)["added"][0]["id"]
+_p5a = v3_run("pipe", stdin=_vrem + "\n")
+_r5 = v3_run("literals", "remove", _vid5)
+_p5b = v3_run("pipe", stdin=_vrem + "\n")
+_v315 = _r5.returncode == 0 and _vrem not in _p5a.stdout \
+    and _vrem in _p5b.stdout \
+    and "mutation(s) since last build" not in v3_run("check").stdout
+check("v093.a2: remove deactivates immediately — value leaves the matcher",
+      _v315, f"p1={_p5a.stdout[:60]!r} p2={_p5b.stdout[:60]!r}")
 # 14. legacy registry without rev backfills and stays current
 v3l_home = os.path.join(tmp, "v093-legacy-home")
 os.makedirs(v3l_home, exist_ok=True)

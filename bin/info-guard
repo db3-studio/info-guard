@@ -490,7 +490,11 @@ def _activate_mutation(committed_rev, expect_present=(), expect_absent=(),
         doc, env_values = _rebuild_pattern_doc(_resolved, require_env=False)
     except Exception as exc:
         return None, set(), f"activation failed ({type(exc).__name__})", _resolved
-    if doc.get("derived_rev") != committed_rev:
+    # Exact-int stamp check (evidence MAJ-3): `True == 1` would let a
+    # corrupted boolean stamp pass the equality read-back — the stamp
+    # type must be int exactly (check/status treat non-int as invalid).
+    if type(doc.get("derived_rev")) is not int \
+            or doc.get("derived_rev") != committed_rev:
         return doc, env_values, (
             f"activation verification failed: pattern derived_rev "
             f"{doc.get('derived_rev')!r} != committed rev {committed_rev}"), _resolved
@@ -536,7 +540,7 @@ def _activate_mutation(committed_rev, expect_present=(), expect_absent=(),
     return doc, env_values, None, _resolved
 
 
-def _activation_report(act_err, env_sources=()):
+def _activation_report(act_err, env_sources=(), op="mutation"):
     """Emit the activation handshake outcome (v0.9.3). Success is SILENT
     (exit 0) — the confirmation rides the JSON `activated` field and the
     at-rest rev/derived_rev state, and the mutation commands keep their
@@ -550,7 +554,10 @@ def _activation_report(act_err, env_sources=()):
         return 0
     repair = ("run `info-guard build --registry-only`"
               if not env_sources else "run `info-guard build`")
-    print(f"[info-guard] ✗ {act_err}; {repair}", file=sys.stderr)
+    # Failure diagnostic (evidence MAJ-6): operation name + committed-
+    # but-stale semantics + the reason + the repair command, value-free.
+    print(f"[info-guard] ✗ {op} committed but activation FAILED — "
+          f"pattern file stale ({act_err}); {repair}", file=sys.stderr)
     return 1
 
 
@@ -599,7 +606,9 @@ def cmd_status():
     if _rok:
         reg_rev = _registry_rev(reg_doc)
         der_rev = data.get("derived_rev")
-        if type(der_rev) is int and der_rev == reg_rev:
+        if type(der_rev) is int and der_rev < 0:
+            act = "invalid (negative stamp)"
+        elif type(der_rev) is int and der_rev == reg_rev:
             act = "current"
         elif type(der_rev) is int and der_rev < reg_rev:
             act = f"stale ({reg_rev - der_rev} mutation(s) since last build)"
@@ -4517,7 +4526,7 @@ def _literals_add_from(selector, json_mode):
                     "rev": committed_rev}, indent=2))
             else:
                 print(f"value {vid}")
-            return _activation_report(act_err, _asrc)
+            return _activation_report(act_err, _asrc, op="literals add --from")
         finally:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -4794,7 +4803,7 @@ def _literals_add(args):
                               "rev": committed_rev}, indent=2))
         else:
             print(f"planted {_mask_value(value)} (id {vid})")
-        return _activation_report(act_err, _asrc)
+        return _activation_report(act_err, _asrc, op="literals add")
     if any(not v.strip() for v in values):
         print("[info-guard] usage: empty values rejected — literal values "
               "must be non-empty strings", file=sys.stderr)
@@ -4862,7 +4871,7 @@ def _literals_add(args):
         for rec in added + duplicates:
             print(f"value {rec['id']}")
     if committed_rev is not None:
-        return _activation_report(act_err, _asrc)
+        return _activation_report(act_err, _asrc, op="literals add")
     return 0
 
 
@@ -5001,7 +5010,7 @@ def _literals_remove(args):
                          indent=2))
     else:
         print(f"removed {target}")
-    return _activation_report(act_err, _asrc)
+    return _activation_report(act_err, _asrc, op="literals remove")
 
 
 # ── Wave E (W5+W14) — rotate-candidates view + literals rotate ─────────
@@ -5807,7 +5816,7 @@ def _literals_rotate(args):
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         committed_rev, committed_sha = _commit_registry(out)
-    except BaseException:
+    except Exception:
         return _rotate_fail("internal_error")
     # Verified activation (v0.9.3): rotate's stdout response is
     # pre-serialized (plan 52) and stays byte-identical; the activation
@@ -5820,7 +5829,7 @@ def _literals_rotate(args):
         print(resp)
     else:
         sys.stdout.write(resp)
-    return _activation_report(act_err, _asrc)
+    return _activation_report(act_err, _asrc, op="literals rotate")
 
 
 def _self_fill_mask_style(value):
@@ -5997,20 +6006,29 @@ def cmd_setup(args):
     # verified handshake on top (idempotent rebuild; the read-back
     # verification is the point).
     if env_sources:
-        cmd_build(env_sources)
+        try:
+            cmd_build(env_sources)
+        except Exception as _se:
+            # Normalize setup's env-build failures (evidence MAJ-2): a
+            # writer/read-back exception must never escape as a
+            # traceback — committed-but-stale, fail-loud.
+            print(f"[info-guard] ✗ setup committed {len(added)} literal(s) "
+                  f"but activation FAILED — pattern file stale; "
+                  f"run `info-guard build`", file=sys.stderr)
+            return 1
         if added:
             _adoc, _aenv, act_err, _asrc = _activate_mutation(
                 committed_rev, expect_present=[v for v, _m in added],
                 env_files=[Path(p) for p in env_sources],
                 committed_sha=committed_sha)
-            _act_rc = _activation_report(act_err, _asrc)
+            _act_rc = _activation_report(act_err, _asrc, op="setup")
             if _act_rc:
                 return _act_rc
     elif added:
         _adoc, _aenv, act_err, _asrc = _activate_mutation(
             committed_rev, expect_present=[v for v, _m in added],
             env_files=[], committed_sha=committed_sha)
-        _act_rc = _activation_report(act_err, _asrc)
+        _act_rc = _activation_report(act_err, _asrc, op="setup")
         if _act_rc:
             return _act_rc
     if skipped_short:
@@ -7015,16 +7033,29 @@ def _check_battery() -> int:
                 subprocess.run(["git", "-C", str(target), "cat-file", "-e",
                                 f"HEAD:{rel}"], capture_output=True,
                                check=True, timeout=60)
-            _mk = subprocess.run(
-                ["grep", "-c", "_redact_registry_patterns",
-                 str(target / "agent" / "redact.py")],
-                capture_output=True, text=True, timeout=60)
-            if int(_mk.stdout.strip() or "0") < 2:
-                raise subprocess.CalledProcessError(1, "marker-count")
+                # Clean-HEAD invariant (evidence MIN-1): the HEAD copies
+                # carry no registry-hook marker (clean sources — the
+                # patch is applied to the working tree only).
+                _ch = subprocess.run(
+                    ["git", "-C", str(target), "show", f"HEAD:{rel}"],
+                    capture_output=True, text=True, timeout=60)
+                if "_redact_registry_patterns" in _ch.stdout:
+                    raise subprocess.CalledProcessError(1, "head-not-clean")
+                _wt = (target / rel).read_text(errors="replace")
+                if rel == "agent/redact.py":
+                    if _wt.count("_redact_registry_patterns") < 2:
+                        raise subprocess.CalledProcessError(1, "marker-count")
+                elif _wt == _ch.stdout:
+                    # Every other patched file must differ from its clean
+                    # HEAD copy (the patch is the only modification in the
+                    # scratch target) — a partially-applied patch fails
+                    # here with a direct diagnostic.
+                    raise subprocess.CalledProcessError(1, "patch-not-applied")
             subprocess.run(["git", "-C", str(target), "rev-parse", "-q",
                             "--verify", f"refs/tags/{_SCRATCH_TAG}"],
                            capture_output=True, check=True, timeout=60)
-        except subprocess.CalledProcessError as _cexc:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                OSError) as _cexc:
             print("[info-guard] ✗ check --battery: sandbox construction "
                   "failed — the battery cannot run "
                   f"({_cexc.cmd} rc={_cexc.returncode}) — inspect the "
@@ -7205,7 +7236,12 @@ def cmd_check(args):
                       "stamp invalid or missing (legacy artifact) — run "
                       "`info-guard build`")
             elif reg_rev is not None:
-                if der_rev < reg_rev:
+                if der_rev < 0:
+                    problems += 1
+                    print("[info-guard] ✗ activation: pattern file "
+                          "derivation stamp invalid (negative) — run "
+                          "`info-guard build`")
+                elif der_rev < reg_rev:
                     problems += 1
                     print(f"[info-guard] ✗ activation: "
                           f"{reg_rev - der_rev} mutation(s) since last "
