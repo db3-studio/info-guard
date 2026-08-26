@@ -1,5 +1,22 @@
 # Changelog
 
+## [v0.9.4] - 2026-08-26
+
+- Older releases could infer JSON input from the contents of a complete file.
+  Do not rely on that behavior. Use `--json-input` explicitly when supplying
+  a JSON string or JSON array.
+- Accept export-prefixed `.env` assignments and classify environment keys by
+  their positive secret terminal noun.
+- Add canonical, value-free build reports with generation identity; support
+  exact multiline literal registration and warning-only short literals.
+- Distinguish an empty `watch` scope with exit status 2.
+- Document exact-value masking, multiline `--json-input`, short-literal
+  warning-only registration, report freshness, and the zero-scope watch rule.
+- Complete the six usability areas: safe source diagnostics, typed ledgers,
+  canonical derivation identity, setup/preflight ledger consumption, exact
+  watch coverage, and file/stdin multiline input. Legacy line mode remains
+  unchanged.
+
 All notable changes to Info Guard are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
 > Convention: micro-version fixes within the same workstream are consolidated into the latest entry of that release, not captured per tag.
@@ -19,9 +36,6 @@ Verified-activation release — registry mutations activate masking immediately.
 - **Activation state at rest** — the pattern file carries a `derived_rev`
   stamp; `check` reports activation staleness directionally (stale, ahead,
   invalid, unverifiable) and exits non-zero until the next build.
-- **`build` warns on skipped `export KEY=...` lines** — export-style `.env`
-  lines are not parsed (values not protected); the warning is per source on
-  stderr.
 
 ### Fixed
 - **`check --battery` sandbox construction** — the battery's scratch target is

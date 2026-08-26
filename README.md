@@ -1,5 +1,12 @@
 # Info Guard
 
+Info Guard v0.9.4 protects the 20-term positive secret-key vocabulary, records
+skipped non-secret keys in the build report, accepts explicit multiline JSON
+literal input, warns (without rejecting) short literals, and distinguishes
+zero-scope watch (exit 2) from a scanned no-delta scope (exit 0). Build
+freshness is consumed by the health and preflight surfaces. Masking is exact
+value only; shape masking is a reserved boundary.
+
 **Exact-value redaction for Hermes Agent.** Your secrets, masked —
 everywhere Hermes writes output, from plain-JSON files, with zero
 external tooling.
@@ -21,7 +28,7 @@ After:   "the token is 7f...3c and the PIN is ***"
 
 | Setting | Value |
 |---|---|
-| Current Info Guard version | `0.9.3` |
+| Current Info Guard version | `0.9.4` |
 | Supported Hermes Agent versions | `v0.20.0` – `v0.20.5` |
 | Install location (canonical) | `~/.info-guard` |
 | Hermes home (`$HERMES_HOME`) | `~/.hermes` when unset |
@@ -171,9 +178,8 @@ The agent will read `docs/format-spec.md` for the file format and
 ~/.info-guard/bin/info-guard build   # pulls every secret-shaped KEY=value from your .env sources
 ```
 
-Only `KEY=value` lines are read; `export KEY=...` lines are skipped and
-`build` warns per source (values not protected). See `docs/format-spec.md`
-for the full `.env` grammar.
+`KEY=value` and export-prefixed assignments are read using the final token
+before `=`. See `docs/format-spec.md` for the full `.env` grammar.
 
 Masking is live immediately; a restart of running Hermes processes (gateway,
 web UI) picks it up on next start.
@@ -306,7 +312,7 @@ reported as candidates, because they cannot be enrolled.
 More examples — value types, mask styles, key patterns — in
 `examples/redact_patterns.json.example` and `examples/custom_literals.json.example`.
 
-## Rotate secrets (v0.9.3)
+## Rotate secrets (v0.9.4)
 
 Rotation is an identity lifecycle: retire the old identity, establish a
 new one, preserve lineage, and activate the new identity automatically
@@ -630,6 +636,15 @@ second implementation; `watch` re-runs the scan and reports NEW values
 against a sha256-only baseline (`<state>/watch-baseline.json`, 0600) —
 cron-friendly, exit 1 on new values or a delta alarm, `--reset`
 to clear, union-kept across tool/gitleaks upgrades.
+
+## v0.9.4 contract notes
+
+Export-prefixed `.env` assignments are accepted. Short literals are retained
+with warning-only diagnostics. Multiline registration requires explicit
+`--json-input` with `--file` or `--file -`; legacy line mode remains literal
+line input. Setup consumes the canonical ledger and preflight exposes it at
+`env_pass.build_ledger`. Watch returns exit 2 for empty scope and exit 0 for
+scanned no-delta, with coverage fields. Masking is exact-value-only.
 
 ## Upstream
 

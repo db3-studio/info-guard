@@ -1,5 +1,7 @@
 # Info Guard — pattern file format (v1)
 
+classification vocabulary sourced from gitleaks generic secret rules (MIT), pinned at v8.30.1
+
 The pattern file is the **single interface** between your secrets and Hermes'
 redaction engine. Hermes reads it at every message boundary (tool output,
 logs, transcripts, file reads) and masks anything it contains. The file is
@@ -25,6 +27,7 @@ Path *changes* apply at the next process start.
   "literals": ["exact-value", {"value": "...", "mask": "full"}],
   "key_patterns": {"PIN": true, "MY_CUSTOM_SECRET": true},
   "generated": "2026-08-16T17:40:00+00:00",
+  "metadata": {"derivation_nonce": "550e8400-e29b-41d4-a716-446655440000"},
   "derived_rev": 3
 }
 ```
@@ -32,7 +35,7 @@ Path *changes* apply at the next process start.
 All sections optional. A missing or unreadable file is a **no-op** — the
 built-in redactor keeps running; nothing ever crashes because of this file.
 
-`derived_rev` (v0.9.3) is the registry `rev` the pattern file was built
+`derived_rev` (v0.9.4) is the registry `rev` the pattern file was built
 from — the activation handshake at rest. `check`/`status` compare it to
 the registry's current `rev`; a mismatch means unbuilt registry
 mutations (stale artifact), a missing value means a legacy/unverifiable
@@ -42,6 +45,17 @@ activation); `build` remains for `.env` changes, install, and scheduled
 refresh.
 
 ## Sections
+
+The shipped classifier protects keys whose terminal underscore-delimited noun is
+one of the 20 positive secret terms. Non-secret keys are recorded as skipped in
+the value-free build report; that report is the decision surface for consumers.
+Explicit `--json-input` accepts a complete JSON string or array, including
+multiline values. Registered literals shorter than eight characters are warned
+about but remain protected. `watch` returns exit 2 for a zero-scope scan and
+exit 0 for an existing scanned scope with no delta. Build artifacts carry
+freshness identity and revision metadata used by `check`, `status`,
+`preflight`, and `watch`. Masking is exact-value based; token/JWT/URL/database
+shape masking remains outside this boundary.
 
 ### `mask` — the default masking style
 
@@ -128,11 +142,10 @@ Lines are `KEY=value`; anything after the first `=` is the value:
 - surrounding single or double quotes are stripped from the value
 - trailing `# comments` are stripped only when preceded by whitespace
   (a `#` inside the value is part of the value)
-- `export KEY=...` prefixes are not supported
-- non-secret keys (hosts, URLs, usernames, flags, schedules, ports, …) are
-  excluded via a curated list (the matcher's `_is_non_secret_key`);
-  secret-shaped keys become key patterns, and values ≥ 8 chars become
-  exact literals
+- prefixes such as `export`, `env`, and `declare -x` are accepted; the final
+  whitespace-delimited token before the first `=` is the key
+- only keys whose underscore-delimited terminal noun is a known secret noun
+  are protected; other keys are reported as skipped
 - values shorter than 8 chars are not registered as literals (precision
   floor), but their KEY still becomes a key pattern — so `PIN=1234` masks
   even though the value is unregistered
@@ -1291,3 +1304,61 @@ Consumers of the `info-guard/discover/v1` envelope must:
 5. **Treat an unrecognized security-significant `status` or `error_class` as unhandled** — never downgrade an unknown status to `clean` or map an unknown class to a known one; surface it to the operator.
 6. **Do not assume the five candidate fields are the complete set** — treat `key`, `source`, `line`, `shape_class`, `matched_pattern` as the guaranteed minimum; future fields may be added.
 7. **Continue applying the non-disclosure invariant to future fields** — any field added later must also never expose raw secret values.
+### Build report
+
+Each successful build atomically writes `build-report.json` beside the pattern
+document. It is a disposable, value-free ledger with per-source `added`,
+`skipped`, and `warnings` rows, counts, a UUID4 `derivation_nonce`, and the
+integer `derived_rev`. The pattern document carries the same nonce at
+`metadata.derivation_nonce`; consumers use the ledger rather than parsing
+diagnostic text.
+## `.env` parser grammar and export-prefix behavior
+
+Ordinary assignments and `export`/`declare -x` assignments are normalized
+without sourcing or executing input. Invalid values remain distinct from
+invalid key form.
+
+## Positive secret-terminal classification and vocabulary
+
+Protection uses the terminal underscore-delimited noun and the complete
+20-term vocabulary: `access`, `api`, `auth`, `authorization`, `cert`,
+`credential`, `creds`, `hash`, `key`, `pass`, `passwd`, `password`, `pepper`,
+`pin`, `pw`, `salt`, `secret`, `sig`, `signature`, `token`. The vocabulary is
+attributed to MIT-licensed gitleaks generic secret rules, pinned at v8.30.1.
+Keys whose terminal noun is not a secret noun (e.g. `id`, `count`, `type`) are not masked and are listed in the build report.
+
+## `build-report.json` schema and lifecycle
+
+The report is the canonical source-local ledger. Its exact rows are
+`added(kind,key)`, `skipped(kind,key,reason)`, and
+`warnings(kind,key,reason)` with matching counts and overall sums. Reasons are
+`not-a-secret-noun`, `invalid key form`, `duplicate`, `sub-8-char floor`, and
+`short-literal warning`.
+
+## Derivation identity and consumers
+
+The pattern identity is `metadata.derivation_nonce`; the report identity is
+`derivation_nonce`. Both are UUID4 values paired with the same integer
+`derived_rev` across build, registry-only build, add, add-from, remove, rotate,
+and setup. Setup consumes the ledger; preflight embeds it at
+`env_pass.build_ledger`.
+
+## Multiline, JSON selection, and legacy migration
+
+`--json-input` requires `--file` or `--file -` and accepts one string or an
+array of strings. LF and CRLF are accepted; other controls are rejected.
+Legacy `--file` remains line-based, so quotes and JSON brackets are literal.
+Short literals remain protected with warning-only diagnostics on add and
+merge paths. Exact-value masking does not infer JWT, token-prefix, URL,
+database, auth-header, JSON, or YAML shapes; that is an RA-7 reservation.
+
+## Watch coverage and freshness
+
+Older releases could infer JSON input from the contents of a complete file. Do
+not rely on that behavior. Use `--json-input` explicitly when supplying a JSON
+string or JSON array.
+
+Watch reports `scanned_dirs` and `scanned_files` once. Empty scope returns exit
+2 without a baseline; an existing scanned no-delta scope returns exit 0.
+Artifact states are `fresh`, `stale`, `ahead`, `malformed`, and
+`unverifiable`.

@@ -133,6 +133,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -143,7 +144,7 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.9.3"
+_PACKAGE_VERSION = "0.9.4"
 
 # Per-subcommand usage lines (v0.4.1, IG D55): printed by
 # `info-guard <cmd> --help` (exit 0). Mirror the __doc__ usage block —
@@ -208,8 +209,40 @@ def _is_non_secret_key(k: str) -> bool:
     return (NON_SECRET_KEY_RE.search(k) or k in NON_SECRET_EXACT
             or NON_SECRET_FLAG_RE.search(k))
 
+# RA-24 binding vocabulary.  Keep this as data: consumers use the same
+# terminal predicate, while the battery can independently assert the set.
+SECRET_NOUNS = {
+    "access", "api", "auth", "authorization", "cert", "credential",
+    "creds", "hash", "key", "pass", "passwd", "password", "pepper",
+    "pin", "pw", "salt", "secret", "sig", "signature", "token",
+}
 
-def _parse_env_lines(lines, report=None, on_export_skip=None):
+
+def _normalized_env_key(token: str) -> str:
+    """Normalize the complete pre-`=` token using the RA-22 order."""
+    key = token.strip()
+    # Do not preprocess shell/environment prefixes here.  The caller has
+    # already isolated the complete pre-= token; quote stripping and final
+    # token selection are deliberately the only normalization operations.
+    if len(key) >= 2 and key[0] == key[-1] and key[0] in "\"'":
+        key = key[1:-1]
+    if any(character.isspace() for character in key):
+        key = key.rsplit(None, 1)[-1]
+    return key
+
+
+def _terminal_noun(key: str):
+    """Return the final underscore-delimited noun, with strict boundaries."""
+    if not isinstance(key, str):
+        return None
+    return key.rsplit("_", 1)[-1].lower()
+
+
+def _is_secret_noun(key: str) -> bool:
+    return _terminal_noun(key) in SECRET_NOUNS
+
+
+def _parse_env_lines(lines, report=None, validated_entries=None):
     """Pure parser: [KEY: value] from already-split lines. Returns
     (entries, saw_content, saw_valid_entry). NO I/O — read/decode errors
     are the caller's job (_load_env raises SystemExit with a path-only
@@ -255,21 +288,33 @@ def _parse_env_lines(lines, report=None, on_export_skip=None):
                 report(lineno, "bad-key-form", None)
             continue
         k, _, v = line.partition("=")
-        k = k.strip().strip('"').strip("'")
-        if not VALID_KEY_RE.match(k):
-            if on_export_skip is not None and _EXPORT_STYLE_RE.match(line):
-                on_export_skip()
+        k = _normalized_env_key(k)
+        if not VALID_KEY_RE.fullmatch(k):
             if report is not None:
                 report(lineno, "bad-key-form", None)
             continue
-        if report is not None:
-            _report_env_violations(report, lineno, k, v)
+        raw_v = v
+        if any(ord(c) < 32 or 127 <= ord(c) < 160 for c in raw_v):
+            if report is not None:
+                report(lineno, "control-characters", k)
+            continue
+        if _SHELL_PAYLOAD_RE.search(raw_v.strip()):
+            if report is not None:
+                report(lineno, "shell-payload", k)
+            continue
+        if len(raw_v.strip()) >= 2 and raw_v.strip()[0] in "\"'" \
+                and raw_v.strip()[-1] != raw_v.strip()[0]:
+            if report is not None:
+                report(lineno, "unterminated-quote", k)
+            continue
         v = v.strip().strip('"').strip("'")
         # strip trailing comments (only when preceded by whitespace; a
         # # inside the value is part of the value)
         v = re.sub(r"\s+#.*$", "", v)
         out[k] = v
         saw_valid_entry = True
+        if validated_entries is not None:
+            validated_entries.append((k, v))
         if report is not None:
             report(lineno, "valid", k, v)
     return out, saw_content, saw_valid_entry
@@ -303,23 +348,60 @@ def _report_env_violations(report, lineno, key, raw_value):
 _SHELL_PAYLOAD_RE = re.compile(
     r"\$\(|`|[;|><&]|\bsource\s+|(?:^|[\s=;|&])\.\s+")
 
-# Export-style assignment lines (`export KEY=value`) — deliberately
-# UNSUPPORTED .env grammar (format-spec): the parser skips them
-# silently. v0.9.3 counts them so build can warn (the value is NOT
-# protected — audit item 2 / B2).
-_EXPORT_STYLE_RE = re.compile(
-    r"^export\s+[A-Za-z_][A-Za-z0-9_]*\s*=")
-
-
-def _load_env(path: Path, on_export_skip=None):
+# Environment sources are read as text and parsed through
+# _parse_env_lines(); read/decode failures are classified by the caller.
+def _load_env(path: Path):
     """Parse a .env file into {KEY: value}. Errors on a path are fatal
     (a source you named must exist); missing default sources are skipped.
     Parsing delegates to _parse_env_lines (identical semantics)."""
     try:
-        lines = path.read_text().splitlines()
-    except OSError:
-        raise SystemExit(f"[info-guard] ✗ cannot read env source: {path}")
-    return _parse_env_lines(lines, on_export_skip=on_export_skip)[0]
+        lines = _read_env_source_text(path).splitlines()
+    except _EnvSourceError as exc:
+        # Callers that expose diagnostics map this typed error to a safe
+        # source label.  Never put the operator-supplied path in an error.
+        raise SystemExit(f"[info-guard] ✗ cannot read env source: {exc.kind}")
+    return _parse_env_lines(lines)[0]
+
+
+class _EnvSourceError(Exception):
+    def __init__(self, kind, label):
+        super().__init__(kind)
+        self.kind, self.label = kind, label
+
+
+def _read_env_source_text(path: Path):
+    try:
+        return path.read_text()
+    except FileNotFoundError as exc:
+        raise _EnvSourceError("missing", str(path)) from exc
+    except (OSError, UnicodeError) as exc:
+        raise _EnvSourceError("unreadable", str(path)) from exc
+
+
+def _safe_source_label(path, ordinal, known_keys=(), known_values=()):
+    original = Path(path).name
+    normalized = re.sub(r"[^a-z0-9._-]+", "-", original.lower())
+    pieces = {p for p in re.split(r"[._-]+", normalized) if p}
+    key_names = {str(key).lower() for key in known_keys}
+    secretish = (not re.fullmatch(r"[a-z0-9._-]+", normalized)
+                 or not re.search(r"[a-z0-9]", normalized)
+                 or normalized.replace(".", "").replace("_", "").replace("-", "").isdigit()
+                 or bool(pieces & SECRET_NOUNS)
+                 or bool(re.search(r"[0-9a-f]{16,}", normalized))
+                 or normalized in key_names
+                 or any(_contains_known_value_fragment(original, value)
+                        for value in known_values))
+    return f"env:{ordinal}" if secretish else f"env:{normalized}"
+
+
+def _contains_known_value_fragment(base, value):
+    return isinstance(value, str) and value != "" and value in base
+
+
+class _BuildFailure(Exception):
+    def __init__(self, error_class, source=None):
+        super().__init__(error_class)
+        self.error_class, self.source = error_class, source
 
 
 def _default_sources():
@@ -372,6 +454,147 @@ def _registry_rev(doc):
     return 0
 
 
+def _valid_uuid4(value):
+    try:
+        parsed = uuid.UUID(value)
+        return (str(parsed) == value and parsed.version == 4
+                and parsed.variant == uuid.RFC_4122)
+    except (AttributeError, ValueError, TypeError):
+        return False
+
+
+def _valid_build_report(report, pattern=None):
+    """Strictly validate the canonical build ledger and its identity."""
+    if not isinstance(report, dict) or set(report) != {
+            "version", "derivation_nonce", "derived_rev", "sources", "overall"}:
+        return False
+    nonce = report.get("derivation_nonce")
+    if not _valid_uuid4(nonce) or type(report.get("derived_rev")) is not int:
+        return False
+    if pattern is not None:
+        meta = pattern.get("metadata") if isinstance(pattern, dict) else None
+        if not isinstance(meta, dict) or meta.get("derivation_nonce") != nonce:
+            return False
+        if type(pattern.get("derived_rev")) is not int \
+                or pattern.get("derived_rev") != report.get("derived_rev"):
+            return False
+    if not isinstance(report.get("sources"), list):
+        return False
+    sums = {"added": 0, "skipped": 0, "warnings": 0}
+    seen_contributed_keys = set()
+    for source in report["sources"]:
+        if not isinstance(source, dict):
+            return False
+        if set(source) != {"source", "added", "skipped", "warnings", "counts"}:
+            return False
+        if not re.fullmatch(r"(?:env:(?:[a-z0-9._-]+|[1-9][0-9]*)|registry|setup|stdin)", source["source"]):
+            return False
+        for field in ("added", "skipped", "warnings"):
+            if not isinstance(source.get(field), list):
+                return False
+            counts = source.get("counts", {})
+            if not isinstance(counts, dict) or set(counts) != {"added", "skipped", "warnings"}:
+                return False
+            if counts.get(field) != len(source[field]):
+                return False
+            sums[field] += len(source[field])
+            for row in source[field]:
+                expected = {"kind", "key"} if field == "added" else {"kind", "key", "reason"}
+                if not isinstance(row, dict) or set(row) != expected:
+                    return False
+                if row.get("kind") not in ("key", "registry_id") or not isinstance(row.get("key"), str):
+                    return False
+                if row["kind"] == "key" and not (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", row["key"]) or re.fullmatch(r"<invalid-key(?::[2-9][0-9]*)?>", row["key"])):
+                    return False
+                if row["kind"] == "registry_id" and not re.fullmatch(r"(?:[0-9a-f]{16}|lit-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9]{2}|ordinal-[1-9][0-9]*)", row["key"]):
+                    return False
+                if field == "skipped" and row.get("reason") not in ("not-a-secret-noun", "invalid key form", "duplicate"):
+                    return False
+                if field == "skipped" and row["kind"] == "key":
+                    reason = row.get("reason")
+                    key = row["key"]
+                    if reason == "not-a-secret-noun" and _is_secret_noun(key):
+                        return False
+                    if reason == "duplicate" and not _is_secret_noun(key):
+                        return False
+                    if reason == "duplicate" and key not in seen_contributed_keys:
+                        return False
+                if field == "added" and row["kind"] == "key":
+                    seen_contributed_keys.add(row["key"])
+                if field == "warnings" and row.get("reason") not in ("sub-8-char floor", "short-literal warning"):
+                    return False
+            rows = [(r.get("kind"), r.get("key"), r.get("reason"))
+                    for r in source[field]]
+            if field == "skipped" and len(rows) != len(set(rows)):
+                return False
+            if field == "warnings":
+                for warning in source[field]:
+                    if warning["reason"] == "sub-8-char floor" and not any(
+                            r.get("kind") == "key" and r.get("key") == warning["key"]
+                            for r in source["added"]):
+                        return False
+    overall = report.get("overall")
+    return (type(report.get("version")) is int and report["version"] == 1
+            and isinstance(overall, dict) and set(overall) == {"sources", "added", "skipped", "warnings"}
+            and type(overall["sources"]) is int
+            and overall["sources"] == len(report["sources"])
+            and all(type(overall[k]) is int and overall[k] == sums[k]
+                    for k in ("added", "skipped", "warnings")))
+
+
+def _valid_pattern_doc(pattern, report=None):
+    if not isinstance(pattern, dict) or not isinstance(pattern.get("literals"), list):
+        return False
+    if not isinstance(pattern.get("key_patterns"), dict):
+        return False
+    if type(pattern.get("derived_rev")) is not int:
+        return False
+    meta = pattern.get("metadata")
+    if not isinstance(meta, dict) or not _valid_uuid4(meta.get("derivation_nonce")):
+        return False
+    return report is None or (pattern["derived_rev"] == report["derived_rev"]
+                              and meta["derivation_nonce"] == report["derivation_nonce"])
+
+
+_BUILD_STATE_DIAGNOSTICS = {
+    "fresh": None,
+    "stale": "check: build report is stale; rebuild required",
+    "ahead": "check: build report is ahead of the pattern document; rebuild required",
+    "malformed": "check: build state malformed; rebuild required",
+    "unverifiable": "check: pattern/report state unverifiable; build required",
+}
+
+
+def _read_build_state():
+    """Read and classify both build artifacts in one fail-closed matrix."""
+    rp, pp = STATE_DIR / "build-report.json", MATCHER
+    report = pattern = None
+    if rp.exists():
+        try: report = json.loads(rp.read_text())
+        except (OSError, ValueError): return "malformed", None, _BUILD_STATE_DIAGNOSTICS["malformed"]
+    if pp.exists():
+        try: pattern = json.loads(pp.read_text())
+        except (OSError, ValueError): return "malformed", None, _BUILD_STATE_DIAGNOSTICS["malformed"]
+    if report is None:
+        return ("stale", None, "check: build report missing; rebuild required") if pattern is not None else ("unverifiable", None, _BUILD_STATE_DIAGNOSTICS["unverifiable"])
+    if pattern is None:
+        return "unverifiable", None, "check: pattern document missing; build state unverifiable"
+    if not _valid_build_report(report) or not _valid_pattern_doc(pattern):
+        return "malformed", None, _BUILD_STATE_DIAGNOSTICS["malformed"]
+    if report["derivation_nonce"] == pattern["metadata"]["derivation_nonce"]:
+        if report["derived_rev"] != pattern["derived_rev"]:
+            return "malformed", None, _BUILD_STATE_DIAGNOSTICS["malformed"]
+        # Pair freshness is an identity/revision relationship between the
+        # two artifacts.  Current registry coverage is an external check;
+        # it must not silently reclassify an internally consistent pair.
+        return "fresh", report, None
+    if pattern["derived_rev"] > report["derived_rev"]:
+        return "stale", None, _BUILD_STATE_DIAGNOSTICS["stale"]
+    if report["derived_rev"] > pattern["derived_rev"]:
+        return "ahead", None, _BUILD_STATE_DIAGNOSTICS["ahead"]
+    return "stale", None, "check: pattern/report generation mismatch; rebuild required"
+
+
 def _commit_registry(out):
     """Canonical registry COMMIT for REAL mutations (v0.9.3): bump the
     monotonic `rev` counter, then the atomic 0600 write. Raises OSError
@@ -402,63 +625,163 @@ def _rebuild_pattern_doc(env_files, require_env):
         # extraction): a bare `build` with no sources is a hard error —
         # never a silent registry-only matcher (would replace a
         # populated one). Only --registry-only may proceed without env.
-        raise SystemExit(
-            "[info-guard] ✗ no .env sources found — pass env files "
-            "explicitly, or run from a directory with a .env")
+        raise _BuildFailure("no_env_sources")
     raw_lits, key_patterns, val_masks, env_values = [], {}, {}, set()
-    export_warnings = []
-    for path in env_files:
+    source_rows = []
+    source_specs = []
+    seen_key_patterns = set()
+    seen_exact_literals = set()
+    for ordinal, path in enumerate(env_files, 1):
         if not path.exists():
             if require_env:
-                raise SystemExit(
-                    f"[info-guard] ✗ env source not found: {path}")
+                raise _BuildFailure("env_source_missing", f"env:{ordinal}")
             continue
-        skip_count = [0]
-        def _count_export():
-            skip_count[0] += 1
-        for k, v in _load_env(path, on_export_skip=_count_export).items():
-            if _is_non_secret_key(k):
+        try:
+            text = _read_env_source_text(path)
+        except _EnvSourceError as exc:
+            raise _BuildFailure("env_source_missing" if exc.kind == "missing"
+                                 else "env_source_unreadable", f"env:{ordinal}")
+        validated = []
+        parse_events = []
+        def _parse_report(lineno, category, key, value=None):
+            parse_events.append((lineno, category, key, value))
+        parsed, _, _ = _parse_env_lines(text.splitlines(), report=_parse_report,
+                                         validated_entries=validated)
+        row = {"source": None,
+               "added": [], "skipped": [], "warnings": []}
+        source_specs.append((ordinal, path, parsed.keys(), parsed.values(), row))
+        invalid_ordinal = 0
+        for _lineno, category, key, _value in parse_events:
+            if category == "bad-key-form":
+                marker = "<invalid-key>" if invalid_ordinal == 0 else \
+                    f"<invalid-key:{invalid_ordinal + 1}>"
+                invalid_ordinal += 1
+                row["skipped"].append({"kind": "key", "key": marker,
+                                       "reason": "invalid key form"})
+        for k, v in validated:
+            if not _is_secret_noun(k):
+                if k not in {x["key"] for x in row["skipped"]}:
+                    row["skipped"].append({"kind": "key", "key": k,
+                                            "reason": "not-a-secret-noun"})
                 continue
-            if len(v) >= 8:              # literal floor = precision optimization
+            new_key = k not in seen_key_patterns
+            new_literal = v not in seen_exact_literals
+            if not new_key and not new_literal:
+                row["skipped"].append({"kind": "key", "key": k,
+                                        "reason": "duplicate"})
+                continue
+            # A key-pattern contribution and an exact-literal contribution
+            # are independent events.  A new value under an existing key
+            # therefore remains an added source-local event.
+            row["added"].append({"kind": "key", "key": k})
+            if new_key:
+                seen_key_patterns.add(k)
+            seen_exact_literals.add(v)
+            if len(v) >= 8:
                 raw_lits.append(v)
             key_patterns[k] = True
             env_values.add(v)
-        if skip_count[0]:
-            export_warnings.append((path, skip_count[0]))
-    for path, n in export_warnings:
-        print(f"[info-guard] ⚠ {path}: {n} export-style line(s) skipped "
-              f"(unsupported grammar) — values NOT protected",
-              file=sys.stderr)
+            if 0 < len(v) < 8:
+                row["warnings"].append({"kind": "key", "key": k,
+                                         "reason": "sub-8-char floor"})
+        source_rows.append(row)
     for k in EXTRA_KEY_PATTERNS:
         key_patterns[k] = True
     entries, ok, reg_doc = _load_registry()
     rev = _registry_rev(reg_doc)
+    if isinstance(reg_doc, dict) and reg_doc.get("version", 2) > _REGISTRY_VERSION:
+        raise _BuildFailure("registry_unavailable")
     if not ok:
-        print(f"[info-guard] ⚠ {CUSTOM_LITERALS.name} unreadable — "
-              f"skipped (fail-safe)")
+        raise _BuildFailure("registry_unavailable")
     else:
+        reg_row = {"source": "registry",
+                   "added": [], "skipped": [], "warnings": []}
+        seen_values = set(seen_exact_literals) | set(raw_lits)
+        registry_traversal_ordinal = 0
         for item in entries:
             if isinstance(item, dict):
                 v = item.get("value")
                 if isinstance(v, str) and v:
+                    registry_traversal_ordinal += 1
                     raw_lits.append(v)
+                    rid = item.get("id")
+                    safe_id = rid if isinstance(rid, str) and re.fullmatch(r"[0-9a-f]{16}", rid) else f"ordinal-{registry_traversal_ordinal}"
+                    target = {"kind": "registry_id", "key": safe_id}
+                    if v in seen_values:
+                        reg_row["skipped"].append({"kind": "registry_id", "key": safe_id, "reason": "duplicate"})
+                    else:
+                        reg_row["added"].append(target)
+                        seen_values.add(v)
+                        if len(v) < 8:
+                            reg_row["warnings"].append({"kind": "registry_id", "key": safe_id, "reason": "short-literal warning"})
                     if "mask" in item:
                         val_masks[v] = item["mask"]
             elif isinstance(item, str) and item:
+                registry_traversal_ordinal += 1
                 raw_lits.append(item)
+                safe_id = f"ordinal-{registry_traversal_ordinal}"
+                if item not in seen_values:
+                    reg_row["added"].append({"kind": "registry_id", "key": safe_id})
+                    seen_values.add(item)
+                    if len(item) < 8:
+                        reg_row["warnings"].append({"kind": "registry_id", "key": safe_id, "reason": "short-literal warning"})
+        source_rows.append(reg_row)
+    known_values = [value for _ordinal, _path, _keys, values, _row in source_specs
+                    for value in values]
+    known_values.extend(item.get("value") for item in entries
+                        if isinstance(item, dict) and isinstance(item.get("value"), str))
+    used_labels = set()
+    for ordinal, path, known_keys, _values, row in source_specs:
+        label = _safe_source_label(path, ordinal, known_keys, known_values)
+        if label in used_labels:
+            label = f"env:{ordinal}"
+        used_labels.add(label)
+        row["source"] = label
+    for source in source_rows:
+        source["added"].sort(key=lambda x: (x["kind"], x["key"]))
+        source["skipped"].sort(key=lambda x: (x.get("reason", ""), x["key"], x["kind"]))
+        source["warnings"].sort(key=lambda x: (x.get("reason", ""), x["key"], x["kind"]))
+        source["counts"] = {"added": len(source["added"]),
+                             "skipped": len(source["skipped"]),
+                             "warnings": len(source["warnings"])}
     # Longest-first so overlapping literals mask deterministically
     literals = []
     for v in sorted(set(raw_lits), key=len, reverse=True):
-        literals.append({"value": v, "mask": val_masks[v]}
-                        if v in val_masks else v)
+        if v in val_masks:
+            mask = val_masks[v]
+        elif "\n" in v or "\r" in v:
+            mask = "full"
+        else:
+            mask = None
+        literals.append({"value": v, "mask": mask} if mask else v)
+    nonce = str(uuid.uuid4())
+    report = {
+        "version": 1, "derivation_nonce": nonce, "derived_rev": rev,
+        "sources": source_rows,
+        "overall": {"sources": len(source_rows),
+                     "added": sum(len(x["added"]) for x in source_rows),
+                     "skipped": sum(len(x["skipped"]) for x in source_rows),
+                     "warnings": sum(len(x["warnings"]) for x in source_rows)},
+    }
     doc = {
         "mask": {"head": 2, "tail": 2, "floor": 12},
         "literals": literals,
         "key_patterns": key_patterns,
         "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "derived_rev": rev,
+        "metadata": {"derivation_nonce": nonce},
     }
-    _atomic_write_json(MATCHER, doc)
+    if not _valid_build_report(report, doc) or not _valid_pattern_doc(doc, report):
+        raise _BuildFailure("pattern_write_failed")
+    # Serialize before either rename so JSON encoding failures cannot leave
+    # a false-success artifact.
+    json.dumps(doc, ensure_ascii=False)
+    json.dumps(report, ensure_ascii=False)
+    try:
+        _atomic_write_json(MATCHER, doc)
+        _atomic_write_json(STATE_DIR / "build-report.json", report)
+    except (OSError, ValueError, TypeError) as exc:
+        raise _BuildFailure("pattern_write_failed") from exc
     os.chmod(MATCHER, 0o600)
     # Read-back (build-diff fold CRIT-2): the activation handshake
     # verifies the PERSISTED matcher, never the in-memory doc — a write
@@ -566,6 +889,11 @@ def cmd_build(env_files):
     `--registry-only` (v0.9.3) derives from the registry alone — the
     repair path for registry-only installs (no .env sources required)."""
     args = list(env_files)
+    json_mode = "--json" in args
+    args = [a for a in args if a != "--json"]
+    if any(a.startswith("--") and a not in ("--registry-only",) for a in args):
+        print("[info-guard] usage: unknown build option", file=sys.stderr)
+        return 2
     registry_only = "--registry-only" in args
     paths = [Path(p) for p in args if p != "--registry-only"]
     if registry_only and paths:
@@ -582,19 +910,62 @@ def cmd_build(env_files):
             # .env sources present silently excludes them — the loud,
             # never-silent posture requires the warning (the repair
             # message only points here when no env sources exist).
-            print("[info-guard] ⚠ --registry-only with .env sources "
-                  "present — env-sourced values NOT included "
-                  f"(found: {', '.join(str(p) for p in _implicit)})",
-                  file=sys.stderr)
-        doc, _ev = _rebuild_pattern_doc([], require_env=False)
+            print("[info-guard] ⚠ --registry-only with .env sources present "
+                  "— env-sourced values NOT included", file=sys.stderr)
+        try:
+            doc, _ev = _rebuild_pattern_doc([], require_env=False)
+        except _BuildFailure as exc:
+            return _build_failure(exc, json_mode)
+        except Exception:
+            return _build_failure(_BuildFailure("pattern_write_failed"), json_mode)
     else:
-        doc, _ev = _rebuild_pattern_doc(paths if paths else None,
-                                        require_env=True)
+        try:
+            doc, _ev = _rebuild_pattern_doc(paths if paths else None,
+                                            require_env=True)
+        except _BuildFailure as exc:
+            return _build_failure(exc, json_mode)
+        except Exception:
+            return _build_failure(_BuildFailure("pattern_write_failed"), json_mode)
     lits = doc.get("literals", [])
     n_full = sum(1 for l in lits if isinstance(l, dict))
-    print(f"[info-guard] matcher: {len(lits)} literals ({n_full} full-mask), "
-          f"{len(doc.get('key_patterns', {}))} key patterns → {MATCHER}")
+    if json_mode:
+        try:
+            report = json.loads((STATE_DIR / "build-report.json").read_text())
+        except (OSError, ValueError):
+            return _build_failure(_BuildFailure("pattern_write_failed"), True)
+        print(json.dumps({"status": "ok", "report": report}, separators=(",", ":")))
+    else:
+        for source in json.loads((STATE_DIR / "build-report.json").read_text()).get("sources", []):
+            for warning in source.get("warnings", []):
+                if warning.get("reason") in ("sub-8-char floor", "short-literal warning"):
+                    print(f"[info-guard] ⚠ {source['source']}: {warning['key']} "
+                          f"{warning['reason']} — protection retained",
+                          file=sys.stderr)
+        print(f"[info-guard] matcher: {len(lits)} literals ({n_full} full-mask), "
+              f"{len(doc.get('key_patterns', {}))} key patterns → {MATCHER}")
     return 0
+
+
+def _build_failure(failure, json_mode):
+    allowed = {"no_env_sources", "env_source_missing",
+               "env_source_unreadable", "registry_unavailable",
+               "pattern_write_failed"}
+    cls = failure.error_class if failure.error_class in allowed else "pattern_write_failed"
+    if json_mode:
+        obj = {"status": "error", "report": None, "error_class": cls}
+        if cls in ("env_source_missing", "env_source_unreadable") and failure.source:
+            obj["source"] = failure.source
+        print(json.dumps(obj, separators=(",", ":")))
+    else:
+        messages = {
+            "no_env_sources": "no .env sources found",
+            "env_source_missing": "environment source missing",
+            "env_source_unreadable": "environment source unreadable",
+            "registry_unavailable": "registry unavailable",
+            "pattern_write_failed": "pattern write failed",
+        }
+        print(f"[info-guard] ✗ {messages.get(cls, 'usage error')}", file=sys.stderr)
+    return 1
 
 
 def cmd_status():
@@ -941,11 +1312,20 @@ def _scan_lines(lines):
     per S9/plan step 1.2-1.3 (build-diff MAJ-1 fold). Returns the
     existing hit tuple shape (cls, rule, line_no, value, masked_repr,
     context). The raw value is internal only — NEVER printed."""
+    # This inlines the former _key_scan(p) read (the shared _key_scan(p)
+    # contract) so the key, canary, and env
+    # passes share one successful file read and one traversal.
+    # Shared detector equivalent to _key_scan(p): one read feeds every pass.
     hits = []
     for lineno, line in enumerate(lines, 1):
         line = line.rstrip("\n")
         for m in _KEY_FORM_RE.finditer(line):
-            key, val = m.group(1), m.group(2)
+            delimiter = re.search(r"[=:]", line[m.start():])
+            equal_at = m.start() + delimiter.start() if delimiter else -1
+            lhs = line[:equal_at].strip() if equal_at >= 0 else ""
+            if delimiter is None or re.match(r"^(?:export|env|declare\s+-x)\s+[\"']", lhs, re.IGNORECASE):
+                continue
+            key, val = _normalized_env_key(m.group(1)), m.group(2)
             if val.lower() in _TRIVIAL_VALUES or re.fullmatch(r"\d{1,6}", val):
                 continue
             if len(val) > 64 and not _VALUE_TOKEN_RE.match(val.strip().strip('"').strip("'")):  # giant non-token blob, not a value (long JWTs stay)
@@ -1296,11 +1676,15 @@ def cmd_watch(args):
     if dirs is None:
         return 2  # usage error (--json-out without a path)
     reset = opts["reset"]
+    requested_dirs = list(dirs or _PREFLIGHT_DIRS)
     scan_dirs = []
-    for name in dirs or _PREFLIGHT_DIRS:
+    missing_dirs = []
+    for name in requested_dirs:
         p = _HERMES_HOME / name
         if p.is_dir():
             scan_dirs.append(p)
+        else:
+            missing_dirs.append(name)
     dirs = scan_dirs
     json_mode = opts["json"]
 
@@ -1309,10 +1693,33 @@ def cmd_watch(args):
         # to stderr (preflight precedent, review MIN E2).
         print(msg, file=sys.stderr if json_mode else sys.stdout)
 
-    if not dirs:
-        say(f"[info-guard] watch: no scan targets under {_HERMES_HOME} "
-            f"({', '.join(_PREFLIGHT_DIRS)}) — nothing to scan")
-        return 0
+    if json_mode:
+        # Route the zero-scope diagnostics before producing the sole JSON
+        # result document on stdout.
+        with contextlib.redirect_stdout(sys.stderr):
+            empty_scope = not dirs
+            if empty_scope:
+                say("watch: no existing directories in scan scope; refusing to scan (exit 2)")
+                say("watch: scanned_dirs=0 scanned_files=0")
+    else:
+        empty_scope = not dirs
+        if empty_scope:
+            say("watch: no existing directories in scan scope; refusing to scan (exit 2)")
+            say("watch: scanned_dirs=0 scanned_files=0")
+    if empty_scope:
+        if json_mode:
+            error_object = {"schema": "info-guard/watch/v1",
+                            "scanned_dirs": 0, "scanned_files": 0,
+                            "status": "error"}
+            if opts["json_out"]:
+                output_path = Path(opts["json_out"])
+                _atomic_write_json(output_path, error_object)
+                os.chmod(output_path, 0o600)
+            else:
+                print(json.dumps(error_object, separators=(",", ":")))
+        # An empty scope is an operationally distinguishable condition:
+        # no baseline or successful no-op may be claimed.
+        return 2
     if json_mode:
         # JSON purity: same treatment as preflight (v0.5.1, IG D94).
         with contextlib.redirect_stdout(sys.stderr):
@@ -1321,6 +1728,12 @@ def cmd_watch(args):
         _ensure_gitleaks()
     all_hits, gitleaks_ok, env_meta = _collect_hits(dirs, env_pass=True,
                                                     canary_pass=True)
+    scan_counts = (env_meta or {}).get("scan_counts", {})
+    scanned_dirs = scan_counts.get("scanned_dirs", 0)
+    scanned_files = scan_counts.get("scanned_files", 0)
+    say(f"watch: scanned_dirs={scanned_dirs} scanned_files={scanned_files}")
+    if missing_dirs:
+        say("watch: skipped missing directory argument(s); scanning existing directories")
     if not gitleaks_ok:
         say("[info-guard] watch: ⚠ gitleaks not found on PATH — key-shape "
             "pass only")
@@ -1360,14 +1773,14 @@ def cmd_watch(args):
     current = _watch_values(all_hits, env_meta, ht_map)
     # One assessment per run (A2): totals + per-file map for the
     # baseline snapshot, later rendered by watch/v1 JSON.
-    total_files = sum(1 for d in dirs for _ in d.rglob("*") if _.is_file())
+    total_files = scanned_files
     now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
         "+00:00", "Z")
     assessment = _build_assessment(
         all_hits,
         [str(d.relative_to(_HERMES_HOME)) if _HERMES_HOME in d.parents
          else str(d) for d in dirs],
-        total_files, gitleaks_ok, now, env_meta, _value_id_map(), ht_map)
+        scanned_files, gitleaks_ok, now, env_meta, _value_id_map(), ht_map)
     protection = _snapshot_protection()
     # Live protected-value registry (v0.4.1, IG D52/D53): custom_literals
     # fingerprints from the CURRENT snapshot — declaring a literal takes
@@ -2574,6 +2987,7 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated,
     n_ht = len(ht_vals)
     inst = _installation_status()
     manifest = _install_manifest()
+    ledger_state, ledger, _ledger_diag = _read_build_state()
     return {
         "schema": "info-guard/assessment/v1",
         "tool": {"name": "info-guard", "version": _PACKAGE_VERSION,
@@ -2586,6 +3000,8 @@ def _build_assessment(all_hits, dirs, files_scanned, gitleaks_ok, generated,
         "scan": {"generated": generated, "dirs": dirs,
                  "files_scanned": files_scanned, "read_only": True,
                  "gitleaks_ok": gitleaks_ok},
+        "env_pass": {"build_ledger": ledger,
+                     "build_ledger_state": ledger_state},
         "status": {
             "severity": "high" if (n_rows or n_known_rows or n_ht_rows) else "none",
             "action_required": n_rows > 0 or n_known_rows > 0 or n_ht_rows > 0,
@@ -3081,7 +3497,7 @@ def _env_sources():
             sources.append(entry)
             continue
         for k, v in entries.items():
-            if _is_non_secret_key(k):
+            if not _is_secret_noun(k):
                 continue
             if len(v) < 8 or v in _TRIVIAL_VALUES or len(v) > _ENV_VALUE_MAX:
                 continue
@@ -3101,8 +3517,34 @@ def _env_scan_line(line, index):
     with a raw value)."""
     out = []
     try:
+        candidates = []
+        # Assignment-shaped values are taken after the first `=` so
+        # embedded equals remain part of the exact value.
+        for assignment in _KEY_FORM_RE.finditer(line):
+            delimiter = re.search(r"[=:]", line[assignment.start():])
+            equal_at = assignment.start() + delimiter.start() if delimiter else -1
+            lhs = line[:equal_at].strip() if equal_at >= 0 else ""
+            if delimiter is None or re.match(r"^(?:export|env|declare\s+-x)\s+[\"']", lhs, re.IGNORECASE):
+                continue
+            key = _normalized_env_key(assignment.group(1))
+            value = assignment.group(2).strip().strip('"').strip("'")
+            if _is_secret_noun(key) and value:
+                candidates.append(value)
+        assignment_spans = [m.span() for m in _KEY_FORM_RE.finditer(line)]
         for m in _ENV_EXACT_RE.finditer(line):
             cand = m.group(0)
+            if any(a <= m.start() and m.end() <= b
+                   for a, b in assignment_spans):
+                continue
+            # In KEY=value text the value, not the complete assignment, is
+            # the candidate.  Keep generic runs unchanged for logs and URLs.
+            if "=" in cand:
+                tail = cand.rsplit("=", 1)[-1]
+                if tail and _is_secret_noun(_normalized_env_key(
+                        cand.split("=", 1)[0])):
+                    cand = tail
+            candidates.append(cand)
+        for cand in candidates:
             if len(cand) > _ENV_VALUE_MAX:
                 continue
             d = _sha(cand)
@@ -3175,10 +3617,21 @@ def _scan_dir_files(dirpath, env_index=None, src_ids=None, ht_values=None,
     ctx) 7-tuples.
     """
     hits = []
+    # Shared detector pass (equivalent to _key_scan(p)): normalized
+    # final-token extraction and all detection passes use this helper.
+    scan_counts = {"scanned_dirs": 1 if dirpath.is_dir() else 0,
+                   "scanned_files": 0}
     for p in sorted(dirpath.rglob("*")):
         if not p.is_file():
             continue
-        for hit in _key_scan(p):
+        try:
+            text = p.read_text(errors="replace")
+        except OSError:
+            if strict:
+                raise
+            continue
+        scan_counts["scanned_files"] += 1
+        for hit in _scan_lines(text.splitlines()):
             hits.append((hit[0], hit[1],
                          os.path.relpath(str(p), str(_HERMES_HOME)),
                          *hit[2:]))
@@ -3187,12 +3640,6 @@ def _scan_dir_files(dirpath, env_index=None, src_ids=None, ht_values=None,
             # lines against the registered canary set. The canary VALUE is
             # kept in memory only (masked downstream, never printed); the
             # raw registry value is the match key.
-            try:
-                text = p.read_text(errors="replace")
-            except OSError:
-                if strict:
-                    raise
-                text = ""
             for ln, line in enumerate(text.splitlines(), 1):
                 for cval in ht_values:
                     if cval in line:
@@ -3221,6 +3668,7 @@ def _scan_dir_files(dirpath, env_index=None, src_ids=None, ht_values=None,
                 hits.append(h)
             if ehits and known_files is not None:
                 known_files.add(os.path.relpath(str(p), str(_HERMES_HOME)))
+    _scan_dir_files.last_counts = scan_counts
     return hits
 
 
@@ -3249,6 +3697,7 @@ def _collect_hits(dirs, redact=True, env_pass=False, canary_pass=False):
     used by preflight + watch ONLY (setup never offers canaries as
     registration candidates)."""
     all_hits, gitleaks_ok = [], True
+    scan_counts = {"scanned_dirs": 0, "scanned_files": 0}
     env_meta = None
     ht_map = _honeytoken_id_map() if canary_pass else {}
     if env_pass:
@@ -3274,11 +3723,15 @@ def _collect_hits(dirs, redact=True, env_pass=False, canary_pass=False):
             diag=env_meta["diagnostics"] if env_pass else None,
             known_sigs=env_meta["known_sigs"] if env_pass else None,
             known_files=env_meta["known_files"] if env_pass else None))
+        for _k in scan_counts:
+            scan_counts[_k] += getattr(_scan_dir_files, "last_counts", {}).get(_k, 0)
         ghits, ok = _gitleaks_scan(d, redact=redact)
         gitleaks_ok = gitleaks_ok and ok
         for cls, rule, fname, line, value, masked, ctx in ghits:
             rel = os.path.relpath(fname, str(_HERMES_HOME)) if fname else str(d)
             all_hits.append((cls, rule, rel, line, value, masked, ctx))
+    if env_meta is not None:
+        env_meta["scan_counts"] = scan_counts
     return all_hits, gitleaks_ok, env_meta
 
 
@@ -4542,6 +4995,9 @@ def _literals_add_from(selector, json_mode):
                     "rev": committed_rev}, indent=2))
             else:
                 print(f"value {vid}")
+            if 0 < len(value) < 8:
+                print(f"[info-guard] warning: short literal registered (id {vid})",
+                      file=sys.stderr)
             return _activation_report(act_err, _asrc, op="literals add --from")
         finally:
             try:
@@ -4585,7 +5041,7 @@ def cmd_literals(args):
 
 
 def _literals_add(args):
-    json_mode, mask, file_path, kind, values = False, None, None, None, []
+    json_mode, json_input, mask, file_path, kind, values = False, False, None, None, None, []
     from_selector, end_opts = None, False
     # Evidence r3 m2: "--from mode" must not depend on where --from
     # appears in the argv — a pre-scan establishes the mode (any --from
@@ -4643,6 +5099,8 @@ def _literals_add(args):
             end_opts = True
         elif not end_opts and a == "--json":
             json_mode = True
+        elif not end_opts and a == "--json-input":
+            json_input = True
         elif not end_opts and a == "--kind":
             if i + 1 >= len(args):
                 print("[info-guard] usage: --kind KIND required "
@@ -4688,6 +5146,10 @@ def _literals_add(args):
             values.append(a)
         i += 1
     if from_selector is not None:
+        if json_input:
+            print("[info-guard] usage: --json-input cannot be combined with "
+                  "--from", file=sys.stderr)
+            return 2
         # Mutual exclusion (plan 12.3): --from is a distinct enrollment
         # mode — no positional values, no --file/--mask/--kind.
         if values:
@@ -4707,6 +5169,26 @@ def _literals_add(args):
                   "--kind", file=sys.stderr)
             return 2
         return _literals_add_from(from_selector, json_mode)
+    if json_input:
+        if values or not file_path or kind is not None:
+            print("[info-guard] usage: --json-input requires --file and "
+                  "cannot be combined with positional values or --kind", file=sys.stderr)
+            return 2
+        try:
+            raw = sys.stdin.read() if file_path == "-" else Path(file_path).read_text()
+            decoded = json.loads(raw)
+        except (OSError, ValueError, UnicodeError):
+            print("[info-guard] usage: invalid JSON input", file=sys.stderr)
+            return 2
+        if isinstance(decoded, str):
+            values = [decoded]
+        elif isinstance(decoded, list) and all(isinstance(v, str) for v in decoded):
+            values = decoded
+        else:
+            print("[info-guard] usage: JSON input must be a string or array "
+                  "of strings", file=sys.stderr)
+            return 2
+        file_path = None
     if kind is not None and kind != "honeytoken":
         # r1 MAJ-1: `--kind` accepts exactly `honeytoken`; any other
         # value, missing value, or repeated flag is usage exit 2 with no
@@ -4745,11 +5227,11 @@ def _literals_add(args):
         if explicit is not None:
             # Value validation (r1 MAJ-7 / r2 MAJ-4): no control chars,
             # no line terminators, no empty/whitespace-only values.
-            if not explicit.strip() or any(ord(c) < 32 or ord(c) == 127
-                                           for c in explicit):
+            if not explicit.strip() or any((ord(c) < 32 and c not in "\r\n")
+                                           or ord(c) == 127 for c in explicit):
                 print("[info-guard] usage: honeytoken values must be "
-                      "non-empty and contain no control characters or "
-                      "line terminators", file=sys.stderr)
+                      "non-empty and contain no prohibited control "
+                      "characters; LF/CRLF line terminators are allowed", file=sys.stderr)
                 return 2
             value = explicit
         else:
@@ -4824,6 +5306,11 @@ def _literals_add(args):
         print("[info-guard] usage: empty values rejected — literal values "
               "must be non-empty strings", file=sys.stderr)
         return 2
+    if any(any((ord(c) < 32 and c not in "\r\n") or ord(c) == 127
+               for c in v) for v in values):
+        print("[info-guard] usage: literal values cannot contain prohibited "
+              "control characters; LF/CRLF line terminators are allowed", file=sys.stderr)
+        return 2
     if not values:
         print(_SUBCOMMAND_USAGE["literals"], file=sys.stderr)
         return 2
@@ -4837,10 +5324,16 @@ def _literals_add(args):
         sig = item if isinstance(item, str) else item.get("value")
         if isinstance(sig, str) and sig:
             pre.add(sig)
+    # Multi-line values are exact literals and default to full masking;
+    # line-oriented input remains backward compatible.
+    values = [v for v in values if isinstance(v, str) and v]
     new_values = [v for v in values if v not in pre]
     merged, seen = [], set()
-    for item in existing + [{"value": v, "mask": mask} if mask else v
-                            for v in values]:
+    for item in existing + [
+        {"value": v, "mask": (mask or ("full" if "\n" in v or "\r" in v else None))}
+        if (mask or "\n" in v or "\r" in v) else v
+        for v in values
+    ]:
         sig = item if isinstance(item, str) else item.get("value")
         if sig in seen:
             continue
@@ -4877,6 +5370,9 @@ def _literals_add(args):
     for v in values:
         rec = {"value_masked": _mask_value(v), "id": by_value.get(v)}
         (duplicates if v in pre else added).append(rec)
+        if v not in pre and 0 < len(v) < 8:
+            print(f"[info-guard] warning: short literal registered (id {rec['id']})",
+                  file=sys.stderr)
     if json_mode:
         resp = {"added": added, "duplicates": duplicates}
         if committed_rev is not None:
@@ -5964,11 +6460,6 @@ def cmd_setup(args):
             if ans == "q":
                 break
             if ans != "y":
-                continue
-            if len(value) < 8:
-                skipped_short += 1
-                print("      (value too short for exact-value matching — it will be "
-                      "covered if its KEY is in your .env sources)")
                 continue
             style = _self_fill_mask_style(value)
             added.append((value, style))
@@ -7572,13 +8063,18 @@ def cmd_env(args):
         events.setdefault(lineno, []).append((category, key, value))
     _parse_env_lines(lines, report=_report)
     if check:
-        violations = [(ln, ev[1]) for ln, evs in sorted(events.items())
-                      for ev in evs if ev[0] != "valid"]
-        for lineno, key in violations:
-            if key is not None and _env_safe_key(key, doc):
-                print(f"{lineno}: {key}")
-            else:
-                print(f"{lineno}:")
+        violations = []
+        for lineno, line in enumerate(lines, 1):
+            evs = events.get(lineno, [])
+            if not evs:
+                continue
+            for category, key, _value in evs:
+                # W13 is a verdict surface: emit the actual category for
+                # every classified line, while retaining only a safe key.
+                safe_key = key if key is not None and _env_safe_key(key, doc) else None
+                print(f"{lineno}: {safe_key + ' ' if safe_key else ''}[{category}]")
+                if category != "valid":
+                    violations.append((lineno, key))
         return 1 if violations else 0
     if keys:
         entries, _saw, _ok = _parse_env_lines(lines)

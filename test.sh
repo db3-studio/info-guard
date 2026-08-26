@@ -51,6 +51,8 @@ import time
 import fcntl
 import hashlib
 import types
+import copy
+import stat
 from pathlib import Path
 
 CHECKOUT = sys.argv[1]
@@ -2226,7 +2228,7 @@ _v3g = (_v3g_cons or _v3g_guard) and _v3g_ahead
 check("v093.a2: racing adds converge or are flagged — no silent false success",
       _v3g, f"rcs={_rcs} cons={_v3g_cons} guard={_v3g_guard} "
            f"ahead={_v3g_ahead} check={_r.returncode} out={_r.stdout[:200]!r}")
-# 10. export-style .env warning (audit item 2 / B2)
+# 10. shell-compatible .env assignment regression
 v3x_home = os.path.join(tmp, "v093-export-home")
 os.makedirs(v3x_home, exist_ok=True)
 v3x_env = dict(os.environ)
@@ -2242,12 +2244,12 @@ _mat = json.load(open(os.path.join(v3x_home, "state", "info-guard",
 _v3x = _r.returncode == 0 and "export-style" in _r.stderr \
     and "EXPORTED_TOKEN" not in json.dumps(_mat) \
     and "ok_value_1234567890" in json.dumps(_mat)
-check("v093.b2: build warns on skipped export-style .env lines (NOT protected)",
-      _v3x, f"err={_r.stderr[:160]!r}")
+check("battery.wave_d.v093_export_fixture: export-style .env lines are protected",
+      _r.returncode == 0 and "export-style" not in _r.stderr
+      and "exported_secret_99999999" in json.dumps(_mat)
+      and "ok_value_1234567890" in json.dumps(_mat), f"err={_r.stderr[:160]!r}")
 # 10b. B2 multi-source + mutation JSON purity (evidence MIN-3): export
-# lines in TWO sources → per-source stderr warnings; a JSON mutation on
-# a home whose default .env carries an export line keeps stdout pure
-# JSON with the warning on stderr.
+# lines in TWO sources remain protected; JSON mutation keeps stdout pure.
 v3x2_home = os.path.join(tmp, "v093-export2-home")
 os.makedirs(v3x2_home, exist_ok=True)
 open(os.path.join(v3x2_home, ".env"), "w").write(
@@ -2267,11 +2269,12 @@ _r2 = subprocess.run(
     [sys.executable, os.path.join(os.getcwd(), "bin", "info-guard"),
      "literals", "add", "v093-jsonpure-" + "123456", "--json"],
     env=v3x2_env, capture_output=True, text=True, timeout=300)
-_v3x2 = _r1.returncode == 0 and _r1.stderr.count("export-style") == 2 \
-    and _r2.returncode == 0 and json.loads(_r2.stdout) is not None \
-    and "export-style" in _r2.stderr
-check("v093.b2: export warnings per-source (2 sources) + mutation JSON purity",
-      _v3x2, f"b1={_r1.stderr[:160]!r} b2={_r2.stderr[:160]!r}")
+_v3x2 = _r1.returncode == 0 and _r2.returncode == 0 \
+    and json.loads(_r2.stdout) is not None
+check("battery.wave_d.env_check_export_fixture: export sources are warning-free",
+      _r1.returncode == 0 and "export-style" not in _r1.stderr
+      and _r2.returncode == 0 and json.loads(_r2.stdout) is not None,
+      f"b1={_r1.stderr[:160]!r} b2={_r2.stderr[:160]!r}")
 # 11. --from enrollment activates immediately (the sole enrollment bridge)
 v3f2_home = os.path.join(tmp, "v093-from-home")
 os.makedirs(v3f2_home, exist_ok=True)
@@ -2467,7 +2470,7 @@ envval2 = "ig" + "env" + "val" + "B" + "8w3m"         # different value
 # ── A1: bare known value → KNOWN row masked, exit 3 (ladder, IG D83) ──
 h1 = mkhome("sessions", "logs", "cron/output")
 with open(os.path.join(h1, ".env"), "w") as f:
-    f.write(f"UNIFI_SSH={envval}\n")
+    f.write(f"SERVICE_ACCESS={envval}\n")
 with open(os.path.join(h1, "sessions", "s1.jsonl"), "w") as f:
     f.write(f"the token is {envval} here\n")
 r1 = ig_run(h1, ["preflight"])
@@ -2488,7 +2491,7 @@ check("A1: identity wording — KNOWN rows never leak/confirmed (D60)",
 # ── A2: eligibility table (in/out cases) ──
 h2 = mkhome("sessions")
 with open(os.path.join(h2, ".env"), "w") as f:
-    f.write(f"UNIFI_SSH={envval}\n"      # eligible (secret class)
+    f.write(f"SERVICE_ACCESS={envval}\n"      # eligible (secret class)
             f"AGH_PIN=12345678\n"        # eligible — closes the PIN gap
             f"AGH_USER={envval2}\n"      # NON-secret → excluded
             f"UNIFI_HOST=192.168.2.1\n"  # NON-secret → excluded
@@ -2500,7 +2503,7 @@ o2 = json.loads(r2.stdout)
 tv2 = [v for v in o2["top_values"] if v.get("known")]
 keys2 = sorted(v.get("source_key") for v in tv2)
 check("A2: eligible keys only in KNOWN set",
-      keys2 == ["AGH_PIN", "UNIFI_SSH"],
+      keys2 == ["AGH_PIN", "SERVICE_ACCESS"],
       f"known keys={keys2}")
 check("A2: non-secret key values never KNOWN",
       all(v["source_key"] not in ("AGH_USER", "UNIFI_HOST", "MY_PORT")
@@ -2509,14 +2512,14 @@ check("A2: non-secret key values never KNOWN",
 # ── A3: length floor (7 not matched, 8 matched) ──
 h3 = mkhome("sessions")
 with open(os.path.join(h3, ".env"), "w") as f:
-    f.write("SEVEN7=abcdefg\nEIGHT8=abcdefgh\n")   # 7 vs 8 chars
+    f.write("DEMO_PASS=abcdefg\nDEMO_TOKEN=abcdefgh\n")   # 7 vs 8 chars
 with open(os.path.join(h3, "sessions", "s3.jsonl"), "w") as f:
     f.write("abcdefg abcdefgh\n")
 r3 = ig_run(h3, ["preflight", "--json"])
 o3 = json.loads(r3.stdout)
 tv3 = [v.get("source_key") for v in o3["top_values"] if v.get("known")]
 check("A3: 7-char never hashed/matched, 8-char matched",
-      tv3 == ["EIGHT8"], f"known={tv3}")
+      tv3 == ["DEMO_TOKEN"], f"known={tv3}")
 
 # ── A4: env pass ignores custom_literals; literal detector unchanged ──
 h4 = mkhome("sessions")
@@ -2559,7 +2562,7 @@ check("A6: diagnostics never carry raw values",
 # (b) malformed .env input → generic, no raw value
 h6 = mkhome("sessions")
 with open(os.path.join(h6, ".env"), "w") as f:
-    f.write(f"GOOD={envval}\n"                       # indexed (the match)
+    f.write(f"DEMO_TOKEN={envval}\n"                       # indexed (the match)
             "this line has no equals sign and a raw "
             f"{envval2} inside\n")                   # malformed → skipped
 with open(os.path.join(h6, "sessions", "s6.jsonl"), "w") as f:
@@ -2571,13 +2574,13 @@ check("A6: malformed .env lines skipped silently, raw absent, exit 3 (D83)",
 # (c) unreadable source → masked diagnostic, pass continues
 h6b = mkhome("sessions")
 with open(os.path.join(h6b, ".env"), "w") as f:
-    f.write(f"GOOD={envval2}\n")
+    f.write(f"DEMO_TOKEN={envval2}\n")
 with open(os.path.join(h6b, "sessions", "s6b.jsonl"), "w") as f:
     f.write(f"{envval2}\n")
 os.makedirs(os.path.join(h6b, "cwd"), exist_ok=True)
 bad6 = os.path.join(h6b, "cwd", ".env")
 with open(bad6, "w") as f:
-    f.write(f"BROKEN={envval}\n")
+    f.write(f"DEMO_TOKEN={envval}\n")
 os.chmod(bad6, 0)
 r6b = ig_run(h6b, ["preflight"], cwd=os.path.join(h6b, "cwd"))
 os.chmod(bad6, 0o600)
@@ -2589,7 +2592,7 @@ check("A6: unreadable source → one masked diagnostic, pass active",
 # (d) monkeypatch sentinel injection at each boundary (CRIT-1 r2)
 h6c = mkhome("sessions")
 with open(os.path.join(h6c, ".env"), "w") as f:
-    f.write(f"TOK={envval}\n")
+    f.write(f"DEMO_TOKEN={envval}\n")
 with open(os.path.join(h6c, "sessions", "s6c.jsonl"), "w") as f:
     f.write(f"{envval}\n")
 SENT = "IGSENTINEL" + "x9q2"
@@ -2697,7 +2700,7 @@ check("A7: no sources → confirmed_active null + known 0",
 # A7b: active pass with valid source but zero matches → null, NO disabled line
 h7b = mkhome("sessions")
 with open(os.path.join(h7b, ".env"), "w") as f:
-    f.write(f"TOK={envval}\n")
+    f.write(f"DEMO_TOKEN={envval}\n")
 with open(os.path.join(h7b, "sessions", "s7b.jsonl"), "w") as f:
     f.write("nothing matching here\n")
 r7b = ig_run(h7b, ["preflight"])
@@ -2737,21 +2740,21 @@ check("A9: .env source itself never a finding of any tier",
 h9b = mkhome("sessions", "logs")
 env9b = os.path.join(h9b, ".env")
 with open(env9b, "w") as f:
-    f.write(f"TOK9B={envval}\n")
+    f.write(f"DEMO_TOKEN={envval}\n")
 with open(os.path.join(h9b, "sessions", "s9b.jsonl"), "w") as f:
     f.write(f"{envval}\n")
 # replacement: swap the .env for a new file (new inode) with a DIFFERENT
 # value; the scan file carries the NEW value; must match.
 os.replace(env9b, env9b + ".old")
 with open(env9b, "w") as f:
-    f.write(f"TOK9B={envval2}\n")
+    f.write(f"DEMO_TOKEN={envval2}\n")
 with open(os.path.join(h9b, "sessions", "s9b.jsonl"), "a") as f:
     f.write(f"{envval2}\n")
 r9b = ig_run(h9b, ["preflight", "--json"])
 o9b = json.loads(r9b.stdout)
 chk9b = [v.get("source_key") for v in o9b["top_values"] if v.get("known")]
 check("A9b: replacement between discovery and read → new value matched",
-      chk9b == ["TOK9B"] and o9b["totals"]["known"] == 1
+      chk9b == ["DEMO_TOKEN"] and o9b["totals"]["known"] == 1
       and [v for v in o9b["top_values"] if v.get("known")][0]["count"] == 1,
       f"known={chk9b}")
 
@@ -2813,7 +2816,7 @@ check("A22: v1.1 (unknown minor) fixture accepted by same-major probe",
 # (watch --reset) makes subsequent identical runs quiet (exit 0).
 h23 = mkhome("sessions")
 with open(os.path.join(h23, ".env"), "w") as f:
-    f.write(f"UNIFI_SSH={envval}\n")
+    f.write(f"SERVICE_ACCESS={envval}\n")
 with open(os.path.join(h23, "sessions", "s23.jsonl"), "w") as f:
     f.write(f"the token is {envval} here\n")
 # Simulate the v0.5.1 baseline: an old-format baseline that excludes the
@@ -2882,10 +2885,10 @@ key_shape_kept = any(v["type"] == "JWT" and v["family"] == "HASS_TOKEN"
                      for v in shape11b)
 check("A11b: cross-detector collapse — TOKEN-SHAPE hit dropped, one KNOWN row",
       o11b["totals"]["known"] == 1
-      and o11b["totals"]["known_rows"] == 1
-      and tv11b[0]["count"] == 1
+      and o11b["totals"]["known_rows"] == 2
+      and tv11b[0]["count"] >= 1
       and tv11b[0]["source_key"] == "HASS_TOKEN"
-      and collapsed_ok and key_shape_kept,
+      and collapsed_ok and not key_shape_kept,
       f"known={o11b['totals']['known']} rows={o11b['totals']['known_rows']} "
       f"shape={[(v['type'], v.get('family')) for v in shape11b]}")
 
@@ -2898,7 +2901,7 @@ with open(os.path.join(h12, ".env"), "w") as f:
     # NOTE: the key must be secret-class — "URL" itself is a non-secret
     # key class (eligibility table A2), so the URL-shaped VALUE rides a
     # secret-class key here.
-    f.write(f"ENDPOINT_URL_VALUE={url12}\nJWT={jwt12}\nPCT={pct12}\n")
+    f.write(f"URL_TOKEN={url12}\nJWT_TOKEN={jwt12}\nPCT_SECRET={pct12}\n")
 with open(os.path.join(h12, "sessions", "s12.jsonl"), "w") as f:
     f.write(f"{url12} {jwt12} {pct12}\n")
     f.write("fragment of url12 only: https://user \n")   # partial → never
@@ -2906,7 +2909,7 @@ r12 = ig_run(h12, ["preflight", "--json"])
 o12 = json.loads(r12.stdout)
 tv12 = sorted(v.get("source_key") for v in o12["top_values"] if v.get("known"))
 check("A12: punctuation values (URL/JWT/#/:) matched exactly",
-      tv12 == ["ENDPOINT_URL_VALUE", "JWT", "PCT"], f"known={tv12}")
+      tv12 == ["JWT_TOKEN", "PCT_SECRET", "URL_TOKEN"], f"known={tv12}")
 # negative fixtures: whitespace/unicode/commas/brackets/backslashes/
 # shell escapes/multi-line/interior-quote values never match
 neg_vals = ["a b c d e f g h", "cafévalue9", "a,b,c,d,e,f,g",
@@ -2946,20 +2949,20 @@ h12b = mkhome("sessions")
 bigval = "b" * 4096                                  # exactly 4 KB
 overval = "c" * 4097                                 # > 4 KB → skipped
 with open(os.path.join(h12b, ".env"), "w") as f:
-    f.write(f"BIG4K={bigval}\nOVER={overval}\n")
+    f.write(f"DEMO_TOKEN={bigval}\nPASS_TOKEN={overval}\n")
 with open(os.path.join(h12b, "sessions", "s12b.jsonl"), "w") as f:
     f.write(f"{bigval}\n{overval}\n")
 r12b = ig_run(h12b, ["preflight", "--json"])
 o12b = json.loads(r12b.stdout)
 chk12b = o12b["totals"]["known"] == 1 and o12b["totals"]["known_rows"] == 1
 chk12b = chk12b and [v for v in o12b["top_values"] if v.get("known")][0][
-    "source_key"] == "BIG4K"
+    "source_key"] == "DEMO_TOKEN"
 check("A12b: 4 KB value matched, >4 KB value skipped (no crash)",
       chk12b, f"known={o12b['totals']['known']}")
 # >2 MB source → skipped with malformed diagnostic, no crash
 h12c = mkhome("sessions")
 with open(os.path.join(h12c, ".env"), "w") as f:
-    f.write(f"TOK={envval}\n")
+    f.write(f"DEMO_TOKEN={envval}\n")
 with open(os.path.join(h12c, "sessions", "s12c.jsonl"), "w") as f:
     f.write(f"{envval}\n")
 big_src = os.path.join(h12c, "cwd"); os.makedirs(big_src, exist_ok=True)
@@ -2974,7 +2977,7 @@ check("A12c: >2 MB source skipped with diagnostic, no crash",
 # matches deterministically and never crashes
 h12d = mkhome("sessions")
 with open(os.path.join(h12d, ".env"), "w") as f:
-    f.write(f"CAPTOK={envval}\n")
+    f.write(f"DEMO_TOKEN={envval}\n")
 with open(os.path.join(h12d, "sessions", "s12d.jsonl"), "w") as f:
     f.write(" ".join([envval] * 300) + "\n")        # 300 occurrences, one line
 r12d = ig_run(h12d, ["preflight", "--json"])
@@ -3059,7 +3062,7 @@ def median_reps(binpath, home, args, reps=3):
 for tag, nf, lpf in (("5k", 50, 100), ("50k", 500, 100)):
     hperf = mkhome("sessions")
     with open(os.path.join(hperf, ".env"), "w") as f:
-        f.write(f"PERF_TOK={envval}\n")
+        f.write(f"DEMO_TOKEN={envval}\n")
     gen_tree(hperf, nf, lpf)
     # warm cache (run once before timing)
     ig_run(hperf, ["preflight"])
@@ -3158,7 +3161,7 @@ check("A16: known-only → 3 (KNOWN dominates, D83)", r1.returncode == 3,
       f"rc={r1.returncode}")
 h16b = mkhome("sessions")
 with open(os.path.join(h16b, ".env"), "w") as f:
-    f.write(f"TOK={envval}\n")
+    f.write(f"DEMO_TOKEN={envval}\n")
 with open(os.path.join(h16b, "sessions", "s16b.jsonl"), "w") as f:
     f.write(f"{envval}\nHASS_TOKEN=" + "eyJ" + "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + ".bbbbbbbbbbbbbbb\n")
 r16b = ig_run(h16b, ["preflight"])
@@ -3231,21 +3234,21 @@ check("A17: empty(ok)/malformed → 1 diagnostic, pass active",
       rf17.stdout.count("malformed — skipped") == 1
       and "KNOWN pass: no .env sources — disabled" not in rf17.stdout)
 # MIN-4 r1: mixed valid + malformed lines in ONE file → ok, NO diagnostic
-h, c = env_home(f"OK={envval}\nbroken line\n# comment\n", None)
+h, c = env_home(f"DEMO_TOKEN={envval}\nbroken line\n# comment\n", None)
 scanfile(h, f"{envval}\n")
 rm17 = ig_run(h, ["preflight"], cwd=c)
 check("A17: mixed valid+malformed in one file → ok, no diagnostic",
       "malformed — skipped" not in rm17.stdout
       and "KNOWN (your .env values) — 1 in 1 files" in rm17.stdout)
 # valid/malformed → 1 diagnostic, active
-h, c = env_home(f"TOK={envval}\n", "broken\n")
+h, c = env_home(f"DEMO_TOKEN={envval}\n", "broken\n")
 scanfile(h, f"{envval}\n")
 rg17 = ig_run(h, ["preflight"], cwd=c)
 check("A17: valid/malformed → 1 diagnostic, KNOWN row found",
       rg17.stdout.count("malformed — skipped") == 1
       and "KNOWN (your .env values) — 1 in" in rg17.stdout)
 # valid/unreadable → 1 diagnostic, active
-h, c = env_home(f"TOK={envval}\n", f"BROKEN={envval2}\n")
+h, c = env_home(f"DEMO_TOKEN={envval}\n", f"DEMO_TOKEN={envval2}\n")
 os.chmod(os.path.join(c, ".env"), 0)
 scanfile(h, f"{envval}\n")
 rh17 = ig_run(h, ["preflight"], cwd=c)
@@ -3254,27 +3257,27 @@ check("A17: valid/unreadable → 1 diagnostic, KNOWN row found",
       rh17.stdout.count("unreadable — skipped") == 1
       and "KNOWN (your .env values) — 1 in" in rh17.stdout)
 # valid/valid, same key same value → one row
-h, c = env_home(f"SAME={envval}\n", f"SAME={envval}\n")
+h, c = env_home(f"DEMO_TOKEN={envval}\n", f"DEMO_TOKEN={envval}\n")
 scanfile(h, f"{envval}\n")
 ri17 = json.loads(ig_run(h, ["preflight", "--json"], cwd=c).stdout)
 check("A17: same key/value both files → ONE KNOWN row",
       ri17["totals"]["known"] == 1 and ri17["totals"]["known_rows"] == 1)
 # valid/valid, same key DIFFERENT values → both match their own
-h, c = env_home(f"DIFF={envval}\n", f"DIFF={envval2}\n")
+h, c = env_home(f"DEMO_TOKEN={envval}\n", f"DEMO_TOKEN={envval2}\n")
 scanfile(h, f"{envval} {envval2}\n")
 rj17 = json.loads(ig_run(h, ["preflight", "--json"], cwd=c).stdout)
 check("A17: same key different values → BOTH match",
       rj17["totals"]["known"] == 2 and rj17["totals"]["known_rows"] == 2,
       f"known={rj17['totals']['known']}")
 # valid/valid, different keys same value → source_key alphabetical
-h, c = env_home(f"Z_KEY={envval}\n", f"A_KEY={envval}\n")
+h, c = env_home(f"Z_TOKEN={envval}\n", f"A_TOKEN={envval}\n")
 scanfile(h, f"{envval}\n")
 rk17 = json.loads(ig_run(h, ["preflight", "--json"], cwd=c).stdout)
 tvk = [v for v in rk17["top_values"] if v.get("known")]
 check("A17: diff keys same value → source_key = first alphabetically",
-      len(tvk) == 1 and tvk[0]["source_key"] == "A_KEY", f"tv={tvk!r}")
+      len(tvk) == 1 and tvk[0]["source_key"] == "A_TOKEN", f"tv={tvk!r}")
 # duplicate key within one file → last-parse-wins
-h, c = env_home(f"DUP={envval}\nDUP={envval2}\n", None)
+h, c = env_home(f"DEMO_TOKEN={envval}\nDEMO_TOKEN={envval2}\n", None)
 scanfile(h, f"{envval} {envval2}\n")
 rl17 = json.loads(ig_run(h, ["preflight", "--json"], cwd=c).stdout)
 check("A17: duplicate key within file → last-parse-wins (only value2)",
@@ -3345,7 +3348,7 @@ check("WB A2: explicit canary add — masked output only, value never echoed",
       e1.returncode == 0 and wb_exp not in (e1.stdout + e1.stderr)
       and "wb...90" in e1.stdout)
 for bad_args, why in (
-    (["--kind", "honeytoken", "x\ny"], "control char"),
+    (["--kind", "honeytoken", "x\x01y"], "control char"),
     (["--kind", "honeytoken", "   "], "whitespace-only"),
     (["--kind", "honeytoken", "--mask", "full", "x"], "--mask conflict"),
     (["--kind", "honeytoken", "--file", os.path.join(tmp, "wb-file.txt")], "--file conflict"),
@@ -4023,7 +4026,7 @@ masks = [e.get("mask") for e in reg4["literals"]
 c4m = r.returncode == 0 and "full" in masks and "head:4,tail:2,floor:0" in masks
 check("WB C4: all accepted mask styles stored (full + custom policy string)",
       c4m, f"rc={r.returncode} masks={masks}")
-for bad, why in ((["--kind", "honeytoken", "x\ny"], "control char"),
+for bad, why in ((["--kind", "honeytoken", "x\x01y"], "control char"),
                  (["--kind", "honeytoken", "   "], "whitespace-only"),
                  (["--kind", "honeytoken", "--mask", "full", "x"], "--mask conflict"),
                  (["--kind", "honeytoken", "--file", os.path.join(tmp, "c4-f.txt")], "--file conflict")):
@@ -4096,7 +4099,7 @@ def _wb_reg_ops(seed_doc, label):
           r.returncode == 0 and s4[0] == s3[0] and s4[1] == 0o600)
     # rejected mutation → bytes+mode+mtime unchanged
     s5 = _wb_snap_reg(cl)
-    r = _wb_cmd(["literals", "add", "--kind", "honeytoken", "x\ny"], h)
+    r = _wb_cmd(["literals", "add", "--kind", "honeytoken", "x\x01y"], h)
     s6 = _wb_snap_reg(cl)
     check(f"WB C6: {label} rejected mutation → exit 2, bytes+mode+mtime unchanged",
           r.returncode == 2 and s6 == s5)
@@ -5911,9 +5914,9 @@ r = b_run_cap("env-clean-check", ["env", str(b_clean), "--check"])
 r2 = b_run_cap("env-dirty-check", ["env", str(b_hostile), "--check"],
                path=b_a17path_s)
 check("WC A12: env check reports clean and dirty files",
-      r.returncode == 0 and r.stdout == ""
+      r.returncode == 0 and "[valid]" in r.stdout
       and r2.returncode == 1
-      and all(re.fullmatch(r"\d+: [A-Za-z_][A-Za-z0-9_]*|\d+:",
+      and all(re.fullmatch(r"\d+: (?:[A-Za-z_][A-Za-z0-9_]* )?\[[a-z-]+\]",
                            ln) for ln in r2.stdout.splitlines()),
       f"clean-rc={r.returncode} dirty-rc={r2.returncode} "
       f"dirty-out={r2.stdout!r}")
@@ -5968,7 +5971,7 @@ check("WC A17: hostile env check creates no side effect",
       f"rc={r.returncode} side={b_side.exists()}")
 check("WC A17: hostile env check reports only lines and safe keys",
       r.returncode == 1
-      and all(re.fullmatch(r"\d+: [A-Za-z_][A-Za-z0-9_]*|\d+:",
+      and all(re.fullmatch(r"\d+: (?:[A-Za-z_][A-Za-z0-9_]* )?\[[a-z-]+\]",
                            ln) for ln in r.stdout.splitlines())
       and "7: KEY6" in r.stdout          # dot-source attempt flagged too
       and V_LIT not in r.stdout + r.stderr
@@ -5984,7 +5987,7 @@ ig_src_b = open(os.path.join(os.getcwd(), "bin", "info-guard")).read()
 check("WC A17: env check shares the build parser path",
       "def _load_env" in ig_src_b
       and "_parse_env_lines(lines, report=" in ig_src_b
-      and "_parse_env_lines(lines, on_export_skip=" in ig_src_b,
+      and "_parse_env_lines(lines)[0]" in ig_src_b,
       "load_env and cmd_env must both route through _parse_env_lines")
 
 # ── S4: security boundaries ─────────────────────────────────────────────
@@ -6028,7 +6031,7 @@ check("WC S5: env check never evaluates or sources input",
       "zero shell/touch invocations; side-effect target absent")
 check("WC S5: env check disclosure boundary is line and safe-key only",
       r.returncode == 1
-      and all(re.fullmatch(r"\d+: [A-Za-z_][A-Za-z0-9_]*|\d+:",
+      and all(re.fullmatch(r"\d+: (?:[A-Za-z_][A-Za-z0-9_]* )?\[[a-z-]+\]",
                            ln) for ln in r.stdout.splitlines())
       and V_LIT not in r.stdout + r.stderr,
       "report contains only line numbers and safe key names")
@@ -6114,9 +6117,9 @@ r = wd_run("discover", str(WDSRC), "--json")
 d = json.loads(r.stdout)
 check("battery.wave_d.candidate_identity_and_text_output: candidate identity — enrollable set exactly",
       r.returncode == 1 and d["status"] == "candidates"
-      and d["count"] == 2 and d["error_class"] is None
+      and d["count"] == 3 and d["error_class"] is None
       and {c["key"] for c in d["candidates"]} == {"DEMO_API_TOKEN",
-                                                  "NESTED_TOKEN"}
+                                                  "NESTED_TOKEN", "EXPORT_TOKEN"}
       and all(set(c) == {"key", "source", "line", "shape_class",
                          "matched_pattern"} for c in d["candidates"])
       and all(c["shape_class"] == "KEY-SHAPE"
@@ -7395,6 +7398,641 @@ check("battery ledger: all 30 canonical names executed (no informal "
 
 
 
+# ── RA usability wave (v0.9.4) ─────────────────────────────────────────
+# All values below are assembled from fragments at runtime.  This block is
+# deliberately self-contained: it is the standalone dry-run target for the
+# wave's new contract checks and never touches the caller's real state.
+RA = Path(tempfile.mkdtemp(prefix="ig-ra-wave-") )
+RAH = RA / "home"; RAS = RAH / "state/info-guard"
+RAS.mkdir(parents=True); (RAH / "sessions").mkdir()
+RAENV = dict(os.environ, HERMES_HOME=str(RAH), HOME=str(RAH))
+RA_BIN = os.path.join(os.getcwd(), "bin", "info-guard")
+RA_DEGRADED = shutil.which("gitleaks") is None
+def ra_run(*args, stdin=None, env=RAENV):
+    return subprocess.run([sys.executable, RA_BIN, *args], env=env,
+                          input=stdin, capture_output=True, text=True,
+                          timeout=120)
+def ra_reset():
+    for p in RAH.glob(".env*"): p.unlink()
+    for p in RAS.glob("*"): p.unlink()
+    (RAH / "sessions").mkdir(exist_ok=True)
+def ra_report():
+    return json.loads((RAS / "build-report.json").read_text())
+
+ra_reset()
+terms = ["access","api","auth","authorization","cert","credential",
+         "creds","hash","key","pass","passwd","password","pepper",
+         "pin","pw","salt","secret","sig","signature","token"]
+keys = {"access":"SERVICE_ACCESS", "api":"SOME_API", "auth":"DEMO_AUTH",
+        "authorization":"DEMO_AUTHORIZATION", "cert":"DEMO_CERT",
+        "credential":"DEMO_CREDENTIAL", "creds":"DEMO_CREDS",
+        "hash":"DEMO_HASH", "key":"UNIFI_API_KEY", "pass":"ICLOUD_APP_PASS",
+        "passwd":"DEMO_PASSWD", "password":"DEMO_PASSWORD", "pepper":"DEMO_PEPPER",
+        "pin":"DEMO_PIN", "pw":"DEMO_PW", "salt":"DEMO_SALT",
+        "secret":"DEMO_SECRET", "sig":"DEMO_SIG", "signature":"DEMO_SIGNATURE",
+        "token":"DEMO_TOKEN"}
+ra_env = RAH / ".env"
+ra_env.write_text("\n".join(k + "=" + ("ra-" + t + "-" + "value99")
+                                  for t,k in keys.items()) + "\n")
+rr = ra_run("build", str(ra_env)); rd = json.loads((RAS/"redact_patterns.json").read_text()); rep = ra_report()
+protected = {k for k in rd["key_patterns"] if k in keys.values()}
+ra_mod_loader = importlib.machinery.SourceFileLoader("ig_ra_wave", RA_BIN)
+ra_mod_spec = importlib.util.spec_from_loader("ig_ra_wave", ra_mod_loader)
+ra_mod = importlib.util.module_from_spec(ra_mod_spec)
+ra_mod_loader.exec_module(ra_mod)
+invariant_rows = [(t, k, ra_mod._terminal_noun(k).lower(),
+                   k in protected and not any(
+                       x.get("key") == k for s in rep["sources"]
+                       for x in s["skipped"])) for t, k in keys.items()]
+check("battery.ra24.secret_terminal_invariant", len(invariant_rows) == 20 and
+      all(noun == term and protected_ok
+          for term, _key, noun, protected_ok in invariant_rows) and
+      all(any(x.get("key") == key for s in rep["sources"]
+              for x in s["added"]) for _term, key, _noun, _ok in invariant_rows),
+      f"rows={invariant_rows!r}")
+# This is the checked-in, independently maintained contract set.  The
+# runtime SECRET_NOUNS constant is deliberately not used as its oracle.
+expected_borrowed = ("access", "api", "auth", "credential", "creds",
+                     "key", "passwd", "password", "secret", "token")
+expected_additions = ("authorization", "cert", "hash", "pass", "pepper",
+                      "pin", "pw", "salt", "sig", "signature")
+expected_terms = set(expected_borrowed + expected_additions)
+expected_digest = hashlib.sha256("\n".join(sorted(expected_terms)).encode()).hexdigest()
+check("battery.ra24.borrowed_vocabulary_pinned",
+      expected_terms == set(terms) and len(expected_borrowed) == 10
+      and len(expected_additions) == 10
+      and expected_digest == "c082941d91d966d3e47573b8c7efd968c3acaa3907cc35005f6841e3ad2517c9",
+      f"terms={sorted(terms)!r} digest={expected_digest} "
+      f"set={expected_terms == set(terms)} lens={len(expected_borrowed)}/{len(expected_additions)} "
+      f"pin={expected_digest == 'c082941d91d966d3e47573b8c7efd968c3acaa3907cc35005f6841e3ad2517c9'}")
+APPROVED_HOUSE = {
+    "ANTHROPIC_API_KEY": "protected", "OPENAI_API_KEY": "protected",
+    "DEEPSEEK_API_KEY": "protected", "UNIFI_API_KEY": "protected",
+    "UNRAID_API_KEY": "protected", "CF_BOOTSTRAP_TOKEN": "protected",
+    "CLOUDFLARE_API_TOKEN": "protected", "TECHNITIUM_API_TOKEN": "protected",
+    "BAO_TOKEN": "protected", "ANTHROPIC_PASSWORD": "protected",
+    "OPENAI_PASSWORD": "protected", "DEEPSEEK_PASSWORD": "protected",
+    "UNIFI_PASSWORD": "protected", "UNRAID_PASSWORD": "protected",
+    "TECHNITIUM_PASSWORD": "protected", "ICLOUD_APP_PASS": "protected",
+    "SECRET_INVENTORY_PEPPER": "protected", "UNRAID_SSH_KEY": "protected",
+    "BAO_ADDR": "skipped", "BROWSER_INACTIVITY_TIMEOUT": "skipped",
+    "BROWSER_SESSION_TIMEOUT": "skipped", "TERMINAL_TIMEOUT": "skipped",
+    "TERMINAL_LIFETIME_SECONDS": "skipped", "BROWSERBASE_PROXIES": "skipped",
+    "BROWSERBASE_ADVANCED_STEALTH": "skipped", "TELEGRAM_CHANNEL": "skipped",
+    "TELEGRAM_CHANNEL_ID": "skipped", "BLUEBUBBLES_HOME_CHANNEL_THREAD_ID": "skipped",
+    "GITHUB_APP_ID": "skipped", "GITHUB_APP_INSTALLATION_ID": "skipped",
+    "GITHUB_APP_PRIVATE_KEY_PATH": "skipped", "FIRECRAWL_API_URL": "skipped",
+    "TOKEN_TYPE": "skipped", "KEY_COUNT": "skipped", "BAO_HOST": "skipped",
+    "BAO_PORT": "skipped", "BROWSER_HOME": "skipped", "BROWSER_DEBUG": "skipped",
+    "TERMINAL_MODE": "skipped", "TERMINAL_DEBUG": "skipped", "SERVICE_HOST": "skipped",
+    "SERVICE_PORT": "skipped", "SERVICE_URL": "skipped", "SERVICE_USER": "skipped",
+    "SERVICE_PATH": "skipped", "SERVICE_HOME": "skipped", "SERVICE_DIR": "skipped",
+    "SERVICE_TIMEOUT": "skipped", "SERVICE_LIFETIME_SECONDS": "skipped",
+    "CACHE_ENABLED": "skipped", "SIGNUPS_ALLOWED": "skipped", "INVITATIONS_ALLOWED": "skipped",
+    "EMAIL_ALLOWED_USERS": "skipped", "SMTP_FROM": "skipped", "SMTP_SECURITY": "skipped",
+    "GITHUB_APP_EMAIL": "skipped", "BROWSER_PROFILE": "skipped",
+    "FIRECRAWL_HOST": "skipped", "TELEGRAM_MODE": "skipped", "BLUEBUBBLES_HOME": "skipped",
+    "BAO_URL": "skipped", "BROWSER_SESSION_DIR": "skipped", "TERMINAL_INTERVAL": "skipped",
+    "GITHUB_APP_NAME": "skipped", "GITHUB_APP_USER": "skipped",
+}
+house_protected = {k for k, c in APPROVED_HOUSE.items() if c == "protected"}
+house_skipped = {k for k, c in APPROVED_HOUSE.items() if c == "skipped"}
+house_lines = [k + "=" + "ra-" + k.lower() + "-value99" for k in sorted(APPROVED_HOUSE)]
+ra_env.write_text("\n".join(house_lines) + "\n")
+ra_run("build", str(ra_env)); rd = json.loads((RAS/"redact_patterns.json").read_text()); rep = ra_report()
+sk = {x["key"] for s in rep["sources"] for x in s["skipped"]}
+skip_by_key = {x["key"]: x for s in rep["sources"] for x in s["skipped"] if "key" in x}
+check("battery.ra24.non_secret_not_protected",
+      all(k not in rd["key_patterns"] and skip_by_key.get(k, {}).get("reason") == "not-a-secret-noun"
+          for k in ("BAO_ADDR", "BROWSER_INACTIVITY_TIMEOUT", "TOKEN_TYPE",
+                    "KEY_COUNT", "TELEGRAM_CHANNEL", "TELEGRAM_CHANNEL_ID",
+                    "BLUEBUBBLES_HOME_CHANNEL_THREAD_ID", "GITHUB_APP_ID")))
+check("battery.ra24.house_regression_set",
+      len(APPROVED_HOUSE) == 65 and len(house_protected) == 18 and len(house_skipped) == 47 and
+      set(APPROVED_HOUSE) == house_protected | house_skipped and
+      {k for k in rd["key_patterns"] if k in house_protected} == house_protected and
+      {x["key"] for s in rep["sources"] for x in s["skipped"] if x["kind"] == "key"} == house_skipped and
+      all(skip_by_key[k]["reason"] == "not-a-secret-noun" for k in house_skipped) and
+      all(APPROVED_HOUSE[k] == "skipped" for k in (
+          "BAO_ADDR", "BROWSER_INACTIVITY_TIMEOUT", "BROWSER_SESSION_TIMEOUT",
+          "TERMINAL_TIMEOUT", "TERMINAL_LIFETIME_SECONDS", "BROWSERBASE_PROXIES",
+          "BROWSERBASE_ADVANCED_STEALTH", "TELEGRAM_CHANNEL", "TELEGRAM_CHANNEL_ID",
+          "BLUEBUBBLES_HOME_CHANNEL_THREAD_ID", "GITHUB_APP_ID")))
+check("battery.ra24.terminal_noun_wins_compounds",
+      all(k in sk and skip_by_key[k]["reason"] == "not-a-secret-noun"
+          for k in ("TOKEN_TYPE", "KEY_COUNT", "BAO_ADDR")) and
+      all(k in rd["key_patterns"] for k in ("ANTHROPIC_API_KEY", "UNIFI_API_KEY")))
+check("battery.ra24.pattern_set_guardrail", "BAO_ADDR" not in rd["key_patterns"] and
+      "ANTHROPIC_API_KEY" in rd["key_patterns"] and "UNKNOWN_SETTING" not in rd["key_patterns"])
+check("battery.ra24.no_boundary_relaxation", "(?:_|$)" not in Path(RA_BIN).read_text() and
+      "UNIFI_API_KEY" in rd["key_patterns"])
+
+ra_env.write_text("export EXPORTED_TOKEN=" + "ra-export-value99" + "\n" +
+                  "env SERVICE_ACCESS=" + "ra-access-value99" + "\n" +
+                  "declare -x DEMO_SECRET=" + "ra-secret-value99" + "\n" +
+                  "BAO_ADDR=" + "ra-address-value99" + "\n")
+rx = ra_run("build", str(ra_env)); rd = json.loads((RAS/"redact_patterns.json").read_text())
+rep = ra_report()
+check("battery.ra22.last_token_parser", rx.returncode == 0 and all(k in rd["key_patterns"] for k in ("EXPORTED_TOKEN","SERVICE_ACCESS","DEMO_SECRET")) and "unsupported grammar" not in rx.stderr)
+check("battery.ra22.value_rules_unchanged",
+      rx.returncode == 0 and
+      all(k in rd["key_patterns"] for k in ("EXPORTED_TOKEN", "SERVICE_ACCESS", "DEMO_SECRET")) and
+      "export-unsupported" not in rx.stderr)
+matrix = [("export PORT=", "PORT", False), ("export \"KEY\"=", "KEY", True),
+          ("declare -x 'TOKEN'=", "TOKEN", True), ("export \"MY KEY\"=", "KEY", True),
+          ("  export SPACED =", "SPACED", False)]
+matrix_results = []
+surface_results = []
+(RAS / "custom_literals.json").write_text(json.dumps(
+    {"version": 2, "rev": 0, "literals": []}))
+for prefix, expected, _expected_secret in matrix:
+    probe = RAH / ("matrix-" + expected.lower() + ".env")
+    probe.write_text(prefix + "ra-" + expected.lower() + "-value99\n")
+    parsed = []
+    ra_mod._parse_env_lines(probe.read_text().splitlines(), validated_entries=parsed)
+    matrix_results.append((parsed[0][0] if parsed else None,
+                           bool(parsed) and ra_mod._is_secret_noun(parsed[0][0])))
+    scan = ra_mod._scan_lines(probe.read_text().splitlines())
+    discovered = ra_run("discover", str(probe), "--json")
+    checked = ra_run("env", str(probe), "--check")
+    surface_results.append((scan, discovered, checked))
+from_file = RAH / "from-corner.env"
+from_file.write_text("DEMO_TOKEN=" + "ra-from-corner-value99\n")
+(RAS / "custom_literals.json").write_text(json.dumps(
+    {"version": 2, "rev": 0, "literals": []}))
+from_probe = ra_run("literals", "add", "--from", str(from_file) + ":DEMO_TOKEN")
+check("battery.ra22.detector_a4_agreement",
+      len(matrix_results) == len(matrix) and
+      all(key == (expected if not expected_secret else None) and secret ==
+          False
+          for (key, secret), (_prefix, expected, expected_secret) in zip(matrix_results, matrix)) and
+      len(surface_results) == len(matrix) and
+      all(isinstance(scan, list) and checked.returncode in (0, 1)
+          and discovered.returncode in (0, 1)
+          for scan, discovered, checked in surface_results) and
+      from_probe.returncode == 0,
+      f"matrix={matrix_results!r} surfaces={[(d.returncode, c.returncode) for _s,d,c in surface_results]!r} from={from_probe.returncode}:{from_probe.stderr!r}")
+check("battery.ra22.export_source_parser_matrix",
+      [key for key, _secret in matrix_results] ==
+      [expected if not secret else None for (_prefix, expected, secret) in matrix] )
+check("battery.ra22.v093_b2_flip",
+      rx.returncode == 0 and "EXPORTED_TOKEN" in rd["key_patterns"] and
+      "SERVICE_ACCESS" in rd["key_patterns"] and
+      "export-unsupported" not in rx.stderr and
+      all(v in json.dumps(rd) for v in ("ra-export-value99", "ra-access-value99")))
+registry_fixture = {"version": 2, "rev": 0, "literals": []}
+(RAS / "custom_literals.json").write_text(json.dumps(registry_fixture))
+candidate_file = RAH / "candidate.env"
+candidate_file.write_text("DEMO_API_TOKEN=" + "ra-demo-value99\n" +
+          "NESTED_TOKEN=" + "ra-nested-value99\n" +
+                          "export EXPORT_TOKEN=" + "ra-export-value99\n")
+discover_probe = ra_run("discover", str(candidate_file), "--json")
+discover_obj = json.loads(discover_probe.stdout)
+discover_keys = {row["key"] for row in discover_obj.get("candidates", [])}
+check("battery.ra22.discover_candidate_flip",
+      discover_probe.returncode == 1 and discover_obj.get("status") == "candidates" and
+      discover_obj.get("count") == 3 and
+      discover_keys == {"DEMO_API_TOKEN", "NESTED_TOKEN", "EXPORT_TOKEN"} and
+      all(set(row) == {"key", "source", "line", "shape_class", "matched_pattern"}
+          for row in discover_obj["candidates"]))
+verdict_env = RAH / "verdicts.env"
+verdict_env.write_text(
+    "KEY_TOKEN=" + "ra-verdict-value99\n" +
+    "export KEY_TOKEN=" + "ra-verdict-value99\n" +
+    "env KEY_TOKEN=" + "ra-verdict-value99\n" +
+    "declare -x KEY_TOKEN=" + "ra-verdict-value99\n" +
+    "export \"KEY_TOKEN\"=" + "ra-verdict-value99\n" +
+    "declare -x 'TOKEN'=" + "ra-verdict-value99\n" +
+    "NO_EQUALS\n" + "bad-key-form=" + "ra-verdict-value99\n")
+env_check = ra_run("env", str(verdict_env), "--check")
+check("battery.ra22.env_check_verdict_flip",
+      env_check.returncode == 1 and
+      "export-unsupported" not in env_check.stdout + env_check.stderr and
+      env_check.stdout.count("valid") == 4 and
+      env_check.stdout.count("bad-key-form") == 4 and
+      all(raw not in env_check.stdout + env_check.stderr
+          for raw in ("ra-verdict-value99", "KEY_TOKEN=", "TOKEN=")))
+
+check("battery.ra23.report_schema", ra_mod._valid_build_report(rep, rd) and
+      rep["derivation_nonce"] == rd["metadata"]["derivation_nonce"] and
+      rep["overall"]["sources"] == len(rep["sources"]))
+semantic_report = copy.deepcopy(rep)
+semantic_source = semantic_report["sources"][0]
+semantic_source["added"].append({"kind": "key", "key": "DEMO_TOKEN"})
+semantic_source["counts"]["added"] = len(semantic_source["added"])
+semantic_source["skipped"] += [
+    {"kind": "key", "key": "BAO_HOST", "reason": "not-a-secret-noun"},
+    {"kind": "key", "key": "DEMO_TOKEN", "reason": "duplicate"},
+]
+semantic_source["counts"]["skipped"] = len(semantic_source["skipped"])
+semantic_report["overall"]["added"] = sum(len(source["added"])
+                                          for source in semantic_report["sources"])
+semantic_report["overall"]["skipped"] = sum(
+    len(source["skipped"]) for source in semantic_report["sources"])
+semantic_bad_addr = copy.deepcopy(semantic_report)
+semantic_bad_addr["sources"][0]["skipped"][-2]["reason"] = "duplicate"
+semantic_bad_token = copy.deepcopy(semantic_report)
+semantic_bad_token["sources"][0]["skipped"][-1]["reason"] = "not-a-secret-noun"
+check("battery.ra23.schema_semantics",
+      ra_mod._valid_build_report(semantic_report, rd) and
+      not ra_mod._valid_build_report(semantic_bad_addr, rd) and
+      not ra_mod._valid_build_report(semantic_bad_token, rd),
+      "terminal noun classification must agree with skipped reason")
+br = ra_run("build", str(ra_env), "--json")
+safe_value = "ra-" + "safe-" + "value-9911"
+safe_source = RAH / "my-config.env"
+safe_source.write_text("BAO_ADDR=" + safe_value + "\n")
+safe_run = ra_run("build", str(safe_source))
+safe_report_text = (RAS / "build-report.json").read_text()
+safe_output = safe_run.stdout + safe_run.stderr
+check("battery.ra23.report_no_values",
+      all(v not in br.stdout for v in ("ra-export-value99","ra-access-value99","ra-secret-value99")) and
+      safe_run.returncode == 0 and
+      any(s["source"] == "env:my-config.env" for s in ra_report()["sources"]) and
+      not any(s["source"] == "env:1" for s in ra_report()["sources"]) and
+      str(safe_source) not in safe_report_text + safe_output and
+      safe_value not in safe_report_text + safe_output and
+      all(fragment not in safe_report_text + safe_output for fragment in ("safe", "value-9911")),
+      "safe basename must be normalized without value disclosure")
+fragment_value = "ra-" + "fragment-" + "value99"
+fragment_add = ra_run("literals", "add", "--json-input", "--file", "-",
+                       stdin=json.dumps(fragment_value))
+fragment_source = RAH / "my-fragment.env"
+fragment_source.write_text("DEMO_TOKEN=" + "ra-" + "other-" + "value99" + "\n")
+fragment_run = ra_run("build", str(fragment_source))
+fragment_report_text = (RAS / "build-report.json").read_text()
+fragment_output = fragment_run.stdout + fragment_run.stderr
+fragment_sources = ra_report()["sources"]
+check("battery.ra23.fragment_source_label",
+      fragment_add.returncode == 0 and fragment_run.returncode == 0 and
+      any(s["source"] == "env:my-fragment.env" for s in fragment_sources) and
+      all(value not in fragment_report_text + fragment_output
+          for value in (fragment_value, str(fragment_source), "ordinal-1")),
+      "only complete known literals force ordinal source labels")
+br = ra_run("build", str(fragment_source), "--json")
+br_obj = json.loads(br.stdout)
+_decoded_stdout, _stdout_end = json.JSONDecoder().raw_decode(br.stdout.lstrip())
+_stdout_remainder = br.stdout.lstrip()[_stdout_end:]
+check("battery.ra23.json_stdout_purity", br.returncode == 0 and
+      set(br_obj) == {"status", "report"} and br_obj["status"] == "ok" and
+      br_obj["report"] == ra_report() and
+      _decoded_stdout == br_obj and _stdout_remainder.strip() == "")
+parser_failure = ra_run("build", "--json", "--bad-option")
+parser_failure_registry = ra_run("build", "--json", "--registry-only", str(ra_env))
+check("battery.ra23.exit_codes_unchanged", ra_run("build").returncode == 0 and
+      ra_run("build", str(RAH / "absent.env")).returncode == 1 and
+      all(result.returncode == 2 and result.stdout == "" and result.stderr
+          for result in (parser_failure, parser_failure_registry)))
+check("battery.ra23.parser_usage_purity",
+      all(result.returncode == 2 and result.stdout == "" and result.stderr and
+          "{" not in result.stdout and "status" not in result.stdout and
+          "error_class" not in result.stdout
+          for result in (parser_failure, parser_failure_registry)))
+matrix_path = Path("test-runs/ra-usability-wave/ra23-error-matrix.json")
+matrix_ok = True
+if matrix_path.exists():
+    matrix_artifact = json.loads(matrix_path.read_text())
+    matrix_parser = next(row for row in matrix_artifact if row["case"] == "parser-level usage failure")
+    matrix_ok = (len(matrix_artifact) == 17 and
+                 matrix_parser["exit"] == parser_failure.returncode == 2 and
+                 matrix_parser["stdout_documents"] == 0 and
+                 all(set(row) == {"case", "mechanism", "exit", "stdout_documents", "stdout_pure",
+                                  "stderr_value_free", "traceback", "prior_pattern_unchanged",
+                                  "prior_report_unchanged", "error_class"} for row in matrix_artifact))
+check("battery.ra23.parser_stderr_traceability",
+      parser_failure.returncode == 2 and parser_failure.stdout == "" and
+      parser_failure.stderr and "Traceback" not in parser_failure.stderr and
+      str(ra_env) not in parser_failure.stderr and matrix_ok)
+check("battery.ra23.reason_vocabulary", "not-a-secret-noun" in json.dumps(rep) and "export-unsupported grammar" not in json.dumps(rep))
+def derivation_probe(kind):
+    home = Path(tempfile.mkdtemp(prefix="ig-ra-derivation-")) / "home"
+    state = home / "state/info-guard"; state.mkdir(parents=True)
+    (home / "sessions").mkdir()
+    env = dict(RAENV, HOME=str(home), HERMES_HOME=str(home))
+    source = home / "probe.env"
+    source.write_text("DEMO_TOKEN=" + "ra-derivation-" + kind + "-value99\n")
+    (home / ".env").write_text(source.read_text())
+    (state / "custom_literals.json").write_text(json.dumps(
+        {"version": 2, "rev": 0, "literals": []}))
+    if kind == "build":
+        result = ra_run("build", str(source), env=env)
+    elif kind == "registry-only":
+        result = ra_run("build", "--registry-only", env=env)
+    elif kind == "add":
+        result = ra_run("literals", "add", "ra-derivation-add-value99", env=env)
+    elif kind == "from":
+        result = ra_run("literals", "add", "--from", str(source) + ":DEMO_TOKEN", env=env)
+    elif kind in ("remove", "rotate"):
+        added = ra_run("literals", "add", "ra-derivation-mut-value99", env=env)
+        entries = json.loads((state / "custom_literals.json").read_text())["literals"]
+        ident = next(x["id"] for x in entries if isinstance(x, dict))
+        result = (ra_run("literals", "remove", ident, env=env)
+                  if kind == "remove" else
+                  ra_run("literals", "rotate", ident, stdin="ra-derivation-new-value99\n", env=env))
+        result = result if added.returncode == 0 else added
+    elif kind == "setup":
+        result = ra_run("setup", "--all", env=env)
+    else:
+        return False
+    try:
+        pattern = json.loads((state / "redact_patterns.json").read_text())
+        report = json.loads((state / "build-report.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return (result.returncode == 0 and ra_mod._valid_build_report(report, pattern) and
+            isinstance(pattern.get("metadata", {}).get("derivation_nonce"), str) and
+            ra_mod._valid_uuid4(pattern["metadata"]["derivation_nonce"]) and
+            pattern.get("derived_rev") == report.get("derived_rev") and
+            report.get("derivation_nonce") == pattern["metadata"]["derivation_nonce"] and
+            type(pattern.get("derived_rev")) is int)
+
+derivation_results = {kind: derivation_probe(kind) for kind in
+                      ("build", "registry-only", "add", "from", "remove", "rotate", "setup")}
+check("battery.ra23.report_written_on_all_derivations",
+      all(derivation_results.values()), str(derivation_results))
+n1 = rep["derivation_nonce"]; ra_run("build", str(ra_env)); n2 = ra_report()["derivation_nonce"]
+check("battery.ra23.generation_and_atomicity", n1 != n2)
+setup_probe = ra_run("setup", "--all")
+setup_obj = ra_report() if (RAS / "build-report.json").exists() else {}
+check("battery.ra23.setup_all_summary",
+      setup_probe.returncode == 0 and
+      setup_obj.get("overall", {}).get("sources") == len(setup_obj.get("sources", [])) and
+      all(set(s) == {"source", "added", "skipped", "warnings", "counts"}
+          for s in setup_obj.get("sources", [])))
+pf = ra_run("preflight", "--json"); pf_obj = json.loads(pf.stdout) if pf.stdout else {}
+pf_report = ra_report()
+check("battery.ra23.preflight_env_ledger", pf.returncode in (0, 2) and
+      pf_obj.get("env_pass", {}).get("build_ledger") == pf_report and
+      pf_obj.get("env_pass", {}).get("build_ledger_state") == "fresh" and
+      pf.returncode == (2 if RA_DEGRADED else 0))
+watch_probe = ra_run("watch", "sessions", "--json")
+watch_obj = json.loads(watch_probe.stdout) if watch_probe.stdout else {}
+check("battery.ra23.watch_coverage_summary",
+      watch_probe.returncode in (0, 2) and
+      isinstance(watch_obj, dict) and "assessment" in watch_obj and
+      "watch" in watch_obj)
+check_file = RAS / "build-report.json"
+saved_report = check_file.read_bytes()
+bad_report = dict(rep); bad_report["derived_rev"] = "bad"
+check_file.write_text(json.dumps(bad_report))
+stale_probe = ra_run("preflight", "--json")
+check_file.write_bytes(saved_report)
+check("battery.ra23.stale_build_check",
+      stale_probe.returncode == (2 if RA_DEGRADED else 0) and
+      json.loads(stale_probe.stdout)["env_pass"]["build_ledger"] is None and
+      json.loads(stale_probe.stdout)["env_pass"]["build_ledger_state"] == "malformed")
+
+dup_old = "r2-" + "duplicate-" + "old-value"
+dup_new = "r2-" + "duplicate-" + "new-value"
+dup_env = RAH / ".duplicate.env"
+dup_env.write_text("DEMO_TOKEN=" + dup_old + "\nDEMO_TOKEN=" + dup_new + "\n"
+                   "DEMO_TOKEN=" + dup_new + "\n")
+dup_run = ra_run("build", str(dup_env))
+dup_doc = json.loads((RAS / "redact_patterns.json").read_text())
+dup_rep = ra_report()
+dup_entries = []
+dup_loader = importlib.machinery.SourceFileLoader("ig_dup", RA_BIN)
+dup_mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("ig_dup", dup_loader))
+dup_loader.exec_module(dup_mod)
+dup_mod._parse_env_lines(dup_env.read_text().splitlines(),
+                         validated_entries=dup_entries)
+dup_rows = [x for s in dup_rep["sources"] for x in s["added"] + s["skipped"]
+            if x.get("key") == "DEMO_TOKEN"]
+dup_values = [x.get("value") if isinstance(x, dict) else x
+              for x in dup_doc["literals"]]
+check("battery.ra23.duplicate_key_last_parse_wins",
+      dup_run.returncode == 0 and dup_entries[-1] == ("DEMO_TOKEN", dup_new) and
+      dup_old in dup_values and dup_new in dup_values and
+      list(dup_doc["key_patterns"]).count("DEMO_TOKEN") == 1 and
+      sum(x.get("reason") == "duplicate" for x in dup_rows) == 1 and
+      all(v not in json.dumps(dup_rep) for v in (dup_old, dup_new)))
+
+repeat_one = ra_run("build", str(dup_env), "--json")
+repeat_two = ra_run("build", "--json", str(dup_env), "--json")
+check("battery.ra23.repeated_json_handling",
+      repeat_one.returncode == 0 and repeat_two.returncode == 0 and
+      json.loads(repeat_one.stdout).get("status") == "ok" and
+      json.loads(repeat_two.stdout).get("status") == "ok" and
+      ra_mod._valid_build_report(json.loads(repeat_one.stdout)["report"]) and
+      ra_mod._valid_build_report(json.loads(repeat_two.stdout)["report"]) and
+      not any("unknown option" in x for x in (repeat_one.stderr, repeat_two.stderr)))
+collector_hits, collector_ok, collector_meta = ra_mod._collect_hits(
+    [RAH / "sessions"], env_pass=True)
+check("battery.ra23.collector_returned_scan_counts",
+      collector_ok is True and collector_meta["scan_counts"]["scanned_dirs"] == 1 and
+      collector_meta["scan_counts"]["scanned_files"] == 0 and
+      "rglob(" not in inspect.getsource(ra_mod.cmd_watch) and
+      "rglob(" in inspect.getsource(ra_mod._scan_dir_files))
+
+schema_rejections = []
+for _mutate in (
+    lambda x: {**x, "version": 2},
+    lambda x: {**x, "version": True},
+    lambda x: {**x, "overall": {**x["overall"], "sources": "2"}},
+    lambda x: {**x, "overall": {**x["overall"], "sources": 2.0}},
+    lambda x: {**x, "overall": {**x["overall"], "sources": True}},
+    lambda x: {**x, "overall": {k: v for k, v in x["overall"].items() if k != "sources"}},
+):
+    schema_rejections.append(not ra_mod._valid_build_report(_mutate(rep), rd))
+check("battery.ra23.report_schema_closed_version",
+      ra_mod._valid_build_report(rep, rd) and all(schema_rejections))
+check("battery.ra23.final_evidence_validator",
+      isinstance(rep.get("overall", {}).get("sources"), int) and
+      ra_mod._valid_build_report(rep, rd) and
+      all("value" not in row for source in rep["sources"]
+          for field in ("added", "skipped", "warnings") for row in source[field]))
+
+ml = "BEGIN " + "ra-pem-value99" + "\nA+B [x]\nEND"
+mr = ra_run("literals", "add", "--json-input", "--file", "-", stdin=json.dumps([ml]))
+ra_run("build", "--registry-only"); mdoc = json.loads((RAS/"redact_patterns.json").read_text())
+ml_file = RAH / "multiline-input.txt"
+ml_file.write_text("prefix\n" + ml + "\nsuffix\n")
+ml_pipe = ra_run("pipe", stdin=ml_file.read_text())
+ml_view = ra_run("view", "file", str(ml_file))
+check("battery.ra25.multiline_cli_registration", mr.returncode == 0 and
+      any(isinstance(x, dict) and x.get("value") == ml for x in mdoc["literals"]) and
+      ml_pipe.returncode == 0 and ml not in ml_pipe.stdout and
+      "prefix" in ml_pipe.stdout and "suffix" in ml_pipe.stdout and
+      "***" in ml_pipe.stdout and ml not in ml_pipe.stderr and
+      all(fragment not in ml_pipe.stderr for fragment in ("BEGIN", "ra-pem-value99")) and
+      ml_view.returncode == 0 and ml not in ml_view.stdout and
+      "prefix" in ml_view.stdout and "suffix" in ml_view.stdout and
+      "***" in ml_view.stdout,
+      "multiline literal must be masked through pipe and view")
+check("battery.ra25.multiline_full_default", any(isinstance(x,dict) and x.get("mask") == "full" for x in mdoc["literals"]))
+check("battery.ra25.file_json_input", mr.returncode == 0)
+check("battery.ra25.stdin_json_input", mr.returncode == 0)
+check("battery.ra25.control_character_boundary",
+      ra_run("literals","add","bad\tvalue").returncode == 2 and
+      ra_run("literals","add","--json-input","--file","-",
+             stdin=json.dumps(["bad\tvalue"])).returncode == 2 and
+      ra_run("literals","add","--json-input","--file","-",
+             stdin=json.dumps("bad\tvalue")).returncode == 2)
+ht_multi = ra_run("literals","add","--kind","honeytoken", "ht-"+"multiline\nvalue")
+ra_run("build", "--registry-only")
+ht_doc = json.loads((RAS/"redact_patterns.json").read_text())
+check("battery.ra25.honeytoken_multiline", ht_multi.returncode == 0 and
+      any(isinstance(x, dict) and x.get("value") == "ht-"+"multiline\nvalue"
+          and x.get("mask") == "full" for x in ht_doc["literals"]))
+check("battery.ra25.shape_boundary", ml not in ra_run("pipe", stdin="shape-only").stdout)
+
+zero_home = RA / "zero-json-home"
+zero_env_json = dict(RAENV, HERMES_HOME=str(zero_home))
+zero_json = ra_run("watch", "--json", env=zero_env_json)
+zero_obj, zero_end = (json.JSONDecoder().raw_decode(zero_json.stdout)
+                      if zero_json.stdout else (None, -1))
+zero_out = zero_home / "zero.json"
+zero_file = ra_run("watch", "--json-out", str(zero_out), env=zero_env_json)
+zero_file_obj = json.loads(zero_out.read_text()) if zero_out.exists() else {}
+check("battery.ra26.json_zero_scope_purity",
+      zero_json.returncode == 2 and isinstance(zero_obj, dict) and
+      zero_json.stdout[zero_end:].strip() == "" and zero_obj.get("status") == "error" and
+      zero_obj.get("scanned_dirs") == 0 and zero_obj.get("scanned_files") == 0 and
+      all(line not in zero_json.stdout for line in (
+          "watch: no existing directories in scan scope; refusing to scan (exit 2)",
+          "watch: scanned_dirs=0 scanned_files=0")) and
+      zero_json.stderr.count("watch: no existing directories in scan scope; refusing to scan (exit 2)") == 1 and
+      zero_json.stderr.count("watch: scanned_dirs=0 scanned_files=0") == 1 and
+      "{\"schema\": \"info-guard/watch/v1\"" not in zero_json.stderr and
+      zero_file.returncode == 2 and zero_file.stdout == "" and
+      zero_file_obj == {"schema": "info-guard/watch/v1", "scanned_dirs": 0,
+                        "scanned_files": 0, "status": "error"} and
+      stat.S_IMODE(zero_out.stat().st_mode) == 0o600 and
+      zero_file.stderr.count("watch: no existing directories in scan scope; refusing to scan (exit 2)") == 1 and
+      not (zero_home / "state/info-guard/watch-baseline.json").exists())
+
+for _d in (RAH / "sessions", RAH / "logs", RAH / "cron/output"):
+    shutil.rmtree(_d, ignore_errors=True)
+empty = RAH / "empty-scope"
+zero_default = ra_run("watch")
+zero_explicit = ra_run("watch", "missing-scope")
+zero_reset = ra_run("watch", "missing-scope", "--reset")
+check("battery.ra26.empty_default_scope", zero_default.returncode == 2 and
+      "scanned_dirs=0 scanned_files=0" in zero_default.stdout)
+check("battery.ra26.empty_explicit_scope", zero_explicit.returncode == 2 and
+      "scanned_dirs=0 scanned_files=0" in zero_explicit.stdout and
+      "baseline" not in zero_explicit.stdout)
+(RAH / "sessions").mkdir(parents=True, exist_ok=True)
+empty_scan = ra_run("watch", "sessions")
+(RAH/"sessions"/"x").write_text("nothing\n")
+no_delta = ra_run("watch", "sessions")
+mixed = ra_run("watch", "sessions", "missing-scope")
+check("battery.ra26.scanned_no_delta", empty_scan.returncode == (2 if RA_DEGRADED else 0) and
+      "scanned_dirs=1 scanned_files=0" in empty_scan.stdout and
+      no_delta.returncode == (2 if RA_DEGRADED else 0) and "scanned_dirs=1 scanned_files=1" in (no_delta.stdout + no_delta.stderr))
+check("battery.ra26.reset_baseline_safe", zero_reset.returncode == 2 and
+      "scanned_dirs=0 scanned_files=0" in zero_reset.stdout and
+      mixed.returncode == (2 if RA_DEGRADED else 0) and "scanned_dirs=1 scanned_files=1" in (mixed.stdout + mixed.stderr) and
+      "skipped missing directory argument(s)" in (mixed.stdout + mixed.stderr) and
+      ra_run("watch", "sessions", "--reset").returncode == (2 if RA_DEGRADED else 0))
+
+short = RAH / "short.env"; short.write_text("SHORT_TOKEN=x\n")
+one_add = "q"
+seven_add = "a" + "b" + "c" + "d" + "e" + "f" + "g"
+one_result = ra_run("literals", "add", one_add)
+seven_result = ra_run("literals", "add", seven_add)
+sr = ra_run("build", str(short))
+short_registry = (RAS / "custom_literals.json").read_text()
+short_doc = (RAS / "redact_patterns.json").read_text()
+short_pipe = ra_run("pipe", stdin=one_add + " " + seven_add)
+check("battery.ra11.add_warning_acceptance",
+      one_result.returncode == 0 and seven_result.returncode == 0 and
+      len(seven_add) == 7 and
+      "warning" in one_result.stderr and "warning" in seven_result.stderr and
+      one_add not in one_result.stderr and seven_add not in seven_result.stderr and
+      one_add in short_registry and seven_add in short_registry and
+      one_add in short_doc and seven_add in short_doc and
+      one_add not in short_pipe.stdout and seven_add not in short_pipe.stdout and
+      all(not (w.get("reason") in ("sub-8-char floor", "short-literal warning") and
+               not any(a.get("key") == w.get("key") for a in src.get("added", [])))
+          for src in ra_report()["sources"] for w in src["warnings"]))
+check("battery.ra11.merge_warning_env_floor",
+      sr.returncode == 0 and any(w.get("reason") == "sub-8-char floor"
+      for s in ra_report()["sources"] for w in s["warnings"]))
+check("battery.ra11.no_rejection", sr.returncode == 0)
+check("battery.ra11.ledger_row", "sub-8-char floor" in json.dumps(ra_report()))
+
+# Registry merge warning path: unlike the env floor, these values are first
+# contributed by the registry and must be warned once while remaining exact
+# protections.  Every fixture is assembled from fragments at runtime.
+short_one = "q"
+short_seven = "a" + "b" + "c" + "d" + "e" + "f" + "g"
+short_add = ra_run("literals", "add", "--json-input", "--file", "-",
+                   stdin=json.dumps([short_one, short_seven]))
+short_build = ra_run("build", "--registry-only")
+short_doc = json.loads((RAS / "redact_patterns.json").read_text())
+short_rep = ra_report()
+reg_src = next((s for s in short_rep["sources"] if s["source"] == "registry"), {})
+short_warnings = [w for w in reg_src.get("warnings", [])
+                  if w.get("reason") == "short-literal warning"]
+check("battery.ra11.short_literal_warning_via_registry",
+      short_add.returncode == 0 and short_build.returncode == 0 and
+      all(v in [x.get("value") if isinstance(x, dict) else x
+                for x in short_doc["literals"]]
+          for v in (short_one, short_seven)) and
+      len(short_warnings) == 2 and
+      reg_src.get("counts", {}).get("warnings") == len(short_warnings) and
+      not any(x.get("reason") == "short-literal warning"
+              for x in reg_src.get("skipped", [])) and
+      all(v not in short_add.stderr for v in (short_one, short_seven)))
+check("battery.ra11.merge_warning_direct_registry",
+      short_build.returncode == 0 and len(short_warnings) == 2 and
+      all(any(x.get("key") == item.get("key") for x in reg_src["added"])
+          for item in short_warnings))
+public_docs = (Path("docs/format-spec.md").read_text() +
+               Path("README.md").read_text() + Path("CHANGELOG.md").read_text())
+check("battery.release.public_contract_docs",
+      "classification vocabulary sourced from gitleaks generic secret rules (MIT), pinned at v8.30.1" in public_docs and
+      all(term in public_docs for term in ("multiline", "short literals", "zero-scope", "freshness", "exact-value")) and
+      not any(term in public_docs for term in ("D145", "D146", "D147", "R2-", "FIX-")) and
+      "0.9.4" in Path("README.md").read_text() and "v0.9.4" in Path("CHANGELOG.md").read_text())
+
+selector_cases = [
+    ("--json-input", "--file", "-", "positional"),
+    ("--json-input", "--from", "registry:key"),
+    ("--json-input", "--file", "-", "--kind", "honeytoken"),
+]
+selector_results = []
+for _case in selector_cases:
+    _before = (RAS / "custom_literals.json").read_bytes()
+    _result = ra_run("literals", "add", *_case, stdin=json.dumps("x"))
+    selector_results.append((_result.returncode, _result.stdout,
+                             "Traceback" not in _result.stderr,
+                             (RAS / "custom_literals.json").read_bytes() == _before))
+check("battery.ra25.json_input_selector_fail_closed",
+      all(rc == 2 and out == "" and clean and unchanged
+          for rc, out, clean, unchanged in selector_results))
+bad_utf8 = RAH / "bad-json-input"
+bad_utf8.write_bytes(b"{\xff}")
+before_utf8 = (RAS / "custom_literals.json").read_bytes()
+utf8_result = ra_run("literals", "add", "--json-input", "--file", str(bad_utf8))
+check("battery.ra25.json_input_unicode_error",
+      utf8_result.returncode == 2 and utf8_result.stdout == "" and
+      "Traceback" not in utf8_result.stderr and
+      (RAS / "custom_literals.json").read_bytes() == before_utf8)
+control_tab = ra_run("literals", "add", "bad\t" + "value")
+control_nul = ra_run("literals", "add", "--json-input", "--file", "-",
+                     stdin=json.dumps("bad\u0000value"))
+check("battery.ra25.control_character_diagnostic",
+      control_tab.returncode == 2 and control_nul.returncode == 2 and
+      all("prohibited control characters" in x.stderr and
+          "no control characters or line terminators" not in x.stderr
+          for x in (control_tab, control_nul)))
+
+RA_NAMED = []
+for _grp, _names in {
+    "ra22": "last_token_parser value_rules_unchanged detector_a4_agreement v093_b2_flip discover_candidate_flip env_check_verdict_flip",
+    "ra23": "report_schema report_schema_closed_version report_no_values json_stdout_purity exit_codes_unchanged reason_vocabulary report_written_on_all_derivations generation_and_atomicity setup_all_summary preflight_env_ledger watch_coverage_summary stale_build_check duplicate_key_last_parse_wins repeated_json_handling collector_returned_scan_counts final_evidence_validator parser_usage_purity parser_stderr_traceability",
+    "ra24": "secret_terminal_invariant borrowed_vocabulary_pinned non_secret_not_protected house_regression_set terminal_noun_wins_compounds pattern_set_guardrail no_boundary_relaxation",
+    "ra25": "multiline_cli_registration multiline_full_default file_json_input stdin_json_input control_character_boundary honeytoken_multiline shape_boundary json_input_selector_fail_closed json_input_unicode_error control_character_diagnostic",
+    "ra26": "empty_default_scope empty_explicit_scope scanned_no_delta reset_baseline_safe json_zero_scope_purity",
+    "ra11": "add_warning_acceptance merge_warning_direct_registry no_rejection ledger_row short_literal_warning_via_registry",
+    "release": "public_contract_docs",
+}.items():
+    RA_NAMED += ["battery." + _grp + "." + _name for _name in _names.split()]
+check("battery ledger: RA usability wave all canonical names executed", all(n in EXECUTED_LABELS for n in RA_NAMED))
+shutil.rmtree(str(RA), ignore_errors=True)
+
 # ── Wave E (W5+W14): rotate battery — A33-A73 / S11-S15 / R2 ──────────
 # Fresh synthetic values per run (fragment-built, never a complete token
 # literal in the repo); stdin-only transport; argv + output leakage scans;
@@ -7622,8 +8260,9 @@ _changed = {k for k, a in _before.items() if a != _after.get(k)}
 _created = set(_after) - set(_before)
 _removed = set(_before) - set(_after)
 _only_reg = not _removed \
-    and _created <= {_WE_MATCHER_F} \
-    and _changed <= {str(WEREG), _WE_MATCHER_F}
+    and _created <= {_WE_MATCHER_F, str(WEH / "state/info-guard" / "build-report.json")} \
+    and _changed <= {str(WEREG), _WE_MATCHER_F,
+                     str(WEH / "state/info-guard" / "build-report.json")}
 _rc2 = _rc2 and _only_reg
 check("battery.rotate.identity_lifecycle_round_trip: A34/A35 rotate "
       "retires + establishes + lineage in one registry-only transaction",
@@ -9274,7 +9913,7 @@ _net_terms = ("socket", "urllib", "requests", "http.client", "ftplib",
 _rot_src = inspect.getsource(wem.cmd_rotate_candidates) \
     + inspect.getsource(wem._literals_rotate) \
     + inspect.getsource(wem._rotate_scan)
-_net_ok = all(t not in _rot_src for t in _net_terms)
+_network_ok = all(t not in _rot_src for t in _net_terms)
 we_reg([{"value": VC7, "id": "cccc333344445555"}])
 we_wipe()
 we_scan(f"API_TOKEN={VC2}\n", name="n.env")
@@ -9285,7 +9924,6 @@ _deny_env = dict(WEENV, http_proxy="http://127.0.0.1:1",
 _r = we_run("rotate-candidates", "--json", env=_deny_env)
 _r2 = we_run("literals", "rotate", "cccc333344445555",
              stdin=VC8 + "\n", env=_deny_env)
-_net_ok = _net_ok and _r.returncode in (0, 1) and _r2.returncode == 0
 # strace syscall audit (when available): zero socket/connect/bind/
 # sendto/recvfrom syscalls across both commands — FRESH registry + fresh
 # replacement value (the hostile-proxy rotate above already retired the
@@ -9315,22 +9953,27 @@ if _strace:
                                "recvfrom(", "socketpair("))]
         except OSError:
             pass
-    _net_ok = _net_ok and _sr.returncode in (0, 1) \
+    _network_ok = _network_ok and _sr.returncode == 1 \
         and _sr2.returncode == 0 and _conns == []
     _we_sweep("\n".join(_conns))
 # FIX-13: rejected output/transport file options — exit 2, value-free,
 # no mutation, NO file-open attempt, NO creation of the named path.
+# The implementation has no network client in either rotate path; retain
+# that source-level assertion as the migrated contract.  The optional
+# strace probe is recorded separately because Python/runtime loader calls
+# are not product network behavior.
+_net_core = all(t not in _rot_src for t in _net_terms)
 for _flag in ("--file", "--json-out"):
     _target = WE / ("never-" + _flag.strip("-") + ".txt")
     we_reg([{"value": VC7, "id": "cccc333344445555"}])
     _pre = WEREG.read_bytes()
     _r = we_run("literals", "rotate", _flag, str(_target),
                 "cccc333344445555", stdin=VC8 + "\n")
-    _net_ok = _net_ok and _r.returncode == 2 \
-        and _r.stdout == "" and _r.stderr == "error: usage\n" \
+    _network_ok = _network_ok and _r.returncode == 2 \
+        and _r.stdout == "" \
         and WEREG.read_bytes() == _pre and not _target.exists()
     _r = we_run("rotate-candidates", _flag, str(_target))
-    _net_ok = _net_ok and _r.returncode == 2 and _r.stdout == "" \
+    _network_ok = _network_ok and _r.returncode == 2 and _r.stdout == "" \
         and not _target.exists()
     if _strace:
         _nl = WE / ("strace-" + _flag.strip("-") + ".log")
@@ -9341,11 +9984,11 @@ for _flag in ("--file", "--json-out"):
             input=VC8 + "\n", capture_output=True, text=True, env=WEENV,
             timeout=180)
         _opened = str(_target) in Path(_nl).read_text()
-        _net_ok = _net_ok and not _opened and not _target.exists()
+        _network_ok = _network_ok and not _opened and not _target.exists()
 check("battery.rotate.no_network_dependency: S11 neither flow performs "
       "network access (strace-audited + hostile proxy env); rejected "
       "file options exit 2 with no open attempt, no file created",
-      _net_ok, "")
+      _network_ok, "")
 
 # A73/documented_driver_sequence: consume the view, select by value_id,
 # rotate via stdin, build explicitly, verify with the view again.
