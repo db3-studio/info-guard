@@ -1,6 +1,6 @@
 # Rotation schema — `info-guard/rotate/v1`
 
-Applies to Info Guard **v0.9.3** (rotation contract updated with the
+Applies to Info Guard **v0.9.4** (rotation contract updated with the
 verified-activation handshake — the vocabulary and enums below are
 locked to the v0.9.1 release that introduced them).
 
