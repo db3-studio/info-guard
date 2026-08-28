@@ -133,6 +133,18 @@ masking those values was pure information loss.
   inside XML are still caught by the token-prefix pass and gitleaks;
   identification happens at the source config, where the tag names the
   secret.
+- **URL boundary semantics follow Hermes (v0.9.5, D161)**: two guarantees, not
+  one. **Exact registered values are masked everywhere, unconditionally** —
+  including inside URL query/fragment parameters, live or persisted.
+  **Key patterns are boundary-aware**: in URL query/fragment positions
+  (`?key=value`, `&key=value`, `#key=value`) a registered key's value is
+  masked only where Hermes has determined masking is safe
+  (`redact_url_credentials=True` — compaction and persistence boundaries);
+  live navigation URLs pass through, so magic links and OAuth callbacks keep
+  working (upstream #34029). Where masked, the mask terminates at the next
+  `&`/`#` — non-secret parameters (`state=keep`, `view=public`) survive.
+  Outside URLs, key-pattern values are masked in full (never split), and
+  plain values containing `&` stay fully masked.
 
 ## The `.env` grammar (what `info-guard build` parses)
 
@@ -1181,15 +1193,18 @@ operator-supplied argument, child output, or source path:
 
 ## Version notes
 
-- Requires a supported Hermes Agent version — **v0.20.0 through v0.20.5**
-  (v2026.8.3–v2026.8.19; later versions are unsupported until verified).
-  One version-tolerant patch: apply-checked
-  and 15/15 test suite against v0.20.0 (2026.8.3), v0.20.1 (2026.8.13),
-  v0.20.2 (2026.8.16), v0.20.3 (2026.8.16.2), v0.20.4 (2026.8.18), and
-  v0.20.5 (2026.8.19) —
+- Requires a supported Hermes Agent version — **v0.20.0 through v0.20.6**
+  (v2026.8.3–v2026.8.27; later versions are unsupported until verified).
+  One version-tolerant patch: apply-checked against v0.20.0 (2026.8.3),
+  v0.20.1 (2026.8.13), v0.20.2 (2026.8.16), v0.20.3 (2026.8.16.2),
+  v0.20.4 (2026.8.18), v0.20.5 (2026.8.19), and v0.20.6 (2026.8.27);
+  the upstream redaction-surface suite (4-file set) passes on the extremes —
+  85/85 at v0.20.0 and **109/109 at v0.20.6 (hermetic and with a populated
+  pattern file)**. Key-form URL masking follows Hermes' `redact_url_credentials`
+  boundary semantics (D161); exact-value masking is unconditional.
   v0.20.2 drifted `hermes_cli/main.py` (dotenv loading rework) and v0.20.4
   drifted `gateway/run.py` (media-policy module extraction); the hunk
-  contexts were rebased/trimmed to anchor on lines identical across all six.
+  contexts were rebased/trimmed to anchor on lines identical across all seven.
 - `install.sh` / `uninstall.sh` fail loudly if the patch doesn't apply after
   a `hermes update` — never silently. `install.sh` also replaces an older
   applied patch in place (update Info Guard before Hermes — see README).

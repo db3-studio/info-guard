@@ -144,7 +144,7 @@ CUSTOM_LITERALS = STATE_DIR / "custom_literals.json"
 
 # Package version — bump with every feature/behavior change; the preflight
 # report header prints it and `info-guard --version` exposes it. Tag vX.Y.Z.
-_PACKAGE_VERSION = "0.9.4"
+_PACKAGE_VERSION = "0.9.5"
 
 # Per-subcommand usage lines (v0.4.1, IG D55): printed by
 # `info-guard <cmd> --help` (exit 0). Mirror the __doc__ usage block —
@@ -3771,7 +3771,7 @@ _ENGINE_MARKERS = {
 # (v2026.8.18 -> (2026, 8, 18)); the .2-style suffixes compare correctly
 # via zero-padding.
 _SUPPORTED_MIN = (2026, 8, 3)     # v0.20.0 (v2026.8.3)
-_SUPPORTED_MAX = (2026, 8, 19)    # v0.20.5 (v2026.8.19)
+_SUPPORTED_MAX = (2026, 8, 27)    # v0.20.6 (v2026.8.27)
 # Scratch-target supported-release tag (build-diff MIN-3): derived from
 # _SUPPORTED_MAX so a range bump never strands the check --battery /
 # E4 fixtures on a stale tag outside the supported window.

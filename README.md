@@ -1,6 +1,6 @@
 # Info Guard
 
-Info Guard v0.9.4 protects the 20-term positive secret-key vocabulary, records
+Info Guard v0.9.5 protects the 20-term positive secret-key vocabulary, records
 skipped non-secret keys in the build report, accepts explicit multiline JSON
 literal input, warns (without rejecting) short literals, and distinguishes
 zero-scope watch (exit 2) from a scanned no-delta scope (exit 0). Build
@@ -17,7 +17,12 @@ the secret family (`PASS`, `TOKEN`, `SECRET`, `API_KEY`, `PASSWORD`,
 Info Guard adds the other half — **your exact values, and your own key
 patterns**. Register a value once, and it is masked everywhere Hermes
 sees it: tool output, logs, transcripts, file reads. No matter what key
-it appears under, or whether it appears as a bare value at all.
+it appears under, or whether it appears as a bare value at all. The
+exact-value guarantee is unconditional — a registered value is masked
+wherever it appears, including inside URLs. Key patterns follow Hermes'
+own URL-boundary semantics: a registered key's value inside a live
+navigation URL is preserved (magic links and OAuth callbacks keep
+working), while persistence and compaction boundaries mask it.
 
 ```
 Before:  "the token is 7f3a9c2b8d1e4f5a6b7c8d9e0f1a2b3c and the PIN is 4321"
@@ -28,8 +33,8 @@ After:   "the token is 7f...3c and the PIN is ***"
 
 | Setting | Value |
 |---|---|
-| Current Info Guard version | `0.9.4` |
-| Supported Hermes Agent versions | `v0.20.0` – `v0.20.5` |
+| Current Info Guard version | `0.9.5` |
+| Supported Hermes Agent versions | `v0.20.0` – `v0.20.6` |
 | Install location (canonical) | `~/.info-guard` |
 | Hermes home (`$HERMES_HOME`) | `~/.hermes` when unset |
 | `build` source | `$HERMES_HOME/.env` |
@@ -84,7 +89,7 @@ as v2.
 
 ## Install
 
-Requires a supported Hermes Agent version — **v0.20.0 through v0.20.5**
+Requires a supported Hermes Agent version — **v0.20.0 through v0.20.6**
 (the patch is one version-tolerant artifact, CI-checked across that range);
 later versions are unsupported until verified. `test.sh` is the package's
 own verification battery, separate from the upstream suite. Takes about two
@@ -151,7 +156,7 @@ cd ~/.info-guard
 That is the whole mechanism: `install.sh` patches your Hermes Agent checkout
 (`agent/redact.py` + 3 entry points) so the pattern file is read at every
 message boundary — and `~/.info-guard/uninstall.sh` reverses it cleanly.
-An unsupported Hermes version (outside v0.20.0–v0.20.5) fails the
+An unsupported Hermes version (outside v0.20.0–v0.20.6) fails the
 installer's version gate loudly — it never proceeds silently.
 
 **Your Hermes agent:**
@@ -312,7 +317,7 @@ reported as candidates, because they cannot be enrolled.
 More examples — value types, mask styles, key patterns — in
 `examples/redact_patterns.json.example` and `examples/custom_literals.json.example`.
 
-## Rotate secrets (v0.9.4)
+## Rotate secrets (v0.9.5)
 
 Rotation is an identity lifecycle: retire the old identity, establish a
 new one, preserve lineage, and activate the new identity automatically
@@ -434,7 +439,7 @@ Version history: see [CHANGELOG.md](CHANGELOG.md) for what changed in each
 release.
 
 The patch is one version-tolerant artifact, verified across the tested
-range (**v0.20.0 – v0.20.5**). `hermes update` autostashes and restores
+range (**v0.20.0 – v0.20.6**). `hermes update` autostashes and restores
 working-tree changes, so within the tested range the patch usually rides
 the update untouched — but a release that changes the patched code
 (v0.20.2 and v0.20.4 both did) can break the stash restore, and an
@@ -649,7 +654,7 @@ scanned no-delta, with coverage fields. Masking is exact-value-only.
 ## Upstream
 
 The redaction engine is being upstreamed to NousResearch/hermes-agent
-(PR [NousResearch/hermes-agent#87953](https://github.com/NousResearch/hermes-agent/pull/87953) — "exact-value secret redaction from user pattern file"; still open as of this release).
+(PR [NousResearch/hermes-agent#97383](https://github.com/NousResearch/hermes-agent/pull/97383) — "registry-fed exact-value and key-form redaction from user pattern file"; still open as of this release).
 Once merged, `install.sh`'s patch step disappears and this repo becomes
 pure tooling + docs. Until then, `install.sh` is marker-guarded and fails
 loudly if a `hermes update` drifts the patch context — it will never

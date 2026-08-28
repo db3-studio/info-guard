@@ -2,7 +2,7 @@ diff --git a/agent/redact.py b/agent/redact.py
 index 7fa3c11e..99dc805d 100644
 --- a/agent/redact.py
 +++ b/agent/redact.py
-@@ -1006,6 +1006,187 @@ def redact_sensitive_text(
+@@ -1006,6 +1006,224 @@ def redact_sensitive_text(
              return phone[:4] + "****" + phone[-4:]
          text = _SIGNAL_PHONE_RE.sub(_redact_phone, text)
  
@@ -16,13 +16,20 @@ index 7fa3c11e..99dc805d 100644
 +    # families above still run. Sentinel: non-reusable for file content
 +    # (issue #35519 semantics) so a masked value can never be written back
 +    # over the real one.
-+    text = _redact_registry_patterns(text, file_read=file_read)
++    # URL-boundary semantics follow Hermes (D160 convergence): registered
++    # key-forms in URL query/fragment positions are masked only where Hermes
++    # has determined masking is safe (redact_url_credentials=True — e.g. the
++    # compaction/persistence boundary); live navigation URLs pass through.
++    # Registered exact values (literals) remain unconditional everywhere.
++    text = _redact_registry_patterns(
++        text, file_read=file_read, url_credentials=redact_url_credentials)
 +
 +    return text
 +
 +
 +_PATTERNS_CACHE: dict = {"mtime": None, "path": None, "lit_re": None,
-+                         "key_re": None, "lit_masks": {}, "default_mask": None,
++                         "key_re": None, "query_re": None,
++                         "lit_masks": {}, "default_mask": None,
 +                         "broken": False}
 +
 +
@@ -80,7 +87,31 @@ index 7fa3c11e..99dc805d 100644
 +                       floor=params["floor"])
 +
 +
-+def _redact_registry_patterns(text: str, *, file_read: bool) -> str:
++def _mask_key_match(m, default_mask, file_read, *, prefix_group=0):
++    """Mask one key-form match. prefix_group=0 for the plain pass (groups
++    1..8: key, quote, ws, sep, ws2, dq, sq, unquoted); prefix_group=1 for the
++    query pass (group 1 = the '?'/'&' prefix, groups 2..9 shifted by one).
++    The g+6/g+7/g+8 offsets read dq/sq/unquoted so one body serves both
++    passes; the prefix is re-emitted verbatim; quoted values are bounded
++    by their quotes; the unquoted value is already bounded by the pass's
++    regex."""
++    g = prefix_group
++    prefix = m.group(1) if prefix_group else ""
++    if m.group(g + 6) is not None:
++        q, val = '"', m.group(g + 6)
++    elif m.group(g + 7) is not None:
++        q, val = "'", m.group(g + 7)
++    else:
++        q, val = "", m.group(g + 8) or ""
++    if not val:
++        return m.group(0)      # empty value — nothing to mask
++    return (prefix + m.group(g + 1) + (m.group(g + 2) or "") + m.group(g + 3)
++            + m.group(g + 4) + m.group(g + 5) + q
++            + _apply_mask(val, default_mask, file_read) + q)
++
++
++def _redact_registry_patterns(text: str, *, file_read: bool,
++                              url_credentials: bool = False) -> str:
 +    """Exact-value + registered-key masking from the user patterns file.
 +
 +    The file is JSON — hand-written or generated (e.g. by the ``hermes-sec``
@@ -112,6 +143,7 @@ index 7fa3c11e..99dc805d 100644
 +        _PATTERNS_CACHE["path"] = None
 +        _PATTERNS_CACHE["lit_re"] = None
 +        _PATTERNS_CACHE["key_re"] = None
++        _PATTERNS_CACHE["query_re"] = None
 +        _PATTERNS_CACHE["lit_masks"] = {}
 +        _PATTERNS_CACHE["broken"] = False
 +        return text
@@ -155,10 +187,20 @@ index 7fa3c11e..99dc805d 100644
 +            _PATTERNS_CACHE["lit_re"] = (
 +                re.compile("|".join(re.escape(l) for l in lit_values))
 +                if lit_values else None)
++            _key_alt = "|".join(re.escape(k) for k in keys)
 +            _PATTERNS_CACHE["key_re"] = (
-+                re.compile(r"(?i)\b(" + "|".join(re.escape(k) for k in keys)
-+                           + r")(['\"]?)(\s*)([=:])(\s*)"
++                re.compile(r"(?i)(?<![?&#])\b(" + _key_alt + r")(['\"]?)(\s*)([=:])(\s*)"
 +                           + r"(?:\"([^\"\n]*)\"|'([^'\n]*)'|([^\s\"',;}{}\])]+))")
++                if keys else None)
++            # Query-position pass (D160): a registered key directly after '?'
++            # or '&' is a URL query parameter — the unquoted value is bounded
++            # at the next '&' / '#' so each parameter matches independently
++            # (a later registered key in the same query is never swallowed
++            # into the mask; non-secret params like state=keep survive). The
++            # plain pass above skips query-position keys via (?<![?&#]).
++            _PATTERNS_CACHE["query_re"] = (
++                re.compile(r"(?i)([?&#])(" + _key_alt + r")(['\"]?)(\s*)([=:])(\s*)"
++                           + r"(?:\"([^\"\n]*)\"|'([^'\n]*)'|([^&#\s\"',;}{}\])]+))")
 +                if keys else None)
 +            _PATTERNS_CACHE["lit_masks"] = lit_masks
 +            _PATTERNS_CACHE["default_mask"] = data.get("mask")
@@ -172,20 +214,15 @@ index 7fa3c11e..99dc805d 100644
 +                spec = _PATTERNS_CACHE["default_mask"]
 +            return _apply_mask(m.group(0), spec, file_read)
 +        text = _PATTERNS_CACHE["lit_re"].sub(_lit, text)
++    if _PATTERNS_CACHE["query_re"] is not None and url_credentials:
++        def _kq(m):
++            return _mask_key_match(m, _PATTERNS_CACHE["default_mask"], file_read,
++                                   prefix_group=1)
++        text = _PATTERNS_CACHE["query_re"].sub(_kq, text)
 +    if _PATTERNS_CACHE["key_re"] is not None:
 +        def _k(m):
-+            if m.group(6) is not None:
-+                q, val = '"', m.group(6)
-+            elif m.group(7) is not None:
-+                q, val = "'", m.group(7)
-+            else:
-+                q, val = "", m.group(8) or ""
-+            if not val:
-+                return m.group(0)      # empty value — nothing to mask
-+            return (m.group(1) + (m.group(2) or "") + m.group(3) + m.group(4)
-+                    + m.group(5) + q
-+                    + _apply_mask(val, _PATTERNS_CACHE["default_mask"], file_read)
-+                    + q)
++            return _mask_key_match(m, _PATTERNS_CACHE["default_mask"], file_read,
++                                   prefix_group=0)
 +        text = _PATTERNS_CACHE["key_re"].sub(_k, text)
      return text
  

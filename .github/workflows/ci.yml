@@ -15,11 +15,12 @@ jobs:
       matrix:
         # release commits: v0.20.0 (2026.8.3), v0.20.1 (2026.8.13),
         # v0.20.2 (2026.8.16), v0.20.3 (2026.8.16.2, 7339f5f), v0.20.4
-        # (2026.8.18, 9f13bbbf), v0.20.5 (2026.8.19, fcbd107) — the patch is
-        # apply-checked against all six plus current main; a future release
+        # (2026.8.18, 9f13bbbf), v0.20.5 (2026.8.19, fcbd107), v0.20.6
+        # (2026.8.27, 5fc308a) — the patch is
+        # apply-checked against all seven plus current main; a future release
         # that drifts is caught
         # by install.sh's fail-loud apply-check (not by this matrix).
-        ref: [3c27eb623, 720f0443a, df4b65147, 7339f5f, 9f13bbbf, fcbd107]
+        ref: [3c27eb623, 720f0443a, df4b65147, 7339f5f, 9f13bbbf, fcbd107, 5fc308a]
     steps:
       - uses: actions/checkout@v4
         with:

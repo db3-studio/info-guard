@@ -214,6 +214,204 @@ check("fresh HERMES_HOME: default path resolved, value masked",
       proc.returncode == 0 and proc.stdout.strip() == "ig...bc",
       f"rc={proc.returncode} out={proc.stdout.strip()!r} err={proc.stderr.strip()[-200:]!r}")
 
+# ── v0.9.5 key-form URL query-swallow + convergence group (IG D160/D161) ──
+# The registry pass's key-form value class must terminate at URL query
+# separators when the key sits in query/fragment position (non-secret params
+# like state=keep are never swallowed), while plain env values containing '&'
+# stay fully masked. URL-boundary semantics follow Hermes (D161 convergence):
+# registered key-forms in URL query/fragment positions are masked only when
+# redact_url_credentials=True (persistence boundary); live navigation URLs
+# pass through; registered exact values (literals) remain unconditional.
+# D-number → plain-language map for the check labels below: D160 = bounded
+# key-form values in URL query/fragment positions (&/# terminate the value);
+# D161 = key-form URL masking follows Hermes' redact_url_credentials flag
+# (live pass-through, persistence masks), exact values always masked.
+# Probes run in a subprocess with a synthetic pattern file (fresh engine
+# cache; hermetic env; concatenated fixture values — gitleaks).
+_ksf = os.path.join(tmp, "keyform-synth.json")
+write(_ksf, {
+    "mask": {"head": 2, "tail": 2, "floor": 12},
+    "literals": ["rock" + "&roll", "LIT" + "VALUE1",
+                 "access_token=" + "SECRETVAL-1"],   # overlap case (B9): literal
+                                                     # spans a key pattern's
+                                                     # value class verbatim
+    "key_patterns": {"access_token": "full", "client_secret": "full",
+                     "code": "full"},
+})
+_ksf2 = os.path.join(tmp, "keyform-synth-kp.json")   # key-patterns-only (no literals)
+write(_ksf2, {
+    "mask": {"head": 2, "tail": 2, "floor": 12},
+    "literals": [],
+    "key_patterns": {"access_token": "full", "client_secret": "full"},
+})
+_ksenv = dict(os.environ)
+_ksenv["HERMES_REDACT_PATTERNS"] = _ksf
+_ksenv["HERMES_HOME"] = os.path.join(tmp, "keyform-home")
+os.makedirs(_ksenv["HERMES_HOME"], exist_ok=True)
+_ksenv2 = dict(_ksenv)
+_ksenv2["HERMES_REDACT_PATTERNS"] = _ksf2
+_ks_base = (
+    "import sys, os; sys.path.insert(0, %r); "
+    "import agent.redact as _ar; "
+    "assert os.path.abspath(_ar.__file__).startswith(os.path.abspath(%r)), "
+    "_ar.__file__; "
+    "from agent.redact import redact_sensitive_text as r, "
+    "_redact_registry_patterns as reg; "
+    "T1 = 'SK-TOK-' + 'AAA111'; T2 = 'SK-CLIENT-' + 'BBB222'; "
+    "L1 = 'LIT' + 'VALUE1'; "
+) % (CHECKOUT, CHECKOUT)
+
+# B1: URL query tail preserved — bounded key-form masking in query/fragment
+# position WITH the persistence flag on (a later registered key and non-secret
+# params survive).
+_ksr = subprocess.run([sys.executable, "-c", _ks_base + (
+    "cases = ["
+    "('q0', 'https://x/cb?access_token=' + T1, ['access_token=***'], [T1]),"
+    "('q1', 'https://x/cb?code=opaque-code-123&access_token=' + T1 + '&state=keep', ['state=keep', 'access_token=***'], [T1]),"
+    "('q2', 'https://x/cb?access_token=' + T1 + '&client_secret=' + T2 + '&state=keep', ['state=keep', 'access_token=***', 'client_secret=***'], [T1, T2]),"
+    "('q3', 'https://x/cb?access_token=' + T1 + '&state=keep#frag', ['state=keep', '#frag'], [T1]),"
+    "('q4', 'https://x.test/#access_token=' + T1 + '&view=public', ['view=public'], [T1]),"
+    "('q5', 'https://x/cb?state=keep&access_token=' + T1, ['state=keep'], [T1])"
+    "]; "
+    "out = [r(t, force=True, redact_url_credentials=True) for _, t, _, _ in cases]; "
+    "ok = all(all(m in o for m in must) and all(n not in o for n in mustnot) "
+    "         for (_, t, must, mustnot), o in zip(cases, out)); "
+    "sys.exit(0 if ok else 1)"
+)], env=_ksenv, capture_output=True, text=True, timeout=60)
+check("battery.keyform.url_query_tail_preserved: v0.9.5 D160 — query/fragment "
+      "key-form values mask BOUNDED at & / # with the persistence flag "
+      "(state=keep, view=public, #frag and later registered keys survive)",
+      _ksr.returncode == 0,
+      f"rc={_ksr.returncode} err={_ksr.stderr.strip()[-200:]!r}")
+
+# B6: URL-boundary semantics follow Hermes (D161) — live (flag off) registered
+# key-forms in URLs pass through; plain key-forms still mask; literals mask
+# in URLs unconditionally (exact-value guarantee).
+_ksr = subprocess.run([sys.executable, "-c", _ks_base + (
+    "o1 = r('https://x/cb?access_token=' + T1 + '&state=keep', force=True); "
+    "o2 = r('log access_token=' + T1 + ' end', force=True); "
+    "o3 = r('https://x/cb?client_secret=' + L1 + '&state=keep', force=True); "
+    "ok = (T1 in o1) and ('state=keep' in o1) "
+    "     and (T1 not in o2) and (L1 not in o3); "
+    "sys.exit(0 if ok else 1)"
+)], env=_ksenv, capture_output=True, text=True, timeout=60)
+check("battery.keyform.url_keyform_flag_gated: v0.9.5 D161 — live (flag off) "
+      "URL key-forms pass through (upstream parity, #34029); plain key-forms "
+      "still mask; registered literals mask in URLs unconditionally",
+      _ksr.returncode == 0,
+      f"rc={_ksr.returncode} err={_ksr.stderr.strip()[-200:]!r}")
+
+# B7: exact-value precedence — a registered literal in a LIVE URL is masked
+# (exact-value protection overrides URL navigation preservation).
+_ksr = subprocess.run([sys.executable, "-c", _ks_base + (
+    "o = r('https://x/cb?client_secret=' + L1 + '&state=keep', force=True); "
+    "ok = (L1 not in o) and ('client_secret=***' in o); "
+    "sys.exit(0 if ok else 1)"
+)], env=_ksenv, capture_output=True, text=True, timeout=60)
+check("battery.keyform.exact_value_precedence: v0.9.5 D161 — exact registered "
+      "value overrides URL navigation preservation (masked in live URLs too)",
+      _ksr.returncode == 0,
+      f"rc={_ksr.returncode} err={_ksr.stderr.strip()[-200:]!r}")
+
+# B9: exact-value precedence, stricter case (evidence r1 MIN-1) — a registered
+# literal ALONE in a live URL query (no key-form present) is masked:
+# exact-value protection is independent of key co-occurrence.
+_ksr = subprocess.run([sys.executable, "-c", _ks_base + (
+    "o = r('https://x/cb?state=keep&' + L1, force=True); "
+    "ok = (L1 not in o) and ('state=keep' in o); "
+    "sys.exit(0 if ok else 1)"
+)], env=_ksenv, capture_output=True, text=True, timeout=60)
+check("battery.keyform.exact_value_live_url_bare: v0.9.5 D161 — a registered "
+      "literal alone in a LIVE URL query (no key-form) is masked "
+      "(exact-value precedence independent of key co-occurrence)",
+      _ksr.returncode == 0,
+      f"rc={_ksr.returncode} err={_ksr.stderr.strip()[-200:]!r}")
+
+# B10: lit_re-first order pin (evidence r1 MIN-3) — a registered literal whose
+# text spans a key pattern's value class verbatim is masked by the LITERAL
+# pass (the key-form pass finds nothing left): proves lit_re runs before the
+# key-form pass, in both flag modes.
+_ksr = subprocess.run([sys.executable, "-c", _ks_base + (
+    "o1 = reg('config ' + 'access_token=' + 'SECRETVAL-1' + ' here', file_read=False); "
+    "o2 = reg('config ' + 'access_token=' + 'SECRETVAL-1' + ' here', file_read=False, "
+    "          url_credentials=True); "
+    "ok = ('ac...-1' in o1) and ('access_token=' not in o1) and ('SECRETVAL-1' not in o1) "
+    "     and ('ac...-1' in o2) and ('access_token=' not in o2) and ('SECRETVAL-1' not in o2); "
+    "sys.exit(0 if ok else 1)"
+)], env=_ksenv, capture_output=True, text=True, timeout=60)
+check("battery.keyform.lit_re_first_overlap: v0.9.5 D161 — a registered literal "
+      "spanning a key pattern's value class is masked by the literal pass first "
+      "(lit_re-first pin, both flag modes)",
+      _ksr.returncode == 0,
+      f"rc={_ksr.returncode} err={_ksr.stderr.strip()[-200:]!r}")
+
+# B2: plain env values containing '&' stay fully masked; non-URL tails
+# preserved in both flag modes (CRIT-2 regression).
+_ksr = subprocess.run([sys.executable, "-c", _ks_base + (
+    "o1 = reg('access_token=rock&roll', file_read=False); "
+    "o2 = reg('log line &access_token=' + T1 + '&tail=visible', file_read=False); "
+    "o3 = reg('log line &access_token=' + T1 + '&tail=visible', file_read=False, "
+    "          url_credentials=True); "
+    "ok = ('roll' not in o1) and ('access_token=***' in o1) "
+    "     and ('tail=visible' in o2) and (T1 in o2) "
+    "     and ('tail=visible' in o3) and (T1 not in o3); "
+    "sys.exit(0 if ok else 1)"
+)], env=_ksenv, capture_output=True, text=True, timeout=60)
+check("battery.keyform.env_value_ampersand_full_mask: v0.9.5 D160 — plain env "
+      "'&' values stay fully masked (no roll leak); non-URL tails preserved "
+      "in both flag modes (CRIT-2 regression)",
+      _ksr.returncode == 0,
+      f"rc={_ksr.returncode} err={_ksr.stderr.strip()[-200:]!r}")
+
+# B3: registered exact literal containing '&' masked by the literal pass
+# (lit_re first) in URL context — no partial exposure, tail preserved.
+_ksr = subprocess.run([sys.executable, "-c", _ks_base + (
+    "o1 = reg('https://x/cb?access_token=rock&roll&state=keep', file_read=False, "
+    "          url_credentials=True); "
+    "o2 = reg('config value rock&roll here', file_read=False); "
+    "ok = ('rock&roll' not in o1) and ('roll' not in o1) and ('state=keep' in o1) "
+    "     and ('rock&roll' not in o2); "
+    "sys.exit(0 if ok else 1)"
+)], env=_ksenv, capture_output=True, text=True, timeout=60)
+check("battery.keyform.literal_ampersand_contexts: v0.9.5 D160 — registered "
+      "'&'-containing literal masked by lit_re (runs first) in URL context; "
+      "no partial exposure",
+      _ksr.returncode == 0,
+      f"rc={_ksr.returncode} err={_ksr.stderr.strip()[-200:]!r}")
+
+# B8: key-patterns-only configuration — the documented live-URL gap (no
+# literal coverage): the key-form value passes through live (flag off),
+# masked at persistence (flag on). Pins the D161 contract explicitly.
+_ksr = subprocess.run([sys.executable, "-c", _ks_base + (
+    "o1 = r('https://x/cb?access_token=' + T1 + '&state=keep', force=True); "
+    "o2 = r('https://x/cb?access_token=' + T1 + '&state=keep', force=True, "
+    "        redact_url_credentials=True); "
+    "ok = (T1 in o1) and (T1 not in o2); "
+    "sys.exit(0 if ok else 1)"
+)], env=_ksenv2, capture_output=True, text=True, timeout=60)
+check("battery.keyform.key_patterns_only_documented_gap: v0.9.5 D161 — "
+      "key-patterns-only config (no literals): live URL key-form passes "
+      "through (documented), persistence masks — the D161 contract pin",
+      _ksr.returncode == 0,
+      f"rc={_ksr.returncode} err={_ksr.stderr.strip()[-200:]!r}")
+
+# B4: the keyform probes execute in every mode — named checks present in the
+# executed ledger (skip/absence fails; MAJ-7 closure).
+_ks_ledger = [l for l in EXECUTED_LABELS if l.startswith("battery.keyform.")]
+check("battery.keyform.checks_executed_all_modes: v0.9.5 D160 — all keyform "
+      "named checks executed (full + stripped + check --battery run the same "
+      "test.sh; a skip/absence fails here)",
+      all(any(l.startswith(n) for l in _ks_ledger)
+          for n in ("battery.keyform.url_query_tail_preserved",
+                    "battery.keyform.url_keyform_flag_gated",
+                    "battery.keyform.exact_value_precedence",
+                    "battery.keyform.exact_value_live_url_bare",
+                    "battery.keyform.env_value_ampersand_full_mask",
+                    "battery.keyform.literal_ampersand_contexts",
+                    "battery.keyform.lit_re_first_overlap",
+                    "battery.keyform.key_patterns_only_documented_gap")),
+      f"ledger={_ks_ledger}")
+
 # 7. external-audit F2 regression: the setup wizard must register
 #    gitleaks-only findings (not drop them as "value too short")
 setup_home = os.path.join(tmp, "setup-home")
