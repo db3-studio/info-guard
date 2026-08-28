@@ -17,7 +17,12 @@ the secret family (`PASS`, `TOKEN`, `SECRET`, `API_KEY`, `PASSWORD`,
 Info Guard adds the other half — **your exact values, and your own key
 patterns**. Register a value once, and it is masked everywhere Hermes
 sees it: tool output, logs, transcripts, file reads. No matter what key
-it appears under, or whether it appears as a bare value at all.
+it appears under, or whether it appears as a bare value at all. The
+exact-value guarantee is unconditional — a registered value is masked
+wherever it appears, including inside URLs. Key patterns follow Hermes'
+own URL-boundary semantics: a registered key's value inside a live
+navigation URL is preserved (magic links and OAuth callbacks keep
+working), while persistence and compaction boundaries mask it.
 
 ```
 Before:  "the token is 7f3a9c2b8d1e4f5a6b7c8d9e0f1a2b3c and the PIN is 4321"

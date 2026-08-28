@@ -5,6 +5,11 @@
 - Fix key-form masking inside URLs: a registered key in a URL query or
   fragment now masks only its own value, so non-secret parameters
   (`state=keep`, `view=public`) are no longer swallowed into the mask.
+- Registered key patterns now follow Hermes' own URL-boundary semantics: a
+  registered key's value inside a live navigation URL is preserved (magic
+  links and OAuth callbacks keep working), while persistence and compaction
+  boundaries mask it. Exact registered values are masked everywhere,
+  unconditionally — including inside URLs.
 - Extend the supported Hermes Agent range to **v0.20.6 (2026.8.27)** — the
   redactor patch is apply-checked against all seven releases (v0.20.0 →
   v0.20.6) plus current main.
