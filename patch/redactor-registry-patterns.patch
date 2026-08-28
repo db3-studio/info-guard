@@ -85,8 +85,10 @@ index 7fa3c11e..99dc805d 100644
 +    """Mask one key-form match. prefix_group=0 for the plain pass (groups
 +    1..8: key, quote, ws, sep, ws2, dq, sq, unquoted); prefix_group=1 for the
 +    query pass (group 1 = the '?'/'&' prefix, groups 2..9 shifted by one).
-+    The prefix is re-emitted verbatim; quoted values are bounded by their
-+    quotes; the unquoted value is already bounded by the pass's regex."""
++    The g+6/g+7/g+8 offsets read dq/sq/unquoted so one body serves both
++    passes; the prefix is re-emitted verbatim; quoted values are bounded
++    by their quotes; the unquoted value is already bounded by the pass's
++    regex."""
 +    g = prefix_group
 +    prefix = m.group(1) if prefix_group else ""
 +    if m.group(g + 6) is not None:

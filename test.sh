@@ -232,16 +232,20 @@ _ksenv["HERMES_REDACT_PATTERNS"] = _ksf
 _ksenv["HERMES_HOME"] = os.path.join(tmp, "keyform-home")
 os.makedirs(_ksenv["HERMES_HOME"], exist_ok=True)
 _ks_base = (
-    "import sys; sys.path.insert(0, %r); "
+    "import sys, os; sys.path.insert(0, %r); "
+    "import agent.redact as _ar; "
+    "assert os.path.abspath(_ar.__file__).startswith(os.path.abspath(%r)), "
+    "_ar.__file__; "
     "from agent.redact import redact_sensitive_text as r, "
     "_redact_registry_patterns as reg; "
     "T1 = 'SK-TOK-' + 'AAA111'; T2 = 'SK-CLIENT-' + 'BBB222'; "
-) % CHECKOUT
+) % (CHECKOUT, CHECKOUT)
 
 # B1: URL query tail preserved — bounded key-form masking in query/fragment
 # position (a later registered key and non-secret params survive).
 _ksr = subprocess.run([sys.executable, "-c", _ks_base + (
     "cases = ["
+    "('q0', 'https://x/cb?access_token=' + T1, ['access_token=***'], [T1]),"
     "('q1', 'https://x/cb?code=opaque-code-123&access_token=' + T1 + '&state=keep', ['state=keep', 'access_token=***'], [T1]),"
     "('q2', 'https://x/cb?access_token=' + T1 + '&client_secret=' + T2 + '&state=keep', ['state=keep', 'access_token=***', 'client_secret=***'], [T1, T2]),"
     "('q3', 'https://x/cb?access_token=' + T1 + '&state=keep#frag', ['state=keep', '#frag'], [T1]),"
@@ -277,8 +281,10 @@ check("battery.keyform.env_value_ampersand_full_mask: v0.9.5 D160 — plain env 
 # B3: registered exact literal containing '&' masked by the literal pass
 # (lit_re first) in URL context — no partial exposure, tail preserved.
 _ksr = subprocess.run([sys.executable, "-c", _ks_base + (
-    "o = reg('https://x/cb?access_token=rock&roll&state=keep', file_read=False); "
-    "ok = ('rock&roll' not in o) and ('roll' not in o) and ('state=keep' in o); "
+    "o1 = reg('https://x/cb?access_token=rock&roll&state=keep', file_read=False); "
+    "o2 = reg('config value rock&roll here', file_read=False); "
+    "ok = ('rock&roll' not in o1) and ('roll' not in o1) and ('state=keep' in o1) "
+    "     and ('rock&roll' not in o2); "
     "sys.exit(0 if ok else 1)"
 )], env=_ksenv, capture_output=True, text=True, timeout=60)
 check("battery.keyform.literal_ampersand_contexts: v0.9.5 D160 — registered "

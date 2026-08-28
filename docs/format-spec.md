@@ -1191,8 +1191,9 @@ operator-supplied argument, child output, or source path:
   One version-tolerant patch: apply-checked against v0.20.0 (2026.8.3),
   v0.20.1 (2026.8.13), v0.20.2 (2026.8.16), v0.20.3 (2026.8.16.2),
   v0.20.4 (2026.8.18), v0.20.5 (2026.8.19), and v0.20.6 (2026.8.27);
-  the upstream redaction-surface suite passes on the extremes — 85/85 at
-  v0.20.0 and 109/109 at v0.20.6 (hermetic). With a populated pattern file,
+  the upstream redaction-surface suite (4-file set) passes on the extremes —
+  85/85 at v0.20.0 and 109/109 at v0.20.6 (hermetic). With a populated
+  pattern file,
   2 strict-URL opt-in tests diverge by design: registered-key masking is
   unconditional (registration is the user's opt-in), while upstream's
   URL-credential masking is flag-gated (`redact_url_credentials`).
