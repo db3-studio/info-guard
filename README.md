@@ -654,7 +654,7 @@ scanned no-delta, with coverage fields. Masking is exact-value-only.
 ## Upstream
 
 The redaction engine is being upstreamed to NousResearch/hermes-agent
-(PR [NousResearch/hermes-agent#87953](https://github.com/NousResearch/hermes-agent/pull/87953) — "exact-value secret redaction from user pattern file"; still open as of this release).
+(PR [NousResearch/hermes-agent#97383](https://github.com/NousResearch/hermes-agent/pull/97383) — "registry-fed exact-value and key-form redaction from user pattern file"; still open as of this release).
 Once merged, `install.sh`'s patch step disappears and this repo becomes
 pure tooling + docs. Until then, `install.sh` is marker-guarded and fails
 loudly if a `hermes update` drifts the patch context — it will never

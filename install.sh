@@ -16,7 +16,7 @@
 #        PARTIAL (1–4/5 markers)  = restore-and-reapply (a half-reverted
 #           `hermes update` self-heals)
 #        MISSING (0/5)            = apply
-#        ACTIVE-by-upstream       = patch present in HEAD (PR #87953 merged):
+#        ACTIVE-by-upstream       = patch present in HEAD (PR #97383 merged):
 #           accepted only when markers are in HEAD, both apply-checks fail
 #           (not a working-tree patch, already in HEAD) AND the behavioral
 #           battery passes — marker presence alone never establishes ACTIVE.
@@ -255,7 +255,7 @@ RESTORED=0
 if [ "$MARKERS" = "5" ] && [ "$REVERSE_OK" = "1" ] && [ "$FORCE" != "1" ]; then
     say "engine ACTIVE (5/5 markers) — patch applied and matches this package's artifact"
 elif [ "$MARKERS" = "5" ] && [ "$UPSTREAM_MARKERS" = "5" ] && [ "$FORCE" != "1" ]; then
-    # ACTIVE-by-upstream: patch is in HEAD (PR #87953 merged), not a
+    # ACTIVE-by-upstream: patch is in HEAD (PR #97383 merged), not a
     # working-tree patch. Marker presence alone never establishes ACTIVE —
     # the behavioral battery (test.sh) below is the gate; if it fails the
     # install dies with "compatibility review required" (never silently
