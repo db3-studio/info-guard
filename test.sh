@@ -222,12 +222,19 @@ check("fresh HERMES_HOME: default path resolved, value masked",
 # registered key-forms in URL query/fragment positions are masked only when
 # redact_url_credentials=True (persistence boundary); live navigation URLs
 # pass through; registered exact values (literals) remain unconditional.
+# D-number → plain-language map for the check labels below: D160 = bounded
+# key-form values in URL query/fragment positions (&/# terminate the value);
+# D161 = key-form URL masking follows Hermes' redact_url_credentials flag
+# (live pass-through, persistence masks), exact values always masked.
 # Probes run in a subprocess with a synthetic pattern file (fresh engine
 # cache; hermetic env; concatenated fixture values — gitleaks).
 _ksf = os.path.join(tmp, "keyform-synth.json")
 write(_ksf, {
     "mask": {"head": 2, "tail": 2, "floor": 12},
-    "literals": ["rock" + "&roll", "LIT" + "VALUE1"],
+    "literals": ["rock" + "&roll", "LIT" + "VALUE1",
+                 "access_token=" + "SECRETVAL-1"],   # overlap case (B9): literal
+                                                     # spans a key pattern's
+                                                     # value class verbatim
     "key_patterns": {"access_token": "full", "client_secret": "full",
                      "code": "full"},
 })
@@ -306,6 +313,38 @@ check("battery.keyform.exact_value_precedence: v0.9.5 D161 — exact registered 
       _ksr.returncode == 0,
       f"rc={_ksr.returncode} err={_ksr.stderr.strip()[-200:]!r}")
 
+# B9: exact-value precedence, stricter case (evidence r1 MIN-1) — a registered
+# literal ALONE in a live URL query (no key-form present) is masked:
+# exact-value protection is independent of key co-occurrence.
+_ksr = subprocess.run([sys.executable, "-c", _ks_base + (
+    "o = r('https://x/cb?state=keep&' + L1, force=True); "
+    "ok = (L1 not in o) and ('state=keep' in o); "
+    "sys.exit(0 if ok else 1)"
+)], env=_ksenv, capture_output=True, text=True, timeout=60)
+check("battery.keyform.exact_value_live_url_bare: v0.9.5 D161 — a registered "
+      "literal alone in a LIVE URL query (no key-form) is masked "
+      "(exact-value precedence independent of key co-occurrence)",
+      _ksr.returncode == 0,
+      f"rc={_ksr.returncode} err={_ksr.stderr.strip()[-200:]!r}")
+
+# B10: lit_re-first order pin (evidence r1 MIN-3) — a registered literal whose
+# text spans a key pattern's value class verbatim is masked by the LITERAL
+# pass (the key-form pass finds nothing left): proves lit_re runs before the
+# key-form pass, in both flag modes.
+_ksr = subprocess.run([sys.executable, "-c", _ks_base + (
+    "o1 = reg('config ' + 'access_token=' + 'SECRETVAL-1' + ' here', file_read=False); "
+    "o2 = reg('config ' + 'access_token=' + 'SECRETVAL-1' + ' here', file_read=False, "
+    "          url_credentials=True); "
+    "ok = ('ac...-1' in o1) and ('access_token=' not in o1) and ('SECRETVAL-1' not in o1) "
+    "     and ('ac...-1' in o2) and ('access_token=' not in o2) and ('SECRETVAL-1' not in o2); "
+    "sys.exit(0 if ok else 1)"
+)], env=_ksenv, capture_output=True, text=True, timeout=60)
+check("battery.keyform.lit_re_first_overlap: v0.9.5 D161 — a registered literal "
+      "spanning a key pattern's value class is masked by the literal pass first "
+      "(lit_re-first pin, both flag modes)",
+      _ksr.returncode == 0,
+      f"rc={_ksr.returncode} err={_ksr.stderr.strip()[-200:]!r}")
+
 # B2: plain env values containing '&' stay fully masked; non-URL tails
 # preserved in both flag modes (CRIT-2 regression).
 _ksr = subprocess.run([sys.executable, "-c", _ks_base + (
@@ -366,8 +405,10 @@ check("battery.keyform.checks_executed_all_modes: v0.9.5 D160 — all keyform "
           for n in ("battery.keyform.url_query_tail_preserved",
                     "battery.keyform.url_keyform_flag_gated",
                     "battery.keyform.exact_value_precedence",
+                    "battery.keyform.exact_value_live_url_bare",
                     "battery.keyform.env_value_ampersand_full_mask",
                     "battery.keyform.literal_ampersand_contexts",
+                    "battery.keyform.lit_re_first_overlap",
                     "battery.keyform.key_patterns_only_documented_gap")),
       f"ledger={_ks_ledger}")
 
