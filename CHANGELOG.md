@@ -1,5 +1,14 @@
 # Changelog
 
+## [v0.9.5] - 2026-08-28
+
+- Fix key-form masking inside URLs: a registered key in a URL query or
+  fragment now masks only its own value, so non-secret parameters
+  (`state=keep`, `view=public`) are no longer swallowed into the mask.
+- Extend the supported Hermes Agent range to **v0.20.6 (2026.8.27)** — the
+  redactor patch is apply-checked against all seven releases (v0.20.0 →
+  v0.20.6) plus current main.
+
 ## [v0.9.4] - 2026-08-26
 
 - Older releases could infer JSON input from the contents of a complete file.

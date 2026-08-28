@@ -214,6 +214,106 @@ check("fresh HERMES_HOME: default path resolved, value masked",
       proc.returncode == 0 and proc.stdout.strip() == "ig...bc",
       f"rc={proc.returncode} out={proc.stdout.strip()!r} err={proc.stderr.strip()[-200:]!r}")
 
+# ── v0.9.5 key-form URL query-swallow regression group (IG D160) ────────
+# The registry pass's key-form value class must terminate at URL query
+# separators when the key sits in query/fragment position (non-secret params
+# like state=keep are never swallowed), while plain env values containing '&'
+# stay fully masked. Probes run in a subprocess with a synthetic pattern file
+# (fresh engine cache; hermetic env; concatenated fixture values — gitleaks).
+_ksf = os.path.join(tmp, "keyform-synth.json")
+write(_ksf, {
+    "mask": {"head": 2, "tail": 2, "floor": 12},
+    "literals": ["rock" + "&roll"],
+    "key_patterns": {"access_token": "full", "client_secret": "full",
+                     "code": "full"},
+})
+_ksenv = dict(os.environ)
+_ksenv["HERMES_REDACT_PATTERNS"] = _ksf
+_ksenv["HERMES_HOME"] = os.path.join(tmp, "keyform-home")
+os.makedirs(_ksenv["HERMES_HOME"], exist_ok=True)
+_ks_base = (
+    "import sys; sys.path.insert(0, %r); "
+    "from agent.redact import redact_sensitive_text as r, "
+    "_redact_registry_patterns as reg; "
+    "T1 = 'SK-TOK-' + 'AAA111'; T2 = 'SK-CLIENT-' + 'BBB222'; "
+) % CHECKOUT
+
+# B1: URL query tail preserved — bounded key-form masking in query/fragment
+# position (a later registered key and non-secret params survive).
+_ksr = subprocess.run([sys.executable, "-c", _ks_base + (
+    "cases = ["
+    "('q1', 'https://x/cb?code=opaque-code-123&access_token=' + T1 + '&state=keep', ['state=keep', 'access_token=***'], [T1]),"
+    "('q2', 'https://x/cb?access_token=' + T1 + '&client_secret=' + T2 + '&state=keep', ['state=keep', 'access_token=***', 'client_secret=***'], [T1, T2]),"
+    "('q3', 'https://x/cb?access_token=' + T1 + '&state=keep#frag', ['state=keep', '#frag'], [T1]),"
+    "('q4', 'https://x.test/#access_token=' + T1 + '&view=public', ['view=public'], [T1]),"
+    "('q5', 'https://x/cb?state=keep&access_token=' + T1, ['state=keep'], [T1])"
+    "]; "
+    "out = [r(t, force=True, redact_url_credentials=True) for _, t, _, _ in cases]; "
+    "ok = all(all(m in o for m in must) and all(n not in o for n in mustnot) "
+    "         for (_, t, must, mustnot), o in zip(cases, out)); "
+    "sys.exit(0 if ok else 1)"
+)], env=_ksenv, capture_output=True, text=True, timeout=60)
+check("battery.keyform.url_query_tail_preserved: v0.9.5 D160 — query/fragment "
+      "key-form values mask BOUNDED at & / # (state=keep, view=public, #frag "
+      "and later registered keys survive; no tail swallow)",
+      _ksr.returncode == 0,
+      f"rc={_ksr.returncode} err={_ksr.stderr.strip()[-200:]!r}")
+
+# B2: plain env values containing '&' stay fully masked; the registry pass
+# itself never swallows a non-URL tail (CRIT-2 regression).
+_ksr = subprocess.run([sys.executable, "-c", _ks_base + (
+    "o1 = reg('access_token=rock&roll', file_read=False); "
+    "o2 = reg('log line &access_token=' + T1 + '&tail=visible', file_read=False); "
+    "ok = ('roll' not in o1) and ('access_token=***' in o1) "
+    "     and ('tail=visible' in o2) and (T1 not in o2); "
+    "sys.exit(0 if ok else 1)"
+)], env=_ksenv, capture_output=True, text=True, timeout=60)
+check("battery.keyform.env_value_ampersand_full_mask: v0.9.5 D160 — plain env "
+      "'&' values stay fully masked (no roll leak); the registry pass keeps "
+      "non-URL tails (CRIT-2 regression)",
+      _ksr.returncode == 0,
+      f"rc={_ksr.returncode} err={_ksr.stderr.strip()[-200:]!r}")
+
+# B3: registered exact literal containing '&' masked by the literal pass
+# (lit_re first) in URL context — no partial exposure, tail preserved.
+_ksr = subprocess.run([sys.executable, "-c", _ks_base + (
+    "o = reg('https://x/cb?access_token=rock&roll&state=keep', file_read=False); "
+    "ok = ('rock&roll' not in o) and ('roll' not in o) and ('state=keep' in o); "
+    "sys.exit(0 if ok else 1)"
+)], env=_ksenv, capture_output=True, text=True, timeout=60)
+check("battery.keyform.literal_ampersand_contexts: v0.9.5 D160 — registered "
+      "'&'-containing literal masked by lit_re (runs first) in URL context; "
+      "no partial exposure",
+      _ksr.returncode == 0,
+      f"rc={_ksr.returncode} err={_ksr.stderr.strip()[-200:]!r}")
+
+# B6: fail-closed — a REGISTERED key-form in a URL is masked even without the
+# upstream opt-in flag (upstream passes URL query params through by design;
+# registration is the user's opt-in — documented divergence, plan §0 note).
+_ksr = subprocess.run([sys.executable, "-c", _ks_base + (
+    "o = r('https://x/cb?access_token=' + T1 + '&state=keep', force=True); "
+    "ok = (T1 not in o) and ('state=keep' in o); "
+    "sys.exit(0 if ok else 1)"
+)], env=_ksenv, capture_output=True, text=True, timeout=60)
+check("battery.keyform.url_key_masked_without_flag: v0.9.5 D160 — registered "
+      "key-form in a URL masked even when redact_url_credentials=False "
+      "(fail-closed; upstream's own pass-through is covered by this layer)",
+      _ksr.returncode == 0,
+      f"rc={_ksr.returncode} err={_ksr.stderr.strip()[-200:]!r}")
+
+# B4: the keyform probes execute in every mode — named checks present in the
+# executed ledger (skip/absence fails; MAJ-7 closure).
+_ks_ledger = [l for l in EXECUTED_LABELS if l.startswith("battery.keyform.")]
+check("battery.keyform.checks_executed_all_modes: v0.9.5 D160 — all keyform "
+      "named checks executed (full + stripped + check --battery run the same "
+      "test.sh; a skip/absence fails here)",
+      all(any(l.startswith(n) for l in _ks_ledger)
+          for n in ("battery.keyform.url_query_tail_preserved",
+                    "battery.keyform.env_value_ampersand_full_mask",
+                    "battery.keyform.literal_ampersand_contexts",
+                    "battery.keyform.url_key_masked_without_flag")),
+      f"ledger={_ks_ledger}")
+
 # 7. external-audit F2 regression: the setup wizard must register
 #    gitleaks-only findings (not drop them as "value too short")
 setup_home = os.path.join(tmp, "setup-home")

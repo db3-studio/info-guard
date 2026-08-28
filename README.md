@@ -1,6 +1,6 @@
 # Info Guard
 
-Info Guard v0.9.4 protects the 20-term positive secret-key vocabulary, records
+Info Guard v0.9.5 protects the 20-term positive secret-key vocabulary, records
 skipped non-secret keys in the build report, accepts explicit multiline JSON
 literal input, warns (without rejecting) short literals, and distinguishes
 zero-scope watch (exit 2) from a scanned no-delta scope (exit 0). Build
@@ -28,8 +28,8 @@ After:   "the token is 7f...3c and the PIN is ***"
 
 | Setting | Value |
 |---|---|
-| Current Info Guard version | `0.9.4` |
-| Supported Hermes Agent versions | `v0.20.0` – `v0.20.5` |
+| Current Info Guard version | `0.9.5` |
+| Supported Hermes Agent versions | `v0.20.0` – `v0.20.6` |
 | Install location (canonical) | `~/.info-guard` |
 | Hermes home (`$HERMES_HOME`) | `~/.hermes` when unset |
 | `build` source | `$HERMES_HOME/.env` |
@@ -84,7 +84,7 @@ as v2.
 
 ## Install
 
-Requires a supported Hermes Agent version — **v0.20.0 through v0.20.5**
+Requires a supported Hermes Agent version — **v0.20.0 through v0.20.6**
 (the patch is one version-tolerant artifact, CI-checked across that range);
 later versions are unsupported until verified. `test.sh` is the package's
 own verification battery, separate from the upstream suite. Takes about two
@@ -151,7 +151,7 @@ cd ~/.info-guard
 That is the whole mechanism: `install.sh` patches your Hermes Agent checkout
 (`agent/redact.py` + 3 entry points) so the pattern file is read at every
 message boundary — and `~/.info-guard/uninstall.sh` reverses it cleanly.
-An unsupported Hermes version (outside v0.20.0–v0.20.5) fails the
+An unsupported Hermes version (outside v0.20.0–v0.20.6) fails the
 installer's version gate loudly — it never proceeds silently.
 
 **Your Hermes agent:**
@@ -312,7 +312,7 @@ reported as candidates, because they cannot be enrolled.
 More examples — value types, mask styles, key patterns — in
 `examples/redact_patterns.json.example` and `examples/custom_literals.json.example`.
 
-## Rotate secrets (v0.9.4)
+## Rotate secrets (v0.9.5)
 
 Rotation is an identity lifecycle: retire the old identity, establish a
 new one, preserve lineage, and activate the new identity automatically
@@ -434,7 +434,7 @@ Version history: see [CHANGELOG.md](CHANGELOG.md) for what changed in each
 release.
 
 The patch is one version-tolerant artifact, verified across the tested
-range (**v0.20.0 – v0.20.5**). `hermes update` autostashes and restores
+range (**v0.20.0 – v0.20.6**). `hermes update` autostashes and restores
 working-tree changes, so within the tested range the patch usually rides
 the update untouched — but a release that changes the patched code
 (v0.20.2 and v0.20.4 both did) can break the stash restore, and an
